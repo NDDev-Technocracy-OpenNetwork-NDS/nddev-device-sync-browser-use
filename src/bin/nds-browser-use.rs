@@ -12,11 +12,12 @@ use std::{path::PathBuf, time::Duration};
 
 const USAGE: &str = "usage:
   nds-browser-use status
+  nds-browser-use update
   nds-browser-use session new <project>
   nds-browser-use session list
   nds-browser-use session close <project> [--close-tabs]
   nds-browser-use -s <project> (-e <code> | -f <file>) [--timeout <ms>] [--expect <target>:<document>]
-  nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>) [--extension-id <web-store-id>]...";
+  nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)";
 const ARGUMENT_LIMIT: usize = 16;
 const CODE_LIMIT: usize = 60_000;
 
@@ -84,6 +85,10 @@ async fn client(words: &[&str]) -> ExitCode {
             .status(cancellation)
             .await
             .map(|status| print(&status)),
+        ["update"] => client
+            .update(cancellation)
+            .await
+            .map(|reload| print(&serde_json::json!({ "reload": reload }))),
         ["session", "new", project] => client
             .open(project, cancellation)
             .await
@@ -179,14 +184,13 @@ fn read_code(path: &str) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn install_host(words: &[&str]) -> ExitCode {
-    let (mut bun, mut executor, mut directory, mut extensions) = (None, None, None, Vec::new());
+    let (mut bun, mut executor, mut directory) = (None, None, None);
     let mut rest = words;
     while let [flag, value, tail @ ..] = rest {
         match *flag {
             "--bun" => bun = Some(PathBuf::from(value)),
             "--executor" => executor = Some(PathBuf::from(value)),
             "--host-dir" => directory = Some(Ok(PathBuf::from(value))),
-            "--extension-id" => extensions.push((*value).to_owned()),
             "--browser" => match install::Browser::parse(value) {
                 Some(browser) => directory = Some(install::host_directory(browser)),
                 None => return usage(),
@@ -201,14 +205,14 @@ fn install_host(words: &[&str]) -> ExitCode {
     let installed = directory.and_then(|directory| {
         let host = std::env::current_exe()
             .map_err(|_| nddev_device_sync_browser_use::IoError::Unavailable)?;
-        install::install(&host, &directory, &bun, &executor, &extensions)
+        install::install(&host, &directory, &bun, &executor)
     });
     match installed {
         Ok(installation) => {
             print(&serde_json::json!({
                 "manifest": installation.manifest,
                 "config": installation.config,
-                "extension_id": nddev_device_sync_browser_use::EXTENSION_ID,
+                "extension_ids": nddev_device_sync_browser_use::EXTENSION_IDS,
             }));
             ExitCode::SUCCESS
         }

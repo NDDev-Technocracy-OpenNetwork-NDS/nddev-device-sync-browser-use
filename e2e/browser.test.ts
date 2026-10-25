@@ -3,7 +3,16 @@
 // for that profile only and drives the agent CLI against a local fixture.
 // A separate Playwright pipe connection observes the browser independently.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type BrowserContext, chromium, type Page } from "playwright-core";
@@ -15,6 +24,10 @@ const root = mkdtempSync(join(tmpdir(), "nds-browser-use-acceptance-"));
 // Socket paths must fit sun_path; the run's own directory keeps it isolated.
 const runtime = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "nds-bu-"));
 const profile = join(root, "profile");
+// The same layout `just install` creates: the host finds its extension files
+// next to `bin/`, so an update can reload the unpacked build.
+const prefix = join(root, "prefix");
+const installed = join(prefix, "extension");
 const hostLog = join(root, "host.log");
 const extensionId = "lcdkocghcaakekcaeopjanfbohpfacbk";
 const env: Record<string, string> = {
@@ -76,7 +89,8 @@ beforeAll(async () => {
     fetch(request) {
       requests += 1;
       const page: Record<string, string> = {
-        "/": `<title>Fixture</title><button id="inc" onclick="c.textContent = Number(c.textContent) + 1">Increment</button><span id="c">0</span><button id="open" onclick="window.open('/target')">Open</button>`,
+        "/": `<title>Fixture</title><button id="inc" onclick="c.textContent = Number(c.textContent) + 1">Increment</button><span id="c">0</span><button id="open" onclick="window.open('/target')">Open</button><a id="link" href="/linked" target="_blank">Linked</a>`,
+        "/linked": "<title>Linked</title><p>linked</p>",
         "/target": "<title>Popup target</title><p>popup</p>",
         "/owner": "<title>Owner</title><p>owner work</p>",
         "/dialog": `<button id="ask" onclick="answer.textContent = confirm('Proceed?') ? 'accepted' : 'dismissed'">Ask</button><span id="answer"></span>`,
@@ -98,10 +112,17 @@ beforeAll(async () => {
   origin = `http://127.0.0.1:${fixture.port}`;
   // The host's stderr carries its local telemetry; keep it as evidence.
   const wrapper = join(root, "host.sh");
-  writeFileSync(wrapper, `#!/bin/sh\nexec '${binary}' "$@" 2>>'${hostLog}'\n`);
+  mkdirSync(join(prefix, "bin"), { recursive: true });
+  cpSync(binary, join(prefix, "bin", "nds-browser-use"));
+  chmodSync(join(prefix, "bin", "nds-browser-use"), 0o755);
+  cpSync(join(repository, "packages/extension"), installed, { recursive: true });
+  writeFileSync(
+    wrapper,
+    `#!/bin/sh\nexec '${join(prefix, "bin", "nds-browser-use")}' "$@" 2>>'${hostLog}'\n`,
+  );
   chmodSync(wrapper, 0o700);
   const hosts = join(profile, "NativeMessagingHosts");
-  const installed = await cli(
+  const registration = await cli(
     "install",
     "--bun",
     process.execPath,
@@ -110,19 +131,19 @@ beforeAll(async () => {
     "--host-dir",
     hosts,
   );
-  expect(installed.code).toBe(0);
+  expect(registration.code).toBe(0);
   const manifest = join(hosts, "ai.nddev.nds.browser_use.json");
   const registered = JSON.parse(readFileSync(manifest, "utf8"));
-  expect(registered.allowed_origins).toEqual([`chrome-extension://${extensionId}/`]);
+  expect(registered.allowed_origins).toEqual([
+    `chrome-extension://${extensionId}/`,
+    "chrome-extension://lpnfnhkdjamhnoknoohhmjfhhjkeofio/",
+  ]);
   writeFileSync(manifest, JSON.stringify({ ...registered, path: wrapper }));
   observer = await chromium.launchPersistentContext(profile, {
     executablePath: chrome,
     headless: true,
     env,
-    args: [
-      `--disable-extensions-except=${repository}/packages/extension`,
-      `--load-extension=${repository}/packages/extension`,
-    ],
+    args: [`--disable-extensions-except=${installed}`, `--load-extension=${installed}`],
   });
   // The observer stays passive: Playwright would otherwise dismiss every
   // dialog on pages it watches and race the agent's own handler.
@@ -196,11 +217,11 @@ test("a replaced document refuses an outdated expectation", async () => {
 test("popups opened by an agent page join the agent session", async () => {
   const result = await run(
     "acceptance",
-    `const [popup] = await Promise.all([context.waitForEvent("page"), state.page.click("#open")]); await popup.waitForLoadState(); return popup.url()`,
+    `const [popup] = await Promise.all([context.waitForEvent("page"), state.page.click("#open")]); await popup.waitForLoadState(); const [linked] = await Promise.all([context.waitForEvent("page"), state.page.click("#link")]); await linked.waitForLoadState(); return [popup.url(), linked.url()].join(" ")`,
     "--timeout",
     "20000",
   );
-  expect(result.body.output).toBe(`${origin}/target`);
+  expect(result.body.output).toBe(`${origin}/target ${origin}/linked`);
   const popup = tabs(result).find((tab) => tab.url === `${origin}/target`);
   expect(popup?.document).toBeString();
 });
@@ -345,7 +366,26 @@ test("closing a session cleans only its own area", async () => {
   expect((await run("acceptance", "1")).body.error).toBe("session_not_found");
 });
 
-test("browser exit ends the host and leaves no sockets", async () => {
+// The extension reloads itself when its installed files are newer, which ends
+// this host. Chrome for Testing disables command-line extensions on reload, so
+// the reloaded build itself is verified in a Load-unpacked browser.
+test("an updated install asks the unpacked extension to reload", async () => {
+  const manifestPath = join(installed, "manifest.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  expect((await cli("status")).body.extension).toBe(manifest.version);
+  expect((await cli("update")).body).toEqual({ reload: false });
+  writeFileSync(manifestPath, JSON.stringify({ ...manifest, version: "9.9.9" }));
+  expect((await cli("update")).body).toEqual({ reload: true });
+  let status: unknown;
+  for (let attempt = 0; attempt < 50 && status !== "unavailable"; attempt++) {
+    await Bun.sleep(100);
+    status = (await cli("status")).body.error;
+  }
+  expect(status).toBe("unavailable");
+  expect(readFileSync(hostLog, "utf8")).toContain('"error.type":"extension_closed"');
+});
+
+test("browser exit leaves no host or sockets", async () => {
   await observer.close();
   await Bun.sleep(500);
   const status = await cli("status");
@@ -365,6 +405,7 @@ test("host telemetry is schema-valid and carries no page data", () => {
     "browser.execute.completed",
     "browser.control.disabled",
     "browser.session.closed",
+    "browser.extension.reload",
     "browser.host.stopped",
   ]) {
     expect(names).toContain(name);

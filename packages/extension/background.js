@@ -6,6 +6,7 @@ const HOST = "ai.nddev.nds.browser_use";
 const PROTOCOL = "1.3";
 const ENABLED = "enabled";
 const GROUPS = "groups";
+const RELOADED_FOR = "reloadedFor";
 class Refusal extends Error {
 }
 let port;
@@ -42,7 +43,10 @@ function connect() {
     const next = chrome.runtime.connectNative(HOST);
     port = next;
     next.onMessage.addListener((message) => {
-        void handle(message);
+        if (message.type === "reload")
+            void reloadFor(message.version);
+        else
+            void handle(message);
     });
     next.onDisconnect.addListener(() => {
         // The host owned every session; without it no agent may keep control.
@@ -51,8 +55,23 @@ function connect() {
         setTimeout(connect, retry);
         retry = Math.min(retry * 2, 60_000);
     });
-    send({ type: "hello", protocol: PROTOCOL, userAgent: navigator.userAgent, enabled });
+    send({
+        type: "hello",
+        protocol: PROTOCOL,
+        version: chrome.runtime.getManifest().version,
+        userAgent: navigator.userAgent,
+        enabled,
+    });
     void badge();
+}
+// The host found newer files for this unpacked build on disk. One attempt per
+// version, recorded in local storage because a reload clears session storage.
+async function reloadFor(version) {
+    const stored = await chrome.storage.local.get(RELOADED_FOR);
+    if (stored[RELOADED_FOR] === version)
+        return;
+    await chrome.storage.local.set({ [RELOADED_FOR]: version });
+    chrome.runtime.reload();
 }
 async function handle(message) {
     retry = 1000;
@@ -199,13 +218,21 @@ function groupKey(groupId) {
             return key;
     return undefined;
 }
+// Tabs being announced; several Chrome events can report the same new tab.
+const adopting = new Set();
 async function adopt(tab, group) {
-    if (!enabled || !port || attached.has(tab))
+    if (!enabled || !port || attached.has(tab) || adopting.has(tab))
         return;
-    // A failed attach leaves the tab unattached; nothing is announced.
-    const target = await attach(tab, group).catch(() => undefined);
-    if (target !== undefined)
-        send({ type: "attached", tab, group, target });
+    adopting.add(tab);
+    try {
+        // A failed attach leaves the tab unattached; nothing is announced.
+        const target = await attach(tab, group).catch(() => undefined);
+        if (target !== undefined)
+            send({ type: "attached", tab, group, target });
+    }
+    finally {
+        adopting.delete(tab);
+    }
 }
 chrome.debugger.onEvent.addListener((source, method, params) => {
     if (source.tabId === undefined || !attached.has(source.tabId))
@@ -217,17 +244,25 @@ chrome.debugger.onDetach.addListener((source, reason) => {
         return;
     send({ type: "detached", tab: source.tabId, reason });
 });
-// Popups opened by an agent tab stay in the agent's area. Chrome usually
-// creates them inside the opener's group already; `openerTabId` may name the
-// active tab instead, so the group decides and Chrome's targetInfo carries
-// the real opener.
+// A tab created inside an agent group (for example with the group's "+")
+// belongs to that agent area.
 chrome.tabs.onCreated.addListener((tab) => {
-    const opener = tab.openerTabId;
-    const group = groupKey(tab.groupId) ?? (opener === undefined ? undefined : attached.get(opener));
-    if (tab.id === undefined || group === undefined)
+    const group = groupKey(tab.groupId);
+    if (tab.id !== undefined && group !== undefined)
+        void adopt(tab.id, group);
+});
+// Popups and target=_blank links opened by an agent tab stay in its area.
+// webNavigation names the real source tab, unlike `openerTabId`, and works
+// whether or not Chrome grouped the new tab itself.
+chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => {
+    const group = attached.get(details.sourceTabId);
+    if (group === undefined)
         return;
-    const id = tab.id;
+    const id = details.tabId;
     void own(id, async () => {
+        const tab = await chrome.tabs.get(id).catch(() => undefined);
+        if (!tab)
+            return;
         if (groupKey(tab.groupId) !== group)
             await join(id, group).catch(() => undefined);
         await adopt(id, group);
@@ -289,5 +324,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         reply({ enabled, connected: port !== undefined, tabs: attached.size });
     return false;
 });
+// Browser start and install/update/reload each start the worker; both connect.
 chrome.runtime.onStartup.addListener(connect);
+chrome.runtime.onInstalled.addListener(connect);
 void load().then(connect);

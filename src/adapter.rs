@@ -96,6 +96,16 @@ impl BrowserUse for BrowserUseClient {
         }
     }
 
+    async fn update(&self, cancellation: CancellationToken) -> Result<bool, Error> {
+        match self
+            .exchange(Request::Update, CONTROL_DEADLINE, cancellation)
+            .await?
+        {
+            Reply::Updated { reload } => Ok(reload),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
     async fn sessions(&self, cancellation: CancellationToken) -> Result<Vec<view::Session>, Error> {
         match self
             .exchange(Request::Sessions, CONTROL_DEADLINE, cancellation)

@@ -9,7 +9,7 @@ mod executor;
 mod relay;
 
 use crate::{
-    EXTENSION_ID, IoError,
+    EXTENSION_IDS, IoError, UNPACKED_EXTENSION_ID,
     protocol::{
         self, Document, FRAME_LIMIT, Header, MAX_SESSIONS, MAX_TABS, PAYLOAD_LIMIT, Refusal, Reply,
         Request,
@@ -47,8 +47,6 @@ pub struct Config {
     pub runtime: PathBuf,
     pub bun: PathBuf,
     pub executor: PathBuf,
-    /// Extension IDs admitted besides the pinned one (a Web Store build).
-    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -77,6 +75,8 @@ pub(crate) enum Waiter {
 
 pub(crate) struct Host {
     config: Config,
+    /// Manifest of the installed unpacked build this host can ask to reload.
+    installed: Option<PathBuf>,
     cdp_socket: PathBuf,
     outbound: mpsc::Sender<Vec<u8>>,
     pending: Mutex<HashMap<u64, Waiter>>,
@@ -88,6 +88,7 @@ pub(crate) struct Host {
 struct State {
     connected: bool,
     enabled: bool,
+    extension: String,
     browser: String,
     user_agent: String,
     sessions: HashMap<String, Session>,
@@ -115,8 +116,8 @@ struct Tab {
 }
 
 pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
-    let admitted = std::iter::once(EXTENSION_ID)
-        .chain(config.extensions.iter().map(String::as_str))
+    let admitted = EXTENSION_IDS
+        .iter()
         .any(|id| origin == format!("chrome-extension://{id}/"));
     if !admitted {
         return Err(HostError::Origin);
@@ -139,6 +140,7 @@ pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
         }
     });
     let host = Arc::new(Host {
+        installed: installed_manifest(origin),
         config,
         cdp_socket,
         outbound,
@@ -209,6 +211,40 @@ fn frame(body: &[u8]) -> Option<Vec<u8>> {
     framed.extend_from_slice(&(body.len() as u32).to_ne_bytes());
     framed.extend_from_slice(body);
     Some(framed)
+}
+
+/// `just install` places `bin/` and `extension/` under one prefix; only the
+/// unpacked build reloads from disk, the store build updates through the store.
+fn installed_manifest(origin: &str) -> Option<PathBuf> {
+    if origin != format!("chrome-extension://{UNPACKED_EXTENSION_ID}/") {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let manifest = exe
+        .parent()?
+        .parent()?
+        .join("extension")
+        .join("manifest.json");
+    manifest.is_file().then_some(manifest)
+}
+
+fn installed_version(manifest: &Path) -> Option<String> {
+    let bytes = std::fs::read(manifest)
+        .ok()
+        .filter(|bytes| bytes.len() <= 65_536)?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    let version = value["version"].as_str()?;
+    (!version.is_empty()
+        && version.len() <= 32
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.'))
+    .then(|| version.to_owned())
+}
+
+/// The version the running extension should reload to, if any.
+fn reload_target(running: &str, installed: Option<String>) -> Option<String> {
+    installed.filter(|installed| !running.is_empty() && installed != running)
 }
 
 fn tab_session(tab: i64) -> String {
@@ -291,6 +327,7 @@ impl Host {
                 state.connected = true;
                 state.enabled = message["enabled"].as_bool() == Some(true);
                 state.user_agent = bounded(message["userAgent"].as_str().unwrap_or_default(), 512);
+                state.extension = bounded(message["version"].as_str().unwrap_or_default(), 32);
                 state.browser = state
                     .user_agent
                     .split(' ')
@@ -302,12 +339,30 @@ impl Host {
                     .unwrap_or("Chrome")
                     .to_owned();
                 tracing::info!(event.name = "browser.extension.connected", outcome = "ok");
+                drop(state);
+                self.update();
             }
             Some("control") => self.on_control(message["enabled"].as_bool() == Some(true)),
             _ => {
                 tracing::warn!(event.name = "browser.extension.message", outcome = "rejected", error.type = "invalid_frame")
             }
         }
+    }
+
+    /// Asks an unpacked extension to reload when its installed files are newer.
+    fn update(&self) -> bool {
+        let installed = self.installed.as_deref().and_then(installed_version);
+        let Some(version) = reload_target(&self.state().extension, installed) else {
+            return false;
+        };
+        let body = serde_json::to_vec(&json!({ "type": "reload", "version": version }))
+            .unwrap_or_default();
+        let sent = frame(&body).is_some_and(|framed| self.outbound.try_send(framed).is_ok());
+        tracing::info!(
+            event.name = "browser.extension.reload",
+            outcome = if sent { "pending" } else { "error" }
+        );
+        sent
     }
 
     fn on_result(&self, message: &Value) {
@@ -605,8 +660,19 @@ impl Host {
                 Ok(Reply::Status(view::Status {
                     enabled: state.enabled,
                     browser: state.browser.clone(),
+                    extension: state.extension.clone(),
                     sessions: state.sessions.len(),
                 }))
+            }
+            Request::Update => {
+                if !self.state().connected {
+                    return Reply::Refused {
+                        refusal: Refusal::ExtensionUnavailable,
+                    };
+                }
+                Ok(Reply::Updated {
+                    reload: self.update(),
+                })
             }
             Request::Open { project } => self.open(&project).await.map(Reply::Session),
             Request::Sessions => {
@@ -954,6 +1020,28 @@ mod tests {
         let wrapped = cdp_error("No tab with given id 7.");
         assert_eq!(wrapped["code"], -32000);
         assert_eq!(wrapped["message"], "No tab with given id 7.");
+    }
+
+    #[test]
+    fn only_a_different_installed_version_triggers_a_reload() {
+        assert_eq!(
+            reload_target("0.0.1", Some("0.0.2".into())),
+            Some("0.0.2".into())
+        );
+        assert_eq!(reload_target("0.0.2", Some("0.0.2".into())), None);
+        assert_eq!(reload_target("", Some("0.0.2".into())), None);
+        assert_eq!(reload_target("0.0.1", None), None);
+    }
+
+    #[test]
+    fn installed_versions_are_bounded_and_numeric() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("manifest.json");
+        std::fs::write(&manifest, br#"{"version":"0.0.3"}"#).unwrap();
+        assert_eq!(installed_version(&manifest), Some("0.0.3".into()));
+        std::fs::write(&manifest, br#"{"version":"0.0.3; rm"}"#).unwrap();
+        assert_eq!(installed_version(&manifest), None);
+        assert_eq!(installed_version(&root.path().join("absent.json")), None);
     }
 
     #[test]
