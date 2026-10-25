@@ -26,6 +26,12 @@ use protocol::{Document, Refusal};
 
 /// Extension identity derived from the public key pinned in `packages/extension/manifest.json`.
 pub const EXTENSION_ID: &str = "lcdkocghcaakekcaeopjanfbohpfacbk";
+/// Chrome extension IDs are 32 characters `a`–`p`; a Chrome Web Store build
+/// gets its own ID, which `install` may admit next to the pinned one.
+pub fn valid_extension_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+}
+
 /// Chrome native messaging host name registered by `install`.
 pub const NATIVE_HOST: &str = "ai.nddev.nds.browser_use";
 
@@ -103,6 +109,17 @@ mod tests {
             .map(|nibble| (b'a' + nibble) as char)
             .collect();
         assert_eq!(id, super::EXTENSION_ID);
+    }
+
+    #[test]
+    fn extension_ids_use_chromes_alphabet() {
+        assert!(super::valid_extension_id(super::EXTENSION_ID));
+        assert!(!super::valid_extension_id(
+            "lcdkocghcaakekcaeopjanfbohpfacb"
+        ));
+        assert!(!super::valid_extension_id(
+            "lcdkocghcaakekcaeopjanfbohpfacbq"
+        ));
     }
 
     #[test]
