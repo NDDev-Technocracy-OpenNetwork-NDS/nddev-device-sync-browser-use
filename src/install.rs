@@ -53,6 +53,8 @@ pub fn host_directory(browser: Browser) -> Result<PathBuf, IoError> {
 struct HostConfig {
     bun: PathBuf,
     executor: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    extensions: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -61,7 +63,7 @@ struct HostManifest<'a> {
     description: &'a str,
     path: &'a Path,
     r#type: &'a str,
-    allowed_origins: [String; 1],
+    allowed_origins: Vec<String>,
 }
 
 pub struct Installation {
@@ -74,7 +76,14 @@ pub fn install(
     directory: &Path,
     bun: &Path,
     executor: &Path,
+    extensions: &[String],
 ) -> Result<Installation, IoError> {
+    if !extensions
+        .iter()
+        .all(|id| crate::valid_extension_id(id) && id != EXTENSION_ID)
+    {
+        return Err(IoError::InvalidConfiguration);
+    }
     for path in [host, directory, bun, executor] {
         if !path.is_absolute() {
             return Err(IoError::InvalidConfiguration);
@@ -88,7 +97,10 @@ pub fn install(
         description: "NDDev OpenNetwork NDS browser-use host",
         path: host,
         r#type: "stdio",
-        allowed_origins: [format!("chrome-extension://{EXTENSION_ID}/")],
+        allowed_origins: std::iter::once(EXTENSION_ID)
+            .chain(extensions.iter().map(String::as_str))
+            .map(|id| format!("chrome-extension://{id}/"))
+            .collect(),
     };
     let config_path = config_path()?;
     let parent = config_path.parent().ok_or(IoError::InvalidConfiguration)?;
@@ -99,6 +111,7 @@ pub fn install(
         &serde_json::to_vec_pretty(&HostConfig {
             bun: bun.into(),
             executor: executor.into(),
+            extensions: extensions.to_vec(),
         })
         .map_err(|_| IoError::InvalidConfiguration)?,
     )?;
@@ -122,6 +135,7 @@ pub fn load() -> Result<Config, IoError> {
         runtime: runtime::directory()?,
         bun: config.bun,
         executor: config.executor,
+        extensions: config.extensions,
     })
 }
 
@@ -170,7 +184,7 @@ mod tests {
             description: "",
             path: Path::new("/opt/nds/nds-browser-use"),
             r#type: "stdio",
-            allowed_origins: [format!("chrome-extension://{EXTENSION_ID}/")],
+            allowed_origins: vec![format!("chrome-extension://{EXTENSION_ID}/")],
         };
         let value = serde_json::to_value(&manifest).unwrap();
         assert_eq!(value["type"], "stdio");
@@ -183,6 +197,18 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte == b'.' || byte == b'_')
         );
+    }
+
+    #[test]
+    fn extra_extension_ids_are_validated_before_any_write() {
+        let path = Path::new("/nonexistent/nds-browser-use");
+        for invalid in ["short", "lcdkocghcaakekcaeopjanfbohpfacbz", EXTENSION_ID] {
+            assert_eq!(
+                install(path, path, path, path, &[invalid.to_owned()]).err(),
+                Some(IoError::InvalidConfiguration),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]
