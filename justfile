@@ -14,5 +14,6 @@ ts-check:
 # Real-browser acceptance in an isolated profile. Requires NDS_TEST_CHROME
 # (Chrome for Testing); on AppArmor-restricted hosts also CHROME_DEVEL_SANDBOX.
 browser-check:
+    bun install --frozen-lockfile --ignore-scripts
     cargo build --locked
     NDS_TEST_HOST="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/nds-browser-use" bun run e2e

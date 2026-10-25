@@ -32,9 +32,9 @@ spec:
     purpose: manifest
     reason: NDS module descriptor owned by the product standards corpus.
     decision: {state: approved, by: rldyourmnd, date: "2026-10-22", origin: document, reference: standarts/decisions/0013-estate-hygiene-and-standards-adoption.md}
-  - paths: [standarts.lock]
+  - paths: [standarts.lock, provider.lock.json]
     purpose: lock
-    reason: NDS contract lock pinning the standards source.
+    reason: NDS contract locks pinning the standards source and the Chrome for Testing acceptance provider.
     decision: {state: approved, by: rldyourmnd, date: "2026-10-22", origin: document, reference: standarts/decisions/0013-estate-hygiene-and-standards-adoption.md}
   - paths: [contracts]
     purpose: manifest

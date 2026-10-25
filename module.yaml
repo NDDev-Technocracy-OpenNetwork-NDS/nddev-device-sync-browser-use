@@ -7,3 +7,4 @@ repository: NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-browser-use
 standards_lock: standarts.lock
 runtime_manifest: contracts/module.json
 platforms: [linux]
+native_provider: provider.lock.json

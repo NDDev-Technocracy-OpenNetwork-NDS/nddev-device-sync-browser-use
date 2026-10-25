@@ -1,7 +1,7 @@
 [advisories]
 yanked = "deny"
 [licenses]
-allow = ["AGPL-3.0-only", "Apache-2.0", "BSD-3-Clause", "ISC", "MIT", "Unicode-3.0", "Zlib", "CDLA-Permissive-2.0"]
+allow = ["AGPL-3.0-only", "Apache-2.0", "BSD-3-Clause", "ISC", "MIT", "MIT-0", "Unicode-3.0", "Zlib"]
 confidence-threshold = 0.95
 [bans]
 multiple-versions = "warn"
