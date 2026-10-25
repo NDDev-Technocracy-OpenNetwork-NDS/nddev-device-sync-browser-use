@@ -100,6 +100,9 @@ struct Session {
     client: Option<relay::Client>,
     executor: Option<executor::Executor>,
     running: bool,
+    /// Raw CDP sessions the current client opened (`newCDPSession`); they end
+    /// with the client, the session or their tab.
+    aliases: HashMap<String, relay::Alias>,
 }
 
 struct Tab {
@@ -397,6 +400,15 @@ impl Host {
             }
             _ => {}
         }
+        // Raw CDP sessions on this tab receive its top-level events as well.
+        let aliases: Vec<String> = match (&child, state.sessions.get(&project)) {
+            (None, Some(session)) => relay::tab_aliases(session, tab),
+            _ => Vec::new(),
+        };
+        for alias in aliases {
+            let event = json!({ "method": method, "params": params, "sessionId": alias });
+            deliver(&mut state, &project, event);
+        }
         let session = child.unwrap_or_else(|| tab_session(tab));
         let event = json!({ "method": method, "params": params, "sessionId": session });
         deliver(&mut state, &project, event);
@@ -467,6 +479,9 @@ impl Host {
             return;
         };
         state.children.retain(|_, owner| *owner != tab);
+        for event in relay::close_aliases(&mut state, &entry.project, tab, &entry.target) {
+            deliver(&mut state, &entry.project, event);
+        }
         let event = json!({
             "method": "Target.detachedFromTarget",
             "params": { "sessionId": tab_session(tab), "targetId": entry.target },
@@ -642,6 +657,7 @@ impl Host {
                 client: None,
                 executor: None,
                 running: false,
+                aliases: HashMap::new(),
             };
             state.sessions.insert(project.to_owned(), session);
         }

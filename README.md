@@ -17,7 +17,22 @@ the host for one Chrome profile root; loading the unpacked extension stays the
 owner's action. Status: alpha work in progress, Linux only, not qualified and
 not a replacement for Playwriter in current NDS acceptance.
 
-Run `just check`, then `just browser-check` with `NDS_TEST_CHROME` set to a
-Chrome for Testing binary.
+Agent code runs as an async function body with `context`, `browser`, a
+persistent `state` object, `artifacts` (the session's private directory for
+screenshots and files, removed with the session), `snapshot(page)` for an
+ARIA snapshot, and `fetch`/timers. A single expression is returned; otherwise
+use `return`. `context.pages()` lists only the session's tabs, and
+`context.newCDPSession(page)` gives raw CDP for those tabs. Each reply lists
+the tabs with `target` and `document`; pass `--expect <target>:<document>` to
+refuse running against a replaced document.
+
+Limits: Chrome serves WebAuthn only to a focused page, so a passkey step needs
+`page.bringToFront()` and visibly activates the agent tab. Browser-chrome and
+OS dialogs, real authenticators' user verification, downloads events,
+browser-wide cookies, new browser contexts and permission grants are outside
+`chrome.debugger`.
+
+Run `just check`, then `just browser-check` with `NDS_TEST_CHROME` set to the
+Chrome for Testing build pinned in `provider.lock.json`.
 
 Release journals live in [GitHub Releases](https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-browser-use/releases).

@@ -79,6 +79,15 @@ beforeAll(async () => {
         "/": `<title>Fixture</title><button id="inc" onclick="c.textContent = Number(c.textContent) + 1">Increment</button><span id="c">0</span><button id="open" onclick="window.open('/target')">Open</button>`,
         "/target": "<title>Popup target</title><p>popup</p>",
         "/owner": "<title>Owner</title><p>owner work</p>",
+        "/dialog": `<button id="ask" onclick="answer.textContent = confirm('Proceed?') ? 'accepted' : 'dismissed'">Ask</button><span id="answer"></span>`,
+        "/form": `<input id="text" oninput="echo.textContent = this.value"><span id="echo"></span><input id="file" type="file" onchange="picked.textContent = this.files[0].name + ':' + this.files[0].size"><span id="picked"></span>`,
+        "/fetch": `<button id="load" onclick="fetch('/api').then((r) => r.text()).then((t) => (out.textContent = t))">Load</button><span id="out"></span>`,
+        "/api": "live",
+        // A different site (localhost vs 127.0.0.1) renders out of process.
+        "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
+        "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
+        // WebAuthn needs a domain RP ID; localhost is a secure context.
+        "/passkey": `<button id="register" onclick="navigator.credentials.create({ publicKey: { rp: { name: 'NDS', id: 'localhost' }, user: { id: new Uint8Array(16), name: 'agent', displayName: 'Agent' }, challenge: new Uint8Array(32), pubKeyCredParams: [{ type: 'public-key', alg: -7 }], authenticatorSelection: { residentKey: 'required', userVerification: 'required' } } }).then(() => (outcome.textContent = 'registered'), (e) => (outcome.textContent = e.name))">Register</button><button id="signin" onclick="navigator.credentials.get({ publicKey: { rpId: 'localhost', challenge: new Uint8Array(32), userVerification: 'required' } }).then(() => (outcome.textContent = 'signed-in'), (e) => (outcome.textContent = e.name))">Sign in</button><span id="outcome"></span>`,
       };
       const body = page[new URL(request.url).pathname];
       return body === undefined
@@ -115,6 +124,10 @@ beforeAll(async () => {
       `--load-extension=${repository}/packages/extension`,
     ],
   });
+  // The observer stays passive: Playwright would otherwise dismiss every
+  // dialog on pages it watches and race the agent's own handler.
+  for (const page of observer.pages()) page.on("dialog", () => undefined);
+  observer.on("page", (page) => page.on("dialog", () => undefined));
   for (let attempt = 0; attempt < 100 && !existsSync(join(runtime, "control.sock")); attempt++) {
     await Bun.sleep(100);
   }
@@ -192,6 +205,80 @@ test("popups opened by an agent page join the agent session", async () => {
   expect(popup?.document).toBeString();
 });
 
+test("the agent answers JavaScript dialogs", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/dialog"); page.once("dialog", (dialog) => dialog.accept()); await page.click("#ask"); return await page.locator("#answer").textContent()`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body.output).toBe("accepted");
+  expect(await (await observed("/dialog"))?.locator("#answer").textContent()).toBe("accepted");
+});
+
+test("keyboard input and file uploads reach the page", async () => {
+  const upload = join(runtime, "sessions", "acceptance", "upload.txt");
+  writeFileSync(upload, "nds");
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/form"); await page.locator("#text").pressSequentially("typed"); await page.setInputFiles("#file", "${upload}"); return [await page.locator("#echo").textContent(), await page.locator("#picked").textContent()].join(" ")`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body.output).toBe("typed upload.txt:3");
+});
+
+test("network interception and cross-origin frames work in agent tabs", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.route("**/api", (route) => route.fulfill({ body: "intercepted" })); await page.goto("${origin}/fetch"); await page.click("#load"); await page.locator("#out", { hasText: "intercepted" }).waitFor(); const frames = await context.newPage(); await frames.goto("${origin}/frame"); await frames.frameLocator("iframe").locator("#inner").click(); return [await page.locator("#out").textContent(), await frames.frameLocator("iframe").locator("#inner").textContent()].join(" ")`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body.output).toBe("intercepted inside");
+  const frame = (await observed("/frame"))
+    ?.frames()
+    .find((candidate) => candidate.url().endsWith("/inner"));
+  expect(await frame?.locator("#inner").textContent()).toBe("inside");
+});
+
+// Chrome serves WebAuthn only to a focused page: a background agent tab is
+// refused, and the agent must bring its tab to the front for a passkey step.
+test("raw CDP sessions reach agent tabs, including a virtual authenticator", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("http://localhost:${fixture.port}/passkey");
+     const outcome = page.locator("#outcome");
+     const cdp = await context.newCDPSession(page);
+     await cdp.send("WebAuthn.enable", { enableUI: false });
+     const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
+     const added = new Promise((done) => cdp.once("WebAuthn.credentialAdded", () => done("event")));
+     await page.click("#register"); await outcome.filter({ hasText: /./ }).waitFor();
+     const background = await outcome.textContent();
+     await page.bringToFront();
+     await page.click("#register"); await outcome.filter({ hasText: "registered" }).waitFor();
+     await page.click("#signin"); await outcome.filter({ hasText: "signed-in" }).waitFor();
+     const { credentials } = await cdp.send("WebAuthn.getCredentials", { authenticatorId });
+     const event = await added; await cdp.detach();
+     return [background, await outcome.textContent(), credentials.length, event].join(" ")`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body.output).toBe("NotAllowedError signed-in 1 event");
+});
+
+test("screenshots are written inside the session area", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = context.pages().find((candidate) => candidate.url().endsWith("/form")); const path = artifacts + "/form.png"; await page.screenshot({ path }); return path`,
+    "--timeout",
+    "20000",
+  );
+  const path = String(result.body.output);
+  expect(path).toBe(join(runtime, "sessions", "acceptance", "form.png"));
+  expect([...readFileSync(path).subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+});
+
 test("concurrent execution in one session is refused as busy", async () => {
   const slow = run(
     "acceptance",
@@ -254,6 +341,7 @@ test("closing a session cleans only its own area", async () => {
   expect(await observed("/")).toBeUndefined();
   expect(await observed("/owner")).toBeDefined();
   expect(existsSync(join(runtime, "sessions", "acceptance"))).toBe(false);
+  expect(await observed("/frame")).toBeUndefined();
   expect((await run("acceptance", "1")).body.error).toBe("session_not_found");
 });
 
