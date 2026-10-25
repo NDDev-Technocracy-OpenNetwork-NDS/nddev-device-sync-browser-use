@@ -3,3 +3,4 @@
 .nds/generated.json linguist-generated
 CLAUDE.md linguist-generated
 extension/background.js linguist-generated
+extension/popup.js linguist-generated
