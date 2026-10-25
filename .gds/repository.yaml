@@ -1,0 +1,42 @@
+schema_version: 1
+repository:
+  id: "repo_01M5SNCV6BG8Y5YA2MXVVFNYRZ"
+  display_name: "nddev-device-sync-browser-use"
+  roles:
+    - "project"
+  lifecycle: "active"
+provider:
+  type: "github"
+  installation: "installation:github-nddev-technocracy-opennetwork-nds"
+  repository_id: 1433251174
+  owner: "NDDev-Technocracy-OpenNetwork-NDS"
+  name: "nddev-device-sync-browser-use"
+classification:
+  portfolios:
+    - "portfolio:nddev-technocracy-opennetwork-nds"
+  visibility_contract: "public"
+  data_classification: "public"
+product:
+  purpose: "AGPL-3.0-only NDS adapter. Lets agents drive owner-granted Chrome tab groups through an NDS-owned extension, native messaging and per-session Playwright execution, without a network listener."
+  capabilities:
+    - "Agent tab groups per project in the owner's running Chrome"
+    - "Bounded per-session Playwright execution with typed failures"
+policy:
+  profiles:
+    - "repository-default"
+    - "opennetwork-default"
+  rollout_ring: "standard"
+git:
+  default_branch: "main"
+  integration: "pull-request"
+  branch_model: "task-branches"
+  handoff_pr: "preferred"
+  cleanup: "merged-only"
+agent:
+  context_profile: "project-default"
+  generated_agents: false
+  serena:
+    enabled: false
+    provenance_required: false
+release:
+  mode: "none"
