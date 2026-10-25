@@ -113,7 +113,10 @@ beforeAll(async () => {
   expect(installed.code).toBe(0);
   const manifest = join(hosts, "ai.nddev.nds.browser_use.json");
   const registered = JSON.parse(readFileSync(manifest, "utf8"));
-  expect(registered.allowed_origins).toEqual([`chrome-extension://${extensionId}/`]);
+  expect(registered.allowed_origins).toEqual([
+    `chrome-extension://${extensionId}/`,
+    "chrome-extension://lpnfnhkdjamhnoknoohhmjfhhjkeofio/",
+  ]);
   writeFileSync(manifest, JSON.stringify({ ...registered, path: wrapper }));
   observer = await chromium.launchPersistentContext(profile, {
     executablePath: chrome,

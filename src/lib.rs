@@ -24,13 +24,12 @@ pub use adapter::BrowserUseClient;
 pub use nddev_device_sync_adapter_io::{CancellationToken, IoError, LocalIo, NativeIo};
 use protocol::{Document, Refusal};
 
-/// Extension identity derived from the public key pinned in `packages/extension/manifest.json`.
-pub const EXTENSION_ID: &str = "lcdkocghcaakekcaeopjanfbohpfacbk";
-/// Chrome extension IDs are 32 characters `a`–`p`; a Chrome Web Store build
-/// gets its own ID, which `install` may admit next to the pinned one.
-pub fn valid_extension_id(id: &str) -> bool {
-    id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
-}
+/// Unpacked build: the ID follows the public key pinned in `packages/extension/manifest.json`.
+pub const UNPACKED_EXTENSION_ID: &str = "lcdkocghcaakekcaeopjanfbohpfacbk";
+/// The same extension published in the Chrome Web Store, which assigns its own key.
+pub const STORE_EXTENSION_ID: &str = "lpnfnhkdjamhnoknoohhmjfhhjkeofio";
+/// Every build the native host admits; Chrome enforces the same list.
+pub const EXTENSION_IDS: [&str; 2] = [UNPACKED_EXTENSION_ID, STORE_EXTENSION_ID];
 
 /// Chrome native messaging host name registered by `install`.
 pub const NATIVE_HOST: &str = "ai.nddev.nds.browser_use";
@@ -108,18 +107,18 @@ mod tests {
             .flat_map(|byte| [byte >> 4, byte & 0x0f])
             .map(|nibble| (b'a' + nibble) as char)
             .collect();
-        assert_eq!(id, super::EXTENSION_ID);
+        assert_eq!(id, super::UNPACKED_EXTENSION_ID);
     }
 
     #[test]
     fn extension_ids_use_chromes_alphabet() {
-        assert!(super::valid_extension_id(super::EXTENSION_ID));
-        assert!(!super::valid_extension_id(
-            "lcdkocghcaakekcaeopjanfbohpfacb"
-        ));
-        assert!(!super::valid_extension_id(
-            "lcdkocghcaakekcaeopjanfbohpfacbq"
-        ));
+        for id in super::EXTENSION_IDS {
+            assert!(
+                id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte)),
+                "{id}"
+            );
+        }
+        assert_ne!(super::UNPACKED_EXTENSION_ID, super::STORE_EXTENSION_ID);
     }
 
     #[test]

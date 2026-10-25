@@ -43,7 +43,8 @@ event names, outcomes and durations, never page data.
 
 Run `just check`, then `just browser-check` with `NDS_TEST_CHROME` set to the
 Chrome for Testing build pinned in `provider.lock.json`. `just install
-<browser>` installs locally; `just package` builds the Chrome Web Store zip,
-whose store-assigned ID is admitted with `install --extension-id`.
+<browser>` installs locally; `just package` builds the Chrome Web Store zip.
+The host admits the pinned unpacked build and the published store item
+`lpnfnhkdjamhnoknoohhmjfhhjkeofio`.
 
 Release journals live in [GitHub Releases](https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-browser-use/releases).
