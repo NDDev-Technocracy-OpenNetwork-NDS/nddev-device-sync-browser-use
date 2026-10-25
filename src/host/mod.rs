@@ -9,7 +9,7 @@ mod executor;
 mod relay;
 
 use crate::{
-    EXTENSION_ID, IoError,
+    EXTENSION_IDS, IoError,
     protocol::{
         self, Document, FRAME_LIMIT, Header, MAX_SESSIONS, MAX_TABS, PAYLOAD_LIMIT, Refusal, Reply,
         Request,
@@ -47,8 +47,6 @@ pub struct Config {
     pub runtime: PathBuf,
     pub bun: PathBuf,
     pub executor: PathBuf,
-    /// Extension IDs admitted besides the pinned one (a Web Store build).
-    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -115,8 +113,8 @@ struct Tab {
 }
 
 pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
-    let admitted = std::iter::once(EXTENSION_ID)
-        .chain(config.extensions.iter().map(String::as_str))
+    let admitted = EXTENSION_IDS
+        .iter()
         .any(|id| origin == format!("chrome-extension://{id}/"));
     if !admitted {
         return Err(HostError::Origin);
