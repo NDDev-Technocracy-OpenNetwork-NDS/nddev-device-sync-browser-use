@@ -34,8 +34,64 @@ const COMMAND_LIMIT: usize = 1_048_576;
 /// Results such as full-page screenshots return through the 32 MiB extension limit.
 const MESSAGE_LIMIT: usize = 32 * 1_048_576;
 const BROWSER_TARGET: &str = "nds-browser";
+/// Raw CDP sessions per agent session.
+const ALIASES: usize = 64;
 
 static NEXT_CLIENT: AtomicU64 = AtomicU64::new(1);
+static NEXT_ALIAS: AtomicU64 = AtomicU64::new(1);
+
+/// A raw CDP session opened by Playwright's `newCDPSession`: a browser-level
+/// root first, then one per attached agent tab under that root.
+pub(crate) enum Alias {
+    Browser,
+    Tab { tab: i64, parent: String },
+}
+
+pub(super) fn tab_aliases(session: &super::Session, tab: i64) -> Vec<String> {
+    session
+        .aliases
+        .iter()
+        .filter(|(_, alias)| matches!(alias, Alias::Tab { tab: owner, .. } if *owner == tab))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// Ends the raw sessions of a closed tab, announcing each on its parent.
+pub(super) fn close_aliases(
+    state: &mut super::State,
+    project: &str,
+    tab: i64,
+    target: &str,
+) -> Vec<Value> {
+    let Some(session) = state.sessions.get_mut(project) else {
+        return Vec::new();
+    };
+    let closed: Vec<(String, String)> = session
+        .aliases
+        .iter()
+        .filter_map(|(id, alias)| match alias {
+            Alias::Tab { tab: owner, parent } if *owner == tab => {
+                Some((id.clone(), parent.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    closed
+        .into_iter()
+        .map(|(id, parent)| {
+            session.aliases.remove(&id);
+            detached_event(&id, target, &parent)
+        })
+        .collect()
+}
+
+fn detached_event(session: &str, target: &str, parent: &str) -> Value {
+    json!({
+        "method": "Target.detachedFromTarget",
+        "params": { "sessionId": session, "targetId": target },
+        "sessionId": parent,
+    })
+}
 
 pub(crate) struct Client {
     pub id: u64,
@@ -146,7 +202,11 @@ async fn connection(host: Arc<Host>, stream: UnixStream) {
         let Ok(permit) = in_flight.clone().acquire_owned().await else {
             break;
         };
-        if command["sessionId"].is_string() {
+        let via = command["sessionId"].as_str().map(str::to_owned);
+        if via
+            .as_deref()
+            .is_some_and(|via| !host.browser_alias(&project, via))
+        {
             // Target commands are queued here, in arrival order.
             host.forward(&project, id, command, permit).await;
             continue;
@@ -154,7 +214,7 @@ async fn connection(host: Arc<Host>, stream: UnixStream) {
         let (host, project, outbound) = (host.clone(), project.clone(), outbound.clone());
         tokio::spawn(async move {
             let _permit = permit;
-            let reply = host.browser(&project, id, command).await;
+            let reply = host.browser(&project, id, via, command).await;
             let _ = outbound.send(reply.to_string()).await;
         });
     }
@@ -196,14 +256,46 @@ impl Host {
                 .is_some_and(|client| client.id == id)
         }) {
             session.client = None;
+            session.aliases.clear();
         }
     }
 
-    async fn browser(&self, project: &str, client: u64, command: Value) -> Value {
+    fn browser_alias(&self, project: &str, session: &str) -> bool {
+        self.state()
+            .sessions
+            .get(project)
+            .and_then(|current| current.aliases.get(session))
+            .is_some_and(|alias| matches!(alias, Alias::Browser))
+    }
+
+    async fn browser(
+        &self,
+        project: &str,
+        client: u64,
+        via: Option<String>,
+        command: Value,
+    ) -> Value {
         let method = command["method"].as_str().unwrap_or_default();
         let params = command.get("params").cloned().unwrap_or_else(|| json!({}));
-        let result = self.browser_command(project, client, method, params).await;
-        reply(command["id"].clone(), None, result)
+        let result = self
+            .browser_command(project, client, via.as_deref(), method, params)
+            .await;
+        reply(command["id"].clone(), via, result)
+    }
+
+    /// Opens a raw CDP session alias for the current session.
+    fn alias(&self, project: &str, alias: Alias) -> Result<Value, Failure> {
+        let mut state = self.state();
+        let session = state
+            .sessions
+            .get_mut(project)
+            .ok_or(Failure::Refused(crate::protocol::Refusal::SessionNotFound))?;
+        if session.aliases.len() >= ALIASES {
+            return Err(Failure::Refused(crate::protocol::Refusal::Capacity));
+        }
+        let id = format!("nds-cdp-{}", NEXT_ALIAS.fetch_add(1, Ordering::Relaxed));
+        session.aliases.insert(id.clone(), alias);
+        Ok(json!({ "sessionId": id }))
     }
 
     /// Routes a target command to its agent tab; the reply arrives through
@@ -241,10 +333,39 @@ impl Host {
         &self,
         project: &str,
         client: u64,
+        via: Option<&str>,
         method: &str,
         params: Value,
     ) -> Result<Value, Failure> {
         match method {
+            "Target.attachToBrowserTarget" => self.alias(project, Alias::Browser),
+            "Target.attachToTarget" => {
+                let tab =
+                    self.owned_target(project, params["targetId"].as_str().unwrap_or_default())?;
+                let parent = via.unwrap_or_default().to_owned();
+                self.alias(project, Alias::Tab { tab, parent })
+            }
+            "Target.detachFromTarget" => {
+                let alias = params["sessionId"].as_str().unwrap_or_default();
+                let mut state = self.state();
+                let session = state.sessions.get_mut(project);
+                let removed = session.and_then(|session| match session.aliases.get(alias) {
+                    Some(Alias::Tab { tab, parent }) => {
+                        let found = (*tab, parent.clone());
+                        session.aliases.remove(alias);
+                        Some(found)
+                    }
+                    _ => None,
+                });
+                let (tab, parent) = removed.ok_or_else(not_found)?;
+                let target = state
+                    .tabs
+                    .get(&tab)
+                    .map(|entry| entry.target.clone())
+                    .unwrap_or_default();
+                super::deliver(&mut state, project, detached_event(alias, &target, &parent));
+                Ok(json!({}))
+            }
             "Browser.getVersion" => {
                 let state = self.state();
                 Ok(json!({
@@ -348,15 +469,22 @@ impl Host {
     ) -> Result<Value, Failure> {
         let (tab, child) = {
             let state = self.state();
+            let alias = state.sessions.get(project).and_then(|current| {
+                match current.aliases.get(session) {
+                    Some(Alias::Tab { tab, .. }) => Some(*tab),
+                    _ => None,
+                }
+            });
             let (tab, child) = match state
                 .tabs
                 .iter()
                 .find(|(id, _)| tab_session(**id) == session)
             {
                 Some((id, _)) => (*id, None),
-                None => match state.children.get(session) {
-                    Some(tab) => (*tab, Some(session.to_owned())),
-                    None => return Err(not_found()),
+                None => match (alias, state.children.get(session)) {
+                    (Some(tab), _) => (tab, None),
+                    (None, Some(tab)) => (*tab, Some(session.to_owned())),
+                    (None, None) => return Err(not_found()),
                 },
             };
             if state
@@ -417,4 +545,49 @@ pub(super) fn attached_event(tab: i64, info: &Value) -> Value {
 
 fn not_found() -> Failure {
     Failure::Cdp(json!({ "code": -32001, "message": "Session with given id not found." }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::{Session, State};
+    use std::collections::HashMap;
+
+    #[test]
+    fn closing_a_tab_ends_only_its_raw_sessions_on_their_parent() {
+        let mut aliases = HashMap::new();
+        aliases.insert("root".to_owned(), Alias::Browser);
+        aliases.insert(
+            "tab-7".to_owned(),
+            Alias::Tab {
+                tab: 7,
+                parent: "root".to_owned(),
+            },
+        );
+        aliases.insert(
+            "tab-8".to_owned(),
+            Alias::Tab {
+                tab: 8,
+                parent: "root".to_owned(),
+            },
+        );
+        let mut state = State::default();
+        state.sessions.insert(
+            "nds".to_owned(),
+            Session {
+                token: String::new(),
+                artifacts: std::path::PathBuf::new(),
+                client: None,
+                executor: None,
+                running: false,
+                aliases,
+            },
+        );
+        assert_eq!(tab_aliases(&state.sessions["nds"], 7), ["tab-7"]);
+        let events = close_aliases(&mut state, "nds", 7, "TARGET");
+        assert_eq!(events, [detached_event("tab-7", "TARGET", "root")]);
+        let remaining: Vec<&String> = state.sessions["nds"].aliases.keys().collect();
+        assert_eq!(remaining.len(), 2);
+        assert!(close_aliases(&mut state, "other", 8, "TARGET").is_empty());
+    }
 }
