@@ -47,6 +47,8 @@ pub struct Config {
     pub runtime: PathBuf,
     pub bun: PathBuf,
     pub executor: PathBuf,
+    /// Extension IDs admitted besides the pinned one (a Web Store build).
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -113,7 +115,10 @@ struct Tab {
 }
 
 pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
-    if origin != format!("chrome-extension://{EXTENSION_ID}/") {
+    let admitted = std::iter::once(EXTENSION_ID)
+        .chain(config.extensions.iter().map(String::as_str))
+        .any(|id| origin == format!("chrome-extension://{id}/"));
+    if !admitted {
         return Err(HostError::Origin);
     }
     if !config.bun.is_absolute() || !config.executor.is_absolute() {

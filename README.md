@@ -27,12 +27,23 @@ the tabs with `target` and `document`; pass `--expect <target>:<document>` to
 refuse running against a replaced document.
 
 Limits: Chrome serves WebAuthn only to a focused page, so a passkey step needs
-`page.bringToFront()` and visibly activates the agent tab. Browser-chrome and
-OS dialogs, real authenticators' user verification, downloads events,
+`page.bringToFront()` and visibly activates the agent tab. Chrome keeps every
+extension out of `chrome://` pages and the Chrome Web Store. Browser-chrome
+and OS dialogs, real authenticators' user verification, downloads events,
 browser-wide cookies, new browser contexts and permission grants are outside
 `chrome.debugger`.
 
+## Privacy
+
+The extension talks only to the NDS host installed on the same device. Page
+content, URLs, screenshots and agent code stay on that device: results go to
+the local agent that asked for them, and artifacts are deleted with the
+session. Nothing is sent to NDDev or third parties; local telemetry carries
+event names, outcomes and durations, never page data.
+
 Run `just check`, then `just browser-check` with `NDS_TEST_CHROME` set to the
-Chrome for Testing build pinned in `provider.lock.json`.
+Chrome for Testing build pinned in `provider.lock.json`. `just install
+<browser>` installs locally; `just package` builds the Chrome Web Store zip,
+whose store-assigned ID is admitted with `install --extension-id`.
 
 Release journals live in [GitHub Releases](https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-browser-use/releases).

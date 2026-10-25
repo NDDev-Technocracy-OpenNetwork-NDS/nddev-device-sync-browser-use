@@ -16,7 +16,7 @@ const USAGE: &str = "usage:
   nds-browser-use session list
   nds-browser-use session close <project> [--close-tabs]
   nds-browser-use -s <project> (-e <code> | -f <file>) [--timeout <ms>] [--expect <target>:<document>]
-  nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)";
+  nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>) [--extension-id <web-store-id>]...";
 const ARGUMENT_LIMIT: usize = 16;
 const CODE_LIMIT: usize = 60_000;
 
@@ -179,13 +179,14 @@ fn read_code(path: &str) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn install_host(words: &[&str]) -> ExitCode {
-    let (mut bun, mut executor, mut directory) = (None, None, None);
+    let (mut bun, mut executor, mut directory, mut extensions) = (None, None, None, Vec::new());
     let mut rest = words;
     while let [flag, value, tail @ ..] = rest {
         match *flag {
             "--bun" => bun = Some(PathBuf::from(value)),
             "--executor" => executor = Some(PathBuf::from(value)),
             "--host-dir" => directory = Some(Ok(PathBuf::from(value))),
+            "--extension-id" => extensions.push((*value).to_owned()),
             "--browser" => match install::Browser::parse(value) {
                 Some(browser) => directory = Some(install::host_directory(browser)),
                 None => return usage(),
@@ -200,7 +201,7 @@ fn install_host(words: &[&str]) -> ExitCode {
     let installed = directory.and_then(|directory| {
         let host = std::env::current_exe()
             .map_err(|_| nddev_device_sync_browser_use::IoError::Unavailable)?;
-        install::install(&host, &directory, &bun, &executor)
+        install::install(&host, &directory, &bun, &executor, &extensions)
     });
     match installed {
         Ok(installation) => {

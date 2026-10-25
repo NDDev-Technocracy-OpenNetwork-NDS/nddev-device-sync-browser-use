@@ -1,0 +1,9 @@
+{
+  "source_repository": "NDDev-Technocracy-OpenNetwork-NDS/nddev-opennetwork-design-system",
+  "source_commit": "2836fd982c786d68a4701614638b7f864de8513b",
+  "source_path": "assets/nddev-mark.svg",
+  "source_sha256": "3997b08aa3c47d0d5827484db657c8e18a53dc0a00e1a875cc57eb931c6f4877",
+  "foreground": "color.accent-brand #FFD83F",
+  "background": "color.surface-base #000000",
+  "composition": "Original mark at 70% of a 256 px canvas on a rounded square (radius 48), rendered with Chrome for Testing 156.0.8078.47 at 16, 32, 48 and 128 px."
+}
