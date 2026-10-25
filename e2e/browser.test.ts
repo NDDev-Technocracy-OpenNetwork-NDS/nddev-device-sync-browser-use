@@ -76,7 +76,8 @@ beforeAll(async () => {
     fetch(request) {
       requests += 1;
       const page: Record<string, string> = {
-        "/": `<title>Fixture</title><button id="inc" onclick="c.textContent = Number(c.textContent) + 1">Increment</button><span id="c">0</span><button id="open" onclick="window.open('/target')">Open</button>`,
+        "/": `<title>Fixture</title><button id="inc" onclick="c.textContent = Number(c.textContent) + 1">Increment</button><span id="c">0</span><button id="open" onclick="window.open('/target')">Open</button><a id="link" href="/linked" target="_blank">Linked</a>`,
+        "/linked": "<title>Linked</title><p>linked</p>",
         "/target": "<title>Popup target</title><p>popup</p>",
         "/owner": "<title>Owner</title><p>owner work</p>",
         "/dialog": `<button id="ask" onclick="answer.textContent = confirm('Proceed?') ? 'accepted' : 'dismissed'">Ask</button><span id="answer"></span>`,
@@ -199,11 +200,11 @@ test("a replaced document refuses an outdated expectation", async () => {
 test("popups opened by an agent page join the agent session", async () => {
   const result = await run(
     "acceptance",
-    `const [popup] = await Promise.all([context.waitForEvent("page"), state.page.click("#open")]); await popup.waitForLoadState(); return popup.url()`,
+    `const [popup] = await Promise.all([context.waitForEvent("page"), state.page.click("#open")]); await popup.waitForLoadState(); const [linked] = await Promise.all([context.waitForEvent("page"), state.page.click("#link")]); await linked.waitForLoadState(); return [popup.url(), linked.url()].join(" ")`,
     "--timeout",
     "20000",
   );
-  expect(result.body.output).toBe(`${origin}/target`);
+  expect(result.body.output).toBe(`${origin}/target ${origin}/linked`);
   const popup = tabs(result).find((tab) => tab.url === `${origin}/target`);
   expect(popup?.document).toBeString();
 });
