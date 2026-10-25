@@ -65,11 +65,19 @@ pub(crate) enum Failure {
     Cdp(Value),
 }
 
+/// Who receives the extension's answer to one request.
+pub(crate) enum Waiter {
+    Reply(oneshot::Sender<Result<Value, Failure>>),
+    /// A client's CDP command. Its reply is queued from the extension reader,
+    /// so responses and events reach the client in the order Chrome sent them.
+    Forward(relay::Forward),
+}
+
 pub(crate) struct Host {
     config: Config,
     cdp_socket: PathBuf,
     outbound: mpsc::Sender<Vec<u8>>,
-    pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, Failure>>>>,
+    pending: Mutex<HashMap<u64, Waiter>>,
     next_request: AtomicU64,
     state: Mutex<State>,
 }
@@ -133,6 +141,7 @@ pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
     tracing::info!(event.name = "browser.host.started", outcome = "ready");
     let control_task = tokio::spawn(host.clone().serve_control(control));
     let relay_task = tokio::spawn(relay::serve(host.clone(), cdp));
+    let sweep_task = tokio::spawn(host.clone().sweep());
     let mut stdin = tokio::io::stdin();
     let ended = loop {
         match read_message(&mut stdin).await {
@@ -146,6 +155,7 @@ pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
     };
     control_task.abort();
     relay_task.abort();
+    sweep_task.abort();
     host.shutdown();
     writer.abort();
     tracing::info!(event.name = "browser.host.stopped", outcome = "stopped", error.type = ended);
@@ -217,25 +227,32 @@ impl Host {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn pending(&self) -> MutexGuard<'_, HashMap<u64, oneshot::Sender<Result<Value, Failure>>>> {
+    fn pending(&self) -> MutexGuard<'_, HashMap<u64, Waiter>> {
         self.pending
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// One bounded request to the extension with a correlated reply.
-    pub(crate) async fn request(&self, mut message: Value) -> Result<Value, Failure> {
+    /// Queues one message to the extension. Callers that submit in sequence
+    /// keep their order, which CDP requires within a session.
+    pub(crate) async fn submit(&self, mut message: Value, waiter: Waiter) -> Result<u64, Failure> {
         let id = self.next_request.fetch_add(1, Ordering::Relaxed);
         message["id"] = id.into();
         let body =
             serde_json::to_vec(&message).map_err(|_| Failure::Refused(Refusal::InvalidRequest))?;
         let framed = frame(&body).ok_or(Failure::Refused(Refusal::PayloadLimit))?;
-        let (reply, response) = oneshot::channel();
-        self.pending().insert(id, reply);
+        self.pending().insert(id, waiter);
         if self.outbound.send(framed).await.is_err() {
             self.pending().remove(&id);
             return Err(Failure::Refused(Refusal::ExtensionUnavailable));
         }
+        Ok(id)
+    }
+
+    /// One bounded request to the extension with a correlated reply.
+    pub(crate) async fn request(&self, message: Value) -> Result<Value, Failure> {
+        let (reply, response) = oneshot::channel();
+        let id = self.submit(message, Waiter::Reply(reply)).await?;
         match tokio::time::timeout(EXTENSION_REPLY, response).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(Failure::Refused(Refusal::ExtensionUnavailable)),
@@ -286,7 +303,7 @@ impl Host {
     }
 
     fn on_result(&self, message: &Value) {
-        let Some(reply) = message["id"]
+        let Some(waiter) = message["id"]
             .as_u64()
             .and_then(|id| self.pending().remove(&id))
         else {
@@ -300,7 +317,57 @@ impl Host {
                 _ => Failure::Cdp(cdp_error(error["message"].as_str().unwrap_or_default())),
             }),
         };
-        let _ = reply.send(result);
+        match waiter {
+            Waiter::Reply(reply) => {
+                let _ = reply.send(result);
+            }
+            Waiter::Forward(forward) => self.answer(forward, result),
+        }
+    }
+
+    /// Delivers a forwarded command's reply to the client that sent it.
+    pub(crate) fn answer(&self, forward: relay::Forward, result: Result<Value, Failure>) {
+        let reply = relay::reply(forward.id.clone(), Some(forward.session.clone()), result);
+        self.reply_to(&forward.project, forward.client, reply);
+    }
+
+    /// Queues a message for one specific client connection, if it is still current.
+    pub(crate) fn reply_to(&self, project: &str, client: u64, message: Value) {
+        let mut state = self.state();
+        let current = state
+            .sessions
+            .get(project)
+            .and_then(|session| session.client.as_ref())
+            .is_some_and(|current| current.id == client);
+        if current {
+            deliver(&mut state, project, message);
+        }
+    }
+
+    /// Replies that Chrome never answered fail visibly instead of waiting forever.
+    async fn sweep(self: Arc<Self>) {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let now = Instant::now();
+            let expired: Vec<relay::Forward> = {
+                let mut pending = self.pending();
+                let ids: Vec<u64> = pending
+                    .iter()
+                    .filter(|(_, waiter)| matches!(waiter, Waiter::Forward(forward) if forward.deadline <= now))
+                    .map(|(id, _)| *id)
+                    .collect();
+                ids.into_iter()
+                    .filter_map(|id| match pending.remove(&id) {
+                        Some(Waiter::Forward(forward)) => Some(forward),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            for forward in expired {
+                self.answer(forward, Err(Failure::Refused(Refusal::Timeout)));
+            }
+        }
     }
 
     fn on_event(&self, message: Value) {
@@ -341,30 +408,27 @@ impl Host {
             return;
         };
         let mut state = self.state();
-        let mut info = message["target"].clone();
-        if let Some(opener) = message["opener"]
-            .as_i64()
-            .and_then(|opener| state.tabs.get(&opener))
-        {
-            info["openerId"] = opener.target.clone().into();
-        }
-        if !self.register(&mut state, project, tab, info) {
+        // Chrome's own targetInfo carries the real openerId for popups.
+        if !self.register(&mut state, project, tab, message["target"].clone()) {
             return;
         }
         tracing::info!(event.name = "browser.target.attached", outcome = "ok");
     }
 
-    /// Records an agent tab and announces it to an auto-attaching client.
+    /// Records an agent tab and announces it once to an auto-attaching client.
     fn register(&self, state: &mut State, project: &str, tab: i64, info: Value) -> bool {
         let Some(target) = info["targetId"].as_str().map(str::to_owned) else {
             return false;
         };
+        if state.tabs.contains_key(&tab) {
+            return true;
+        }
         let owned = state
             .tabs
             .values()
             .filter(|entry| entry.project == project)
             .count();
-        if !state.tabs.contains_key(&tab) && owned >= MAX_TABS {
+        if owned >= MAX_TABS {
             tracing::warn!(event.name = "browser.target.attached", outcome = "rejected", error.type = "capacity");
             return false;
         }
@@ -740,36 +804,51 @@ impl Host {
         })
     }
 
+    /// Current agent tabs; Chrome's live answer also refreshes each document.
     async fn tabs(&self, project: &str) -> Vec<view::Tab> {
-        let mut tabs: Vec<(i64, view::Tab)> = self
-            .state()
-            .tabs
-            .iter()
-            .filter(|(_, tab)| tab.project == project)
-            .map(|(id, tab)| {
-                let view = view::Tab {
+        let ids: Vec<i64> = {
+            let state = self.state();
+            let mut ids: Vec<i64> = state
+                .tabs
+                .iter()
+                .filter(|(_, tab)| tab.project == project)
+                .map(|(id, _)| *id)
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+        let live = self
+            .refusable(json!({ "type": "tabs", "tabs": ids }))
+            .await
+            .unwrap_or_default();
+        let mut state = self.state();
+        ids.iter()
+            .filter_map(|id| {
+                let entry = live["tabs"]
+                    .as_array()
+                    .and_then(|tabs| tabs.iter().find(|entry| entry["tab"].as_i64() == Some(*id)));
+                let tab = state.tabs.get_mut(id)?;
+                if let Some(document) = entry.and_then(|entry| entry["document"].as_str()) {
+                    tab.document = Some(document.to_owned());
+                }
+                Some(view::Tab {
                     target: tab.target.clone(),
                     document: tab.document.clone(),
-                    url: String::new(),
-                    title: String::new(),
-                };
-                (*id, view)
+                    url: bounded(
+                        entry
+                            .and_then(|entry| entry["url"].as_str())
+                            .unwrap_or_default(),
+                        URL_LIMIT,
+                    ),
+                    title: bounded(
+                        entry
+                            .and_then(|entry| entry["title"].as_str())
+                            .unwrap_or_default(),
+                        TITLE_LIMIT,
+                    ),
+                })
             })
-            .collect();
-        tabs.sort_by_key(|(id, _)| *id);
-        let ids: Vec<i64> = tabs.iter().map(|(id, _)| *id).collect();
-        if let Ok(live) = self.refusable(json!({ "type": "tabs", "tabs": ids })).await {
-            for entry in live["tabs"].as_array().into_iter().flatten() {
-                if let Some((_, tab)) = tabs
-                    .iter_mut()
-                    .find(|(id, _)| Some(*id) == entry["tab"].as_i64())
-                {
-                    tab.url = bounded(entry["url"].as_str().unwrap_or_default(), URL_LIMIT);
-                    tab.title = bounded(entry["title"].as_str().unwrap_or_default(), TITLE_LIMIT);
-                }
-            }
-        }
-        tabs.into_iter().map(|(_, tab)| tab).collect()
+            .collect()
     }
 }
 

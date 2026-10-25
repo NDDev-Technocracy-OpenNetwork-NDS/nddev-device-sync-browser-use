@@ -23,7 +23,7 @@ pub struct Session {
 #[serde(deny_unknown_fields)]
 pub struct Tab {
     pub target: String,
-    /// Main-frame loader of the current document; absent before its first navigation event.
+    /// Main-frame loader of the document Chrome reported when this reply was built.
     pub document: Option<String>,
     pub url: String,
     pub title: String,

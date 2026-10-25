@@ -24,6 +24,11 @@ let retry = 1000;
 let groups = new Map<string, number>();
 // Attached agent tab -> its group key.
 const attached = new Map<number, string>();
+// One attach attempt per tab, shared by concurrent callers.
+const attaching = new Map<number, Promise<unknown>>();
+// Tabs this worker is grouping itself; their announcement belongs to that path,
+// not to the owner-sharing handler.
+const grouping = new Set<number>();
 
 async function load(): Promise<void> {
   const local = await chrome.storage.local.get(ENABLED);
@@ -92,8 +97,11 @@ async function dispatch(message: HostRequest): Promise<unknown> {
     case "open": {
       const tab = await chrome.tabs.create({ url: message.url, active: false });
       if (tab.id === undefined) throw new Refusal("target_closed");
-      await join(tab.id, message.group);
-      return { tab: tab.id, target: await attach(tab.id, message.group) };
+      const id = tab.id;
+      return own(id, async () => {
+        await join(id, message.group);
+        return { tab: id, target: await attach(id, message.group) };
+      });
     }
     case "close": {
       if (!attached.has(message.tab)) throw new Refusal("target_closed");
@@ -123,7 +131,13 @@ async function dispatch(message: HostRequest): Promise<unknown> {
       for (const id of message.tabs) {
         if (!attached.has(id)) continue;
         const tab = await chrome.tabs.get(id).catch(() => undefined);
-        if (tab) result.push({ tab: id, url: tab.url ?? "", title: tab.title ?? "" });
+        if (!tab) continue;
+        // The current main-frame loader identifies the document agents see now.
+        const tree = (await chrome.debugger
+          .sendCommand({ tabId: id }, "Page.getFrameTree")
+          .catch(() => undefined)) as { frameTree?: { frame?: { loaderId?: string } } } | undefined;
+        const document = tree?.frameTree?.frame?.loaderId;
+        result.push({ tab: id, url: tab.url ?? "", title: tab.title ?? "", document });
       }
       return { tabs: result };
     }
@@ -156,15 +170,30 @@ async function join(tab: number, group: string): Promise<void> {
   await saveGroups();
 }
 
-async function attach(tab: number, group: string): Promise<unknown> {
-  if (!attached.has(tab)) {
-    await chrome.debugger.attach({ tabId: tab }, PROTOCOL);
-    attached.set(tab, group);
+async function own<T>(tab: number, work: () => Promise<T>): Promise<T> {
+  grouping.add(tab);
+  try {
+    return await work();
+  } finally {
+    grouping.delete(tab);
   }
-  const info = (await chrome.debugger.sendCommand({ tabId: tab }, "Target.getTargetInfo")) as {
-    targetInfo: unknown;
-  };
-  return info.targetInfo;
+}
+
+function attach(tab: number, group: string): Promise<unknown> {
+  const current = attaching.get(tab);
+  if (current) return current;
+  const next = (async () => {
+    if (!attached.has(tab)) {
+      await chrome.debugger.attach({ tabId: tab }, PROTOCOL);
+      attached.set(tab, group);
+    }
+    const info = (await chrome.debugger.sendCommand({ tabId: tab }, "Target.getTargetInfo")) as {
+      targetInfo: unknown;
+    };
+    return info.targetInfo;
+  })().finally(() => attaching.delete(tab));
+  attaching.set(tab, next);
+  return next;
 }
 
 async function detachAll(): Promise<void> {
@@ -180,13 +209,11 @@ function groupKey(groupId: number | undefined): string | undefined {
   return undefined;
 }
 
-async function adopt(tab: number, group: string, opener?: number): Promise<void> {
+async function adopt(tab: number, group: string): Promise<void> {
   if (!enabled || !port || attached.has(tab)) return;
-  try {
-    send({ type: "attached", tab, group, opener, target: await attach(tab, group) });
-  } catch {
-    attached.delete(tab);
-  }
+  // A failed attach leaves the tab unattached; nothing is announced.
+  const target = await attach(tab, group).catch(() => undefined);
+  if (target !== undefined) send({ type: "attached", tab, group, target });
 }
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
@@ -199,30 +226,43 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   send({ type: "detached", tab: source.tabId, reason });
 });
 
-// Popups opened by an agent tab stay in the agent's area.
+// Popups opened by an agent tab stay in the agent's area. Chrome usually
+// creates them inside the opener's group already; `openerTabId` may name the
+// active tab instead, so the group decides and Chrome's targetInfo carries
+// the real opener.
 chrome.tabs.onCreated.addListener((tab) => {
   const opener = tab.openerTabId;
-  const group = opener === undefined ? undefined : attached.get(opener);
+  const group = groupKey(tab.groupId) ?? (opener === undefined ? undefined : attached.get(opener));
   if (tab.id === undefined || group === undefined) return;
   const id = tab.id;
-  void join(id, group)
-    .catch(() => undefined)
-    .then(() => adopt(id, group, opener));
+  void own(id, async () => {
+    if (groupKey(tab.groupId) !== group) await join(id, group).catch(() => undefined);
+    await adopt(id, group);
+  });
 });
 
 // Moving a tab into an agent group shares it; moving it out revokes control.
 chrome.tabs.onUpdated.addListener((tabId, change) => {
-  if (change.groupId === undefined) return;
+  if (change.groupId === undefined || grouping.has(tabId)) return;
   const current = attached.get(tabId);
   const target = groupKey(change.groupId);
   if (current !== undefined && current !== target) {
-    attached.delete(tabId);
-    void chrome.debugger.detach({ tabId }).catch(() => undefined);
-    send({ type: "detached", tab: tabId, reason: "revoked" });
+    void revoke(tabId);
   } else if (current === undefined && target !== undefined) {
     void adopt(tabId, target);
   }
 });
+
+// Closing tabs and windows also clears their group; that is a closed target
+// reported by onDetach, not the owner moving the tab out of the agent area.
+async function revoke(tabId: number): Promise<void> {
+  const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+  const window = tab && (await chrome.windows.get(tab.windowId).catch(() => undefined));
+  if (!tab || !window || groupKey(tab.groupId) !== undefined) return;
+  if (!attached.delete(tabId)) return;
+  await chrome.debugger.detach({ tabId }).catch(() => undefined);
+  send({ type: "detached", tab: tabId, reason: "revoked" });
+}
 
 chrome.tabGroups.onRemoved.addListener((group) => {
   const key = groupKey(group.id);

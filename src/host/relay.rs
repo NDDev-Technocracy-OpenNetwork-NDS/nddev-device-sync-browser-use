@@ -4,17 +4,20 @@
 //! browser-level calls Playwright needs and limits every target to the
 //! session's own tab group. Commands it cannot honour fail visibly.
 
-use super::{Failure, Host, MAX_TABS, tab_session};
+use super::{EXTENSION_REPLY, Failure, Host, MAX_TABS, Waiter, tab_session};
 use crate::CancellationToken;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
 };
 use tokio::{
     net::{UnixListener, UnixStream},
-    sync::{Semaphore, mpsc},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
 };
 use tokio_tungstenite::tungstenite::{
     Message,
@@ -45,6 +48,16 @@ impl Client {
     pub fn send(&self, message: &Value) -> bool {
         self.outbound.try_send(message.to_string()).is_ok()
     }
+}
+
+/// A client command awaiting Chrome's reply; holds one in-flight slot.
+pub(crate) struct Forward {
+    pub project: String,
+    pub client: u64,
+    pub id: Value,
+    pub session: String,
+    pub deadline: Instant,
+    _permit: OwnedSemaphorePermit,
 }
 
 impl Drop for Client {
@@ -133,10 +146,15 @@ async fn connection(host: Arc<Host>, stream: UnixStream) {
         let Ok(permit) = in_flight.clone().acquire_owned().await else {
             break;
         };
+        if command["sessionId"].is_string() {
+            // Target commands are queued here, in arrival order.
+            host.forward(&project, id, command, permit).await;
+            continue;
+        }
         let (host, project, outbound) = (host.clone(), project.clone(), outbound.clone());
         tokio::spawn(async move {
             let _permit = permit;
-            let reply = host.command(&project, id, command).await;
+            let reply = host.browser(&project, id, command).await;
             let _ = outbound.send(reply.to_string()).await;
         });
     }
@@ -181,31 +199,42 @@ impl Host {
         }
     }
 
-    async fn command(&self, project: &str, client: u64, command: Value) -> Value {
-        let id = command["id"].clone();
-        let method = command["method"].as_str().unwrap_or_default().to_owned();
+    async fn browser(&self, project: &str, client: u64, command: Value) -> Value {
+        let method = command["method"].as_str().unwrap_or_default();
         let params = command.get("params").cloned().unwrap_or_else(|| json!({}));
-        let session = command["sessionId"].as_str().map(str::to_owned);
-        let result = match &session {
-            None => self.browser_command(project, client, &method, params).await,
-            Some(session) => self.target_command(project, session, &method, params).await,
+        let result = self.browser_command(project, client, method, params).await;
+        reply(command["id"].clone(), None, result)
+    }
+
+    /// Routes a target command to its agent tab; the reply arrives through
+    /// [`Host::answer`] in the extension's order.
+    async fn forward(
+        &self,
+        project: &str,
+        client: u64,
+        command: Value,
+        permit: OwnedSemaphorePermit,
+    ) {
+        let session = command["sessionId"].as_str().unwrap_or_default().to_owned();
+        let forward = Forward {
+            project: project.to_owned(),
+            client,
+            id: command["id"].clone(),
+            session: session.clone(),
+            deadline: Instant::now() + EXTENSION_REPLY,
+            _permit: permit,
         };
-        let mut reply = match result {
-            Ok(result) => json!({ "id": id, "result": result }),
-            Err(Failure::Cdp(error)) => json!({ "id": id, "error": error }),
-            Err(Failure::Refused(refusal)) => {
-                let message = if refusal == crate::protocol::Refusal::TargetClosed {
-                    "Target closed".to_owned()
-                } else {
-                    refusal.to_string()
-                };
-                json!({ "id": id, "error": { "code": -32000, "message": message } })
-            }
+        let method = command["method"].as_str().unwrap_or_default();
+        let params = command.get("params").cloned().unwrap_or_else(|| json!({}));
+        let message = match self.route(project, &session, method, params) {
+            Ok(message) => message,
+            Err(failure) => return self.answer(forward, Err(failure)),
         };
-        if let Some(session) = session {
-            reply["sessionId"] = session.into();
+        let (id, session) = (forward.id.clone(), forward.session.clone());
+        if let Err(failure) = self.submit(message, Waiter::Forward(forward)).await {
+            // A failed submission drops its waiter; answer the client directly.
+            self.reply_to(project, client, reply(id, Some(session), Err(failure)));
         }
-        reply
     }
 
     async fn browser_command(
@@ -310,7 +339,7 @@ impl Host {
         }
     }
 
-    async fn target_command(
+    fn route(
         &self,
         project: &str,
         session: &str,
@@ -343,7 +372,7 @@ impl Host {
         if let Some(child) = child {
             message["session"] = child.into();
         }
-        self.request(message).await
+        Ok(message)
     }
 
     fn owned_target(&self, project: &str, target: &str) -> Result<i64, Failure> {
@@ -357,6 +386,26 @@ impl Host {
                 Failure::Cdp(json!({ "code": -32602, "message": "No target with given id found" }))
             })
     }
+}
+
+/// A CDP response for one client command.
+pub(super) fn reply(id: Value, session: Option<String>, result: Result<Value, Failure>) -> Value {
+    let mut reply = match result {
+        Ok(result) => json!({ "id": id, "result": result }),
+        Err(Failure::Cdp(error)) => json!({ "id": id, "error": error }),
+        Err(Failure::Refused(refusal)) => {
+            let message = if refusal == crate::protocol::Refusal::TargetClosed {
+                "Target closed".to_owned()
+            } else {
+                refusal.to_string()
+            };
+            json!({ "id": id, "error": { "code": -32000, "message": message } })
+        }
+    };
+    if let Some(session) = session {
+        reply["sessionId"] = session.into();
+    }
+    reply
 }
 
 pub(super) fn attached_event(tab: i64, info: &Value) -> Value {

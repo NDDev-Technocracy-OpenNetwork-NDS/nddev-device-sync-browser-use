@@ -188,7 +188,8 @@ test("popups opened by an agent page join the agent session", async () => {
     "20000",
   );
   expect(result.body.output).toBe(`${origin}/target`);
-  expect(tabs(result).map((tab) => tab.url)).toContain(`${origin}/target`);
+  const popup = tabs(result).find((tab) => tab.url === `${origin}/target`);
+  expect(popup?.document).toBeString();
 });
 
 test("concurrent execution in one session is refused as busy", async () => {
@@ -218,14 +219,15 @@ test("a timeout stops the run before its later action and resets state", async (
 });
 
 test("a closed tab is reported, not acted on", async () => {
+  const before = new Set(tabs(await run("acceptance", "1")).map((tab) => tab.target));
   const opened = await run(
     "acceptance",
     `state.closing = await context.newPage(); await state.closing.goto("${origin}/target"); return "open"`,
     "--timeout",
     "20000",
   );
-  const target = tabs(opened).find((tab) => tab.url === `${origin}/target` && tab.document);
-  if (!target) throw new Error("closing tab is missing");
+  const target = tabs(opened).find((tab) => !before.has(tab.target));
+  if (!target?.document) throw new Error("closing tab is missing");
   await run("acceptance", "await state.closing.close(); return 'closed'");
   const refused = await run("acceptance", "1", "--expect", `${target.target}:${target.document}`);
   expect(refused.body.error).toBe("target_closed");
