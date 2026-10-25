@@ -4,10 +4,10 @@ AGPL-3.0-only NDS module. [NDDev OpenNetwork](https://nddev.ai).
 
 Agent browser automation inside owner-granted Chrome tab groups, as defined by
 [ADR 0015](https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync/blob/dev/standarts/decisions/0015-agent-browser-automation.md).
-The pinned MV3 extension (`extension/`) attaches only to NDS tab groups and
+The pinned MV3 extension (`packages/extension`) attaches only to NDS tab groups and
 talks to the Rust host through Chrome native messaging. The host serves agents
 on a private Unix socket and runs each session's Playwright code in a Bun
-executor (`executor/`) connected to a session-scoped CDP endpoint. There is
+executor (`packages/executor`) connected to a session-scoped CDP endpoint. There is
 no TCP listener, debugging port, tunnel or vendor telemetry.
 
 Agent CLI: `nds-browser-use session new <project>`, then

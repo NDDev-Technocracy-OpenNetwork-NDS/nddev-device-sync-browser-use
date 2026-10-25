@@ -24,7 +24,7 @@ pub use adapter::BrowserUseClient;
 pub use nddev_device_sync_adapter_io::{CancellationToken, IoError, LocalIo, NativeIo};
 use protocol::{Document, Refusal};
 
-/// Extension identity derived from the public key pinned in `extension/manifest.json`.
+/// Extension identity derived from the public key pinned in `packages/extension/manifest.json`.
 pub const EXTENSION_ID: &str = "lcdkocghcaakekcaeopjanfbohpfacbk";
 /// Chrome native messaging host name registered by `install`.
 pub const NATIVE_HOST: &str = "ai.nddev.nds.browser_use";
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn extension_id_matches_the_pinned_manifest_key() {
         let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../extension/manifest.json")).unwrap();
+            serde_json::from_str(include_str!("../packages/extension/manifest.json")).unwrap();
         let key = manifest["key"].as_str().unwrap();
         let der = decode_base64(key);
         let digest = Sha256::digest(&der);

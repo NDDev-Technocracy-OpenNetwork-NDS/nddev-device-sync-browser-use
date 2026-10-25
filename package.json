@@ -5,10 +5,10 @@
   "type": "module",
   "packageManager": "bun@1.4.4",
   "scripts": {
-    "check": "tsc -p tsconfig.extension.json --noEmit && tsc -p tsconfig.executor.json && tsc -p tsconfig.acceptance.json && biome check extension/src executor acceptance",
+    "check": "tsc -p tsconfig.extension.json --noEmit && tsc -p tsconfig.executor.json && tsc -p tsconfig.e2e.json && biome check packages e2e",
     "generate": "tsc -p tsconfig.extension.json",
-    "check:generated": "tsc -p tsconfig.extension.json && git diff --exit-code -- extension/background.js extension/popup.js",
-    "acceptance": "bun test acceptance --timeout 60000"
+    "check:generated": "tsc -p tsconfig.extension.json && git diff --exit-code -- packages/extension/background.js packages/extension/popup.js",
+    "e2e": "bun test e2e --timeout 60000"
   },
   "dependencies": {
     "playwright-core": "1.64.1"

@@ -15,4 +15,4 @@ ts-check:
 # (Chrome for Testing); on AppArmor-restricted hosts also CHROME_DEVEL_SANDBOX.
 browser-check:
     cargo build --locked
-    NDS_TEST_HOST="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/nds-browser-use" bun run acceptance
+    NDS_TEST_HOST="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/nds-browser-use" bun run e2e

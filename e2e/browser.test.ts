@@ -97,7 +97,7 @@ beforeAll(async () => {
     "--bun",
     process.execPath,
     "--executor",
-    join(repository, "executor/executor.ts"),
+    join(repository, "packages/executor/executor.ts"),
     "--host-dir",
     hosts,
   );
@@ -111,8 +111,8 @@ beforeAll(async () => {
     headless: true,
     env,
     args: [
-      `--disable-extensions-except=${repository}/extension`,
-      `--load-extension=${repository}/extension`,
+      `--disable-extensions-except=${repository}/packages/extension`,
+      `--load-extension=${repository}/packages/extension`,
     ],
   });
   for (let attempt = 0; attempt < 100 && !existsSync(join(runtime, "control.sock")); attempt++) {
