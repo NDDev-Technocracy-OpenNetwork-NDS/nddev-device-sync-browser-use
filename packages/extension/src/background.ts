@@ -6,6 +6,7 @@ const HOST = "ai.nddev.nds.browser_use";
 const PROTOCOL = "1.3";
 const ENABLED = "enabled";
 const GROUPS = "groups";
+const RELOADED_FOR = "reloadedFor";
 
 type HostRequest =
   | { type: "cdp"; id: number; tab: number; session?: string; method: string; params?: object }
@@ -13,7 +14,8 @@ type HostRequest =
   | { type: "close"; id: number; tab: number }
   | { type: "claim"; id: number; group: string }
   | { type: "release"; id: number; group: string; close: boolean }
-  | { type: "tabs"; id: number; tabs: number[] };
+  | { type: "tabs"; id: number; tabs: number[] }
+  | { type: "reload"; id?: undefined; version: string };
 
 class Refusal extends Error {}
 
@@ -55,7 +57,8 @@ function connect(): void {
   const next = chrome.runtime.connectNative(HOST);
   port = next;
   next.onMessage.addListener((message: HostRequest) => {
-    void handle(message);
+    if (message.type === "reload") void reloadFor(message.version);
+    else void handle(message);
   });
   next.onDisconnect.addListener(() => {
     // The host owned every session; without it no agent may keep control.
@@ -64,8 +67,23 @@ function connect(): void {
     setTimeout(connect, retry);
     retry = Math.min(retry * 2, 60_000);
   });
-  send({ type: "hello", protocol: PROTOCOL, userAgent: navigator.userAgent, enabled });
+  send({
+    type: "hello",
+    protocol: PROTOCOL,
+    version: chrome.runtime.getManifest().version,
+    userAgent: navigator.userAgent,
+    enabled,
+  });
   void badge();
+}
+
+// The host found newer files for this unpacked build on disk. One attempt per
+// version, recorded in local storage because a reload clears session storage.
+async function reloadFor(version: string): Promise<void> {
+  const stored = await chrome.storage.local.get(RELOADED_FOR);
+  if (stored[RELOADED_FOR] === version) return;
+  await chrome.storage.local.set({ [RELOADED_FOR]: version });
+  chrome.runtime.reload();
 }
 
 async function handle(message: HostRequest): Promise<void> {
@@ -314,5 +332,7 @@ chrome.runtime.onMessage.addListener(
   },
 );
 
+// Browser start and install/update/reload each start the worker; both connect.
 chrome.runtime.onStartup.addListener(connect);
+chrome.runtime.onInstalled.addListener(connect);
 void load().then(connect);

@@ -6,6 +6,7 @@ const HOST = "ai.nddev.nds.browser_use";
 const PROTOCOL = "1.3";
 const ENABLED = "enabled";
 const GROUPS = "groups";
+const RELOADED_FOR = "reloadedFor";
 class Refusal extends Error {
 }
 let port;
@@ -42,7 +43,10 @@ function connect() {
     const next = chrome.runtime.connectNative(HOST);
     port = next;
     next.onMessage.addListener((message) => {
-        void handle(message);
+        if (message.type === "reload")
+            void reloadFor(message.version);
+        else
+            void handle(message);
     });
     next.onDisconnect.addListener(() => {
         // The host owned every session; without it no agent may keep control.
@@ -51,8 +55,23 @@ function connect() {
         setTimeout(connect, retry);
         retry = Math.min(retry * 2, 60_000);
     });
-    send({ type: "hello", protocol: PROTOCOL, userAgent: navigator.userAgent, enabled });
+    send({
+        type: "hello",
+        protocol: PROTOCOL,
+        version: chrome.runtime.getManifest().version,
+        userAgent: navigator.userAgent,
+        enabled,
+    });
     void badge();
+}
+// The host found newer files for this unpacked build on disk. One attempt per
+// version, recorded in local storage because a reload clears session storage.
+async function reloadFor(version) {
+    const stored = await chrome.storage.local.get(RELOADED_FOR);
+    if (stored[RELOADED_FOR] === version)
+        return;
+    await chrome.storage.local.set({ [RELOADED_FOR]: version });
+    chrome.runtime.reload();
 }
 async function handle(message) {
     retry = 1000;
@@ -305,5 +324,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         reply({ enabled, connected: port !== undefined, tabs: attached.size });
     return false;
 });
+// Browser start and install/update/reload each start the worker; both connect.
 chrome.runtime.onStartup.addListener(connect);
+chrome.runtime.onInstalled.addListener(connect);
 void load().then(connect);
