@@ -20,7 +20,8 @@ browser-check:
     NDS_TEST_HOST="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/nds-browser-use" bun run e2e
 
 # Loading `<prefix>/extension` as an unpacked extension in that browser
-# remains the owner's action. `bun` defaults to the one on PATH.
+# remains the owner's action; later installs reload it through the host.
+# `bun` defaults to the one on PATH.
 # Install a release build into one stable prefix and register the native host.
 install browser="chrome" prefix=(env_var("HOME") / ".local/share/nds-browser-use") bun="":
     cargo build --locked --release
@@ -32,7 +33,8 @@ install browser="chrome" prefix=(env_var("HOME") / ".local/share/nds-browser-use
     cp packages/executor/executor.ts "$stage/executor/"; cp package.json bun.lock "$stage/"; \
     (cd "$stage" && bun install --frozen-lockfile --production --ignore-scripts); \
     rm -rf "{{prefix}}.previous"; if [ -e "{{prefix}}" ]; then mv "{{prefix}}" "{{prefix}}.previous"; fi; mv "$stage" "{{prefix}}"; rm -rf "{{prefix}}.previous"; \
-    "{{prefix}}/bin/nds-browser-use" install --bun "${bun:-$(command -v bun)}" --executor "{{prefix}}/executor/executor.ts" --browser {{browser}}
+    "{{prefix}}/bin/nds-browser-use" install --bun "${bun:-$(command -v bun)}" --executor "{{prefix}}/executor/executor.ts" --browser {{browser}}; \
+    "{{prefix}}/bin/nds-browser-use" update || echo "extension not connected; it loads the new files when Chrome starts it"
 
 # The store assigns its own extension ID, so the pinned `key` is omitted.
 # Package the extension for the Chrome Web Store into dist/.

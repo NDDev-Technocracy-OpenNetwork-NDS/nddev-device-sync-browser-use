@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub struct Status {
     pub enabled: bool,
     pub browser: String,
+    /// Version of the connected extension build.
+    pub extension: String,
     pub sessions: usize,
 }
 

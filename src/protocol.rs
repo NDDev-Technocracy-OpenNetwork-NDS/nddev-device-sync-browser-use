@@ -37,6 +37,8 @@ pub enum Request {
         timeout_ms: u64,
         expect: Option<Document>,
     },
+    /// Reloads an unpacked extension whose installed files are newer.
+    Update,
 }
 
 /// Identity of one loaded document: the tab target and its main-frame loader.
@@ -55,6 +57,7 @@ pub enum Reply {
     Sessions { sessions: Vec<view::Session> },
     Closed,
     Executed(view::Outcome),
+    Updated { reload: bool },
     Refused { refusal: Refusal },
 }
 

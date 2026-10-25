@@ -12,6 +12,7 @@ use std::{path::PathBuf, time::Duration};
 
 const USAGE: &str = "usage:
   nds-browser-use status
+  nds-browser-use update
   nds-browser-use session new <project>
   nds-browser-use session list
   nds-browser-use session close <project> [--close-tabs]
@@ -84,6 +85,10 @@ async fn client(words: &[&str]) -> ExitCode {
             .status(cancellation)
             .await
             .map(|status| print(&status)),
+        ["update"] => client
+            .update(cancellation)
+            .await
+            .map(|reload| print(&serde_json::json!({ "reload": reload }))),
         ["session", "new", project] => client
             .open(project, cancellation)
             .await
