@@ -1,0 +1,15 @@
+[advisories]
+yanked = "deny"
+[licenses]
+allow = ["AGPL-3.0-only", "Apache-2.0", "BSD-3-Clause", "ISC", "MIT", "MIT-0", "Unicode-3.0", "Zlib"]
+confidence-threshold = 0.95
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+  "https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-agent",
+  "https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-observability",
+]

@@ -11,12 +11,18 @@ spec:
     version: 3.0.0
   role: component
   profiles:
-  - docs
+  - rust
+  - typescript
   system:
     id: nds
     root: github:NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync
   portfolios:
   - portfolio:nddev-technocracy-opennetwork-nds
+  consumes:
+  - contract: nddev-device-sync-agent/adapter-io
+    via: Cargo.toml
+  - contract: nddev-device-sync-observability/telemetry
+    via: Cargo.toml
   variations:
   - paths: [.gds]
     purpose: config
@@ -26,9 +32,9 @@ spec:
     purpose: manifest
     reason: NDS module descriptor owned by the product standards corpus.
     decision: {state: approved, by: rldyourmnd, date: "2026-10-22", origin: document, reference: standarts/decisions/0013-estate-hygiene-and-standards-adoption.md}
-  - paths: [standarts.lock]
+  - paths: [standarts.lock, provider.lock.json]
     purpose: lock
-    reason: NDS contract lock pinning the standards source.
+    reason: NDS contract locks pinning the standards source and the Chrome for Testing acceptance provider.
     decision: {state: approved, by: rldyourmnd, date: "2026-10-22", origin: document, reference: standarts/decisions/0013-estate-hygiene-and-standards-adoption.md}
   - paths: [contracts]
     purpose: manifest

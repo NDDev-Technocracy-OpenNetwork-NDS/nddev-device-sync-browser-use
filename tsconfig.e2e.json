@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "DOM"],
+    "types": ["bun"],
+    "noEmit": true
+  },
+  "files": ["e2e/browser.test.ts"]
+}
