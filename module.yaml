@@ -1,0 +1,10 @@
+id: browser-use
+name: nddev-device-sync-browser-use
+version: 0.0.1-alpha.1
+channel: alpha
+license: AGPL-3.0-only
+repository: NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-browser-use
+standards_lock: standarts.lock
+runtime_manifest: contracts/module.json
+platforms: [linux]
+native_provider: provider.lock.json

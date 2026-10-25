@@ -1,0 +1,12 @@
+{
+  "browser": "chrome-for-testing",
+  "channel": "Stable",
+  "version": "156.0.8078.47",
+  "linux_asset": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.47/linux64/chrome-linux64.zip",
+  "sha256": "e6c94490f0b6b337225aeb2d2a5034858516b7017356980ba94f5176d8774a50",
+  "size": 200206486,
+  "executables": {
+    "NDS_TEST_CHROME": "chrome-linux64/chrome",
+    "CHROME_DEVEL_SANDBOX": "chrome-linux64/chrome_sandbox"
+  }
+}
