@@ -643,7 +643,16 @@ impl Host {
                 let mut probe = [0u8; 1];
                 tokio::select! {
                     reply = self.execute(&project, &code, timeout_ms, expect) => reply,
-                    _ = reader.read(&mut probe) => return,
+                    read = reader.read(&mut probe) => {
+                        // The run is abandoned without a reply; the class shows which side ended it.
+                        let class = match read {
+                            Ok(0) => "client_closed",
+                            Ok(_) => "client_data",
+                            Err(_) => "client_error",
+                        };
+                        tracing::info!(event.name = "browser.execute.cancelled", outcome = "stopped", error.type = class);
+                        return;
+                    }
                 }
             }
             Some(request) => self.handle(request).await,
@@ -675,7 +684,12 @@ impl Host {
         };
         if let Some(class) = failure {
             tracing::warn!(event.name = "browser.control.reply", outcome = "error", error.type = class);
+            return;
         }
+        // The client closes once it has read the reply. Closing first would race it: on macOS
+        // the agent client cannot read buffered reply bytes after its peer has closed.
+        let mut rest = [0u8; 1];
+        let _ = tokio::time::timeout(CONTROL_IO, reader.read(&mut rest)).await;
     }
 
     async fn handle(&self, request: Request) -> Reply {
