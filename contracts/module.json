@@ -5,7 +5,8 @@
   "kind": "integration",
   "platforms": [
     "linux",
-    "macos"
+    "macos",
+    "windows"
   ],
   "capabilities": [
     "control_browser"
