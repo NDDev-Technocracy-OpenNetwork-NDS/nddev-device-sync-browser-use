@@ -5,7 +5,7 @@
 //! session's own tab group. Commands it cannot honour fail visibly.
 
 use super::{EXTENSION_REPLY, Failure, Host, MAX_TABS, Waiter, tab_session};
-use crate::CancellationToken;
+use crate::{CancellationToken, socket};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
@@ -15,10 +15,7 @@ use std::{
     },
     time::Instant,
 };
-use tokio::{
-    net::{UnixListener, UnixStream},
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
-};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_tungstenite::tungstenite::{
     Message,
     handshake::server::{ErrorResponse, Request, Response},
@@ -123,9 +120,9 @@ impl Drop for Client {
     }
 }
 
-pub(crate) async fn serve(host: Arc<Host>, listener: UnixListener) {
+pub(crate) async fn serve(host: Arc<Host>, listener: socket::Listener) {
     let permits = Arc::new(Semaphore::new(CONNECTIONS));
-    while let Ok((stream, _)) = listener.accept().await {
+    while let Ok(stream) = socket::accept(&listener).await {
         let Ok(permit) = permits.clone().try_acquire_owned() else {
             continue;
         };
@@ -141,7 +138,7 @@ pub(crate) async fn serve(host: Arc<Host>, listener: UnixListener) {
     clippy::result_large_err,
     reason = "tungstenite fixes the handshake callback signature"
 )]
-async fn connection(host: Arc<Host>, stream: UnixStream) {
+async fn connection(host: Arc<Host>, stream: socket::Stream) {
     let mut token = None;
     let accept = |request: &Request, response: Response| {
         // Browsers always send Origin; the private socket only serves executors.

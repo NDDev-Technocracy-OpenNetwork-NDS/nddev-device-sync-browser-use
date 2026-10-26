@@ -108,23 +108,48 @@ jobs:
 
   windows:
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: package.json
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
-      - name: Lint and test the platform-neutral code
+      - name: Lint and test the client and the host
         run: |
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
-      - name: Require an honest unsupported host
+      - name: Require a typed refusal without a host
         shell: bash
+        env:
+          NDS_BROWSER_USE_RUNTIME_DIR: ${{ runner.temp }}/no-host
         run: |
           set +e
-          output="$(cargo run --locked --quiet --bin nds-browser-use -- status 2>&1)"
+          output="$(cargo run --locked --quiet --bin nds-browser-use -- status 2>/dev/null)"
           status=$?
           set -e
+          echo "status $status: $output"
           test "$status" = 2
-          grep -q 'not supported on this platform' <<< "$output"
+          grep -q '^{"error":"[a-z_]*","message":' <<< "$output"
+      - name: Fetch the pinned Chrome for Testing
+        shell: bash
+        run: |
+          url="$(jq -r .win64.asset provider.lock.json)"
+          curl --fail --location --max-time 300 "$url" --output "$RUNNER_TEMP/chrome.zip"
+          test "$(stat -c %s "$RUNNER_TEMP/chrome.zip")" = "$(jq -r .win64.size provider.lock.json)"
+          echo "$(jq -r .win64.sha256 provider.lock.json)  $RUNNER_TEMP/chrome.zip" | sha256sum --check --strict
+          7z x -bd -o"$RUNNER_TEMP/cft" "$RUNNER_TEMP/chrome.zip" > /dev/null
+          echo "NDS_TEST_CHROME=$(cygpath -w "$RUNNER_TEMP/cft/$(jq -r .win64.executables.NDS_TEST_CHROME provider.lock.json)")" >> "$GITHUB_ENV"
+      - name: Real-browser acceptance in an isolated profile
+        shell: bash
+        env:
+          NDS_E2E_DIAGNOSTICS: "1"
+          # Chrome's own log, which the e2e enables, reaches the job output only through Playwright.
+          DEBUG: pw:browser
+        run: |
+          bun install --frozen-lockfile --ignore-scripts
+          cargo build --locked
+          NDS_TEST_HOST="$(cygpath -w "$PWD/target/debug/nds-browser-use.exe")" bun run e2e

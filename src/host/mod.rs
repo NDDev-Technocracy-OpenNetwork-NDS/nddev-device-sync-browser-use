@@ -14,7 +14,7 @@ use crate::{
         self, Document, FRAME_LIMIT, Header, MAX_SESSIONS, MAX_TABS, PAYLOAD_LIMIT, Refusal, Reply,
         Request,
     },
-    runtime, view,
+    runtime, socket, view,
 };
 use serde_json::{Value, json};
 use std::{
@@ -28,7 +28,6 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
     sync::{Semaphore, mpsc, oneshot},
 };
 
@@ -115,6 +114,15 @@ struct Tab {
     document: Option<String>,
 }
 
+/// Ends a session: its executor exits before its artifact area is removed, because Windows keeps
+/// the working directory of a live process.
+async fn discard(session: Session) {
+    if let Some(executor) = session.executor {
+        executor.stop().await;
+    }
+    let _ = std::fs::remove_dir_all(&session.artifacts);
+}
+
 /// Whether Chrome started this host for one of the pinned NDS extension builds.
 pub fn admitted(origin: &str) -> bool {
     EXTENSION_IDS
@@ -184,8 +192,8 @@ pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
     Ok(())
 }
 
-fn bind(path: &Path) -> Result<UnixListener, HostError> {
-    if std::os::unix::net::UnixStream::connect(path).is_ok() {
+fn bind(path: &Path) -> Result<socket::Listener, HostError> {
+    if socket::answers(path) {
         return Err(HostError::Busy);
     }
     match std::fs::remove_file(path) {
@@ -193,7 +201,7 @@ fn bind(path: &Path) -> Result<UnixListener, HostError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(IoError::Unavailable.into()),
     }
-    let listener = UnixListener::bind(path).map_err(|_| IoError::Unavailable)?;
+    let listener = socket::bind(path).map_err(|_| IoError::Unavailable)?;
     runtime::owner_only(path)?;
     Ok(listener)
 }
@@ -571,7 +579,7 @@ impl Host {
             state.tabs.clear();
             state.children.clear();
             for (_, session) in state.sessions.drain() {
-                let _ = std::fs::remove_dir_all(&session.artifacts);
+                tokio::spawn(discard(session));
             }
         }
         let name = if enabled {
@@ -593,9 +601,9 @@ impl Host {
         let _ = std::fs::remove_dir_all(self.config.runtime.join("sessions"));
     }
 
-    async fn serve_control(self: Arc<Self>, listener: UnixListener) {
+    async fn serve_control(self: Arc<Self>, listener: socket::Listener) {
         let permits = Arc::new(Semaphore::new(CONTROL_CONNECTIONS));
-        while let Ok((stream, _)) = listener.accept().await {
+        while let Ok(stream) = socket::accept(&listener).await {
             let Ok(permit) = permits.clone().try_acquire_owned() else {
                 tracing::warn!(
                     event.name = "browser.control.rejected",
@@ -613,8 +621,8 @@ impl Host {
         }
     }
 
-    async fn control(&self, stream: UnixStream) {
-        let (read, mut write) = stream.into_split();
+    async fn control(&self, stream: socket::Stream) {
+        let (read, mut write) = tokio::io::split(stream);
         let mut reader = BufReader::new(read);
         let mut line = Vec::new();
         let request = match tokio::time::timeout(
@@ -787,8 +795,9 @@ impl Host {
                 Ok(view_session(&state, project))
             }
             Err(refusal) => {
-                if let Some(session) = self.state().sessions.remove(project) {
-                    let _ = std::fs::remove_dir_all(session.artifacts);
+                let removed = self.state().sessions.remove(project);
+                if let Some(session) = removed {
+                    discard(session).await;
                 }
                 tracing::warn!(event.name = "browser.session.opened", outcome = "rejected", error.type = refusal.code());
                 Err(refusal)
@@ -815,8 +824,7 @@ impl Host {
             }
             session
         };
-        let _ = std::fs::remove_dir_all(&session.artifacts);
-        drop(session);
+        discard(session).await;
         let released = self
             .refusable(json!({ "type": "release", "group": project, "close": close_tabs }))
             .await;
@@ -900,7 +908,7 @@ impl Host {
         let mut executor = match current {
             Some(executor) => executor,
             None => {
-                let endpoint = format!("ws+unix://{}:/session/{token}", self.cdp_socket.display());
+                let endpoint = runtime::socket_url(&self.cdp_socket, &format!("/session/{token}"));
                 executor::Executor::spawn(&self.config, &endpoint, &artifacts, deadline).await?
             }
         };
