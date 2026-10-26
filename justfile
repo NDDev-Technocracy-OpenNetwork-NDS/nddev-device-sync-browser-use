@@ -24,7 +24,9 @@ browser-check:
 # `bun` defaults to the one on PATH.
 # Install a release build into one stable prefix and register the native host.
 install browser="chrome" prefix=(env_var("HOME") / ".local/share/nds-browser-use") bun="":
-    cargo build --locked --release
+    # The installed build reports its source commit; a modified tree reports none.
+    commit="$(git rev-parse HEAD)"; git diff --quiet HEAD -- || commit=unknown; \
+    NDS_SOURCE_COMMIT="$commit" cargo build --locked --release
     bun="{{bun}}"; \
     target="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"; \
     stage="{{prefix}}.stage"; rm -rf "$stage"; mkdir -p "$stage/bin" "$stage/extension" "$stage/executor"; \
