@@ -14,8 +14,10 @@ Agent CLI: `nds-browser-use session new <project>`, then
 `nds-browser-use -s <project> -e '<playwright code>'`; `status`,
 `session list` and `session close` complete the surface. `install` registers
 the host for one Chrome profile root; loading the unpacked extension stays the
-owner's action. Status: alpha work in progress, Linux only, not qualified and
-not a replacement for Playwriter in current NDS acceptance.
+owner's action. Status: alpha work in progress. Linux and macOS are each accepted
+in CI with a real browser; Windows only builds and tests the platform-neutral
+code, because its host is not implemented. Not qualified and not a replacement
+for Playwriter in current NDS acceptance.
 
 Agent code runs as an async function body with `context`, `browser`, a
 persistent `state` object, `artifacts` (the session's private directory for
