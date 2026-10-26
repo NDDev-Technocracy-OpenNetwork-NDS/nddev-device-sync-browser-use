@@ -122,7 +122,7 @@ jobs:
         run: |
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
-      - name: Require an absent host to be unavailable
+      - name: Require a typed refusal without a host
         shell: bash
         env:
           NDS_BROWSER_USE_RUNTIME_DIR: ${{ runner.temp }}/no-host
@@ -131,8 +131,9 @@ jobs:
           output="$(cargo run --locked --quiet --bin nds-browser-use -- status 2>/dev/null)"
           status=$?
           set -e
+          echo "status $status: $output"
           test "$status" = 2
-          grep -q '"error":"unavailable"' <<< "$output"
+          grep -q '^{"error":"[a-z_]*","message":' <<< "$output"
       - name: Fetch the pinned Chrome for Testing
         shell: bash
         run: |
