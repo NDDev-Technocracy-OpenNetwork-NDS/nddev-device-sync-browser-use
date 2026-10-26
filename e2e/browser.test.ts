@@ -159,7 +159,12 @@ beforeAll(async () => {
   // dialog on pages it watches and race the agent's own handler.
   for (const page of observer.pages()) page.on("dialog", () => undefined);
   observer.on("page", (page) => page.on("dialog", () => undefined));
-  for (let attempt = 0; attempt < 100 && !existsSync(join(runtime, "control.sock")); attempt++) {
+  // The host binds its sockets before the extension's hello arrives; scenarios start once the
+  // host reports the connected extension, which takes longer on slower runners.
+  for (let attempt = 0; attempt < 200; attempt++) {
+    if (existsSync(join(runtime, "control.sock")) && (await cli("status")).body.enabled === true) {
+      break;
+    }
     await Bun.sleep(100);
   }
 });
