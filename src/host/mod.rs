@@ -733,11 +733,11 @@ impl Host {
             }
             Request::Open { project } => self.open(&project).await.map(Reply::Session),
             Request::Sessions => {
-                let state = self.state();
-                let sessions = state
-                    .sessions
-                    .keys()
-                    .map(|project| view_session(&state, project))
+                let mut state = self.state();
+                let projects: Vec<String> = state.sessions.keys().cloned().collect();
+                let sessions = projects
+                    .iter()
+                    .map(|project| view_session(&mut state, project))
                     .collect();
                 Ok(Reply::Sessions { sessions })
             }
@@ -772,7 +772,7 @@ impl Host {
             let mut state = self.state();
             Self::ready(&state)?;
             if state.sessions.contains_key(project) {
-                return Ok(view_session(&state, project));
+                return Ok(view_session(&mut state, project));
             }
             if state.sessions.len() >= MAX_SESSIONS {
                 tracing::warn!(event.name = "browser.session.opened", outcome = "rejected", error.type = Refusal::Capacity.code());
@@ -795,14 +795,29 @@ impl Host {
             .await
         {
             Ok(claimed) => {
-                let mut state = self.state();
-                for entry in claimed["tabs"].as_array().into_iter().flatten() {
-                    if let Some(tab) = entry["tab"].as_i64() {
-                        self.register(&mut state, project, tab, entry["target"].clone());
+                let session = {
+                    let mut state = self.state();
+                    for entry in claimed["tabs"].as_array().into_iter().flatten() {
+                        if let Some(tab) = entry["tab"].as_i64() {
+                            self.register(&mut state, project, tab, entry["target"].clone());
+                        }
+                    }
+                    let session = state.sessions.get(project);
+                    session.map(|session| (session.token.clone(), session.artifacts.clone()))
+                };
+                // The executor starts with its session and gets ready while the agent prepares
+                // its first execution; a failed start is retried by that execution.
+                if let Some((token, artifacts)) = session {
+                    let endpoint =
+                        runtime::socket_url(&self.cdp_socket, &format!("/session/{token}"));
+                    if let Ok(executor) =
+                        executor::Executor::start(&self.config, &endpoint, &artifacts)
+                    {
+                        self.keep(project, &token, executor);
                     }
                 }
                 tracing::info!(event.name = "browser.session.opened", outcome = "ok");
-                Ok(view_session(&state, project))
+                Ok(view_session(&mut self.state(), project))
             }
             Err(refusal) => {
                 let removed = self.state().sessions.remove(project);
@@ -919,9 +934,16 @@ impl Host {
             Some(executor) => executor,
             None => {
                 let endpoint = runtime::socket_url(&self.cdp_socket, &format!("/session/{token}"));
-                executor::Executor::spawn(&self.config, &endpoint, &artifacts, deadline).await?
+                executor::Executor::start(&self.config, &endpoint, &artifacts)?
             }
         };
+        // No code has run yet, so a start that outlasts this deadline is kept for the next one.
+        if let Err(refusal) = executor.ready(deadline).await {
+            if refusal == Refusal::Timeout {
+                self.keep(project, &token, executor);
+            }
+            return Err(refusal);
+        }
         // A timeout drops the executor here, which kills it: no action continues.
         let (failure, output, truncated) = match executor.run(code, deadline).await {
             Ok(completed) => completed,
@@ -932,20 +954,25 @@ impl Host {
             Err(refusal) => return Err(refusal),
         };
         let tabs = self.tabs(project).await;
-        if let Some(session) = self
-            .state()
-            .sessions
-            .get_mut(project)
-            .filter(|session| session.token == token)
-        {
-            session.executor = Some(executor);
-        }
+        self.keep(project, &token, executor);
         Ok(view::Outcome {
             failure,
             output,
             truncated,
             tabs,
         })
+    }
+
+    /// Returns an executor to its session, unless that session has ended or holds another one.
+    fn keep(&self, project: &str, token: &str, executor: executor::Executor) {
+        if let Some(session) = self
+            .state()
+            .sessions
+            .get_mut(project)
+            .filter(|session| session.token == token && session.executor.is_none())
+        {
+            session.executor = Some(executor);
+        }
     }
 
     /// Current agent tabs; Chrome's live answer also refreshes each document.
@@ -1010,7 +1037,7 @@ impl Drop for Running<'_> {
     }
 }
 
-fn view_session(state: &State, project: &str) -> view::Session {
+fn view_session(state: &mut State, project: &str) -> view::Session {
     view::Session {
         project: project.to_owned(),
         tabs: state
@@ -1020,8 +1047,9 @@ fn view_session(state: &State, project: &str) -> view::Session {
             .count(),
         executor: state
             .sessions
-            .get(project)
-            .is_some_and(|session| session.executor.is_some()),
+            .get_mut(project)
+            .and_then(|session| session.executor.as_mut())
+            .is_some_and(executor::Executor::is_ready),
     }
 }
 
