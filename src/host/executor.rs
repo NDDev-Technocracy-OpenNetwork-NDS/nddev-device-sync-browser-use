@@ -56,6 +56,8 @@ impl Executor {
             .arg(artifacts)
             .env_clear()
             .env("TMPDIR", artifacts)
+            .env("TEMP", artifacts)
+            .env("TMP", artifacts)
             .env("NO_COLOR", "1")
             .env("BUN_RUNTIME_TRANSPILER_CACHE_PATH", "0")
             .current_dir(artifacts)
@@ -64,8 +66,11 @@ impl Executor {
             // Executor diagnostics can contain page data; they are not logged.
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        if let Some(home) = std::env::var_os("HOME") {
-            command.env("HOME", home);
+        // Windows sockets and Bun need the system root and the user profile there.
+        for name in ["HOME", "SystemRoot", "USERPROFILE"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
         }
         let mut child = command.spawn().map_err(|_| Refusal::ExecutorUnavailable)?;
         let input = child.stdin.take().ok_or(Refusal::ExecutorUnavailable)?;

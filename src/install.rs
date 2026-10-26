@@ -1,14 +1,15 @@
 //! Local registration of the native messaging host for one Chrome profile root.
 //!
-//! Installing writes two owner-only files and nothing else: Chrome's host
-//! manifest and the host's executor configuration. Loading the unpacked
-//! extension into a browser remains the owner's explicit action.
+//! Installing writes two owner-only files, Chrome's host manifest and the host's executor
+//! configuration, and on Windows the user's registry value that names the manifest. Loading
+//! the unpacked extension into a browser remains the owner's explicit action.
 
 use crate::{EXTENSION_IDS, IoError, NATIVE_HOST, host::Config, runtime};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     io::Write,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -32,7 +33,7 @@ impl Browser {
     }
 
     /// The browser's default user data directory, relative to the platform's base.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn profile_root(self) -> &'static str {
         match self {
             Self::Chrome => "google-chrome",
@@ -51,17 +52,46 @@ impl Browser {
             Self::Chromium => "Chromium",
         }
     }
+
+    /// The user registry key under which the browser looks up native messaging hosts on
+    /// Windows. Google-branded builds share one key.
+    #[cfg(windows)]
+    fn registry_key(self) -> String {
+        let vendor = match self {
+            Self::Chrome | Self::ChromeBeta | Self::ChromeForTesting => r"Google\Chrome",
+            Self::Chromium => "Chromium",
+        };
+        format!(r"Software\{vendor}\NativeMessagingHosts\{NATIVE_HOST}")
+    }
 }
 
 /// Where Chrome looks up user-level hosts: `<user data dir>/NativeMessagingHosts`.
+#[cfg(unix)]
 pub fn host_directory(browser: Browser) -> Result<PathBuf, IoError> {
     Ok(user_data_base()?
         .join(browser.profile_root())
         .join("NativeMessagingHosts"))
 }
 
+/// Windows browsers find the manifest through the registry, so one manifest beside the host
+/// configuration serves every browser.
+#[cfg(windows)]
+pub fn host_directory(_browser: Browser) -> Result<PathBuf, IoError> {
+    Ok(config_home()?.join("nds-browser-use"))
+}
+
+/// Points the browser's registry value at the installed manifest.
+#[cfg(windows)]
+pub fn register(browser: Browser, manifest: &Path) -> Result<(), IoError> {
+    let manifest = manifest.to_str().ok_or(IoError::InvalidConfiguration)?;
+    windows_registry::CURRENT_USER
+        .create(browser.registry_key())
+        .and_then(|key| key.set_string("", manifest))
+        .map_err(|_| IoError::Unavailable)
+}
+
 /// Linux keeps browser user data under the XDG configuration home.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn user_data_base() -> Result<PathBuf, IoError> {
     config_home()
 }
@@ -160,6 +190,13 @@ fn origins() -> Vec<String> {
         .collect()
 }
 
+/// Windows keeps the configuration in the user's local application data.
+#[cfg(windows)]
+fn config_home() -> Result<PathBuf, IoError> {
+    runtime::local_app_data()
+}
+
+#[cfg(unix)]
 fn config_home() -> Result<PathBuf, IoError> {
     let path = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(path) => PathBuf::from(path),
@@ -180,13 +217,12 @@ fn config_path() -> Result<PathBuf, IoError> {
 /// Atomic owner-only replacement.
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), IoError> {
     let temporary = path.with_extension("tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(|_| IoError::Unavailable)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // On Windows the file inherits the private directory's access list.
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&temporary).map_err(|_| IoError::Unavailable)?;
     file.write_all(bytes)
         .and_then(|()| file.write_all(b"\n"))
         .and_then(|()| file.sync_all())
@@ -223,6 +259,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn written_files_are_owner_only() {
         use std::os::unix::fs::PermissionsExt;
@@ -236,6 +273,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"{}\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn browsers_map_to_their_profile_roots() {
         let expected = if cfg!(target_os = "macos") {
@@ -257,6 +295,24 @@ mod tests {
         assert!(
             directory.ends_with("Library/Application Support/Google/Chrome/NativeMessagingHosts"),
             "{directory:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_browsers_name_their_registry_keys() {
+        assert_eq!(
+            Browser::ChromeForTesting.registry_key(),
+            r"Software\Google\Chrome\NativeMessagingHosts\ai.nddev.nds.browser_use"
+        );
+        assert_eq!(
+            Browser::Chromium.registry_key(),
+            r"Software\Chromium\NativeMessagingHosts\ai.nddev.nds.browser_use"
+        );
+        assert!(
+            host_directory(Browser::Chrome)
+                .unwrap()
+                .starts_with(runtime::local_app_data().unwrap())
         );
     }
 }

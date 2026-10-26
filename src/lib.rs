@@ -9,20 +9,22 @@
 pub mod protocol;
 pub mod view;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod adapter;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod host;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod install;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod runtime;
+#[cfg(any(unix, windows))]
+mod socket;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use adapter::BrowserUseClient;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use nddev_device_sync_adapter_io::{CancellationToken, IoError, LocalIo, NativeIo};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use protocol::Document;
 use protocol::Refusal;
 
@@ -38,7 +40,7 @@ pub const NATIVE_HOST: &str = "ai.nddev.nds.browser_use";
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[error(transparent)]
     Io(#[from] IoError),
     #[error(transparent)]
@@ -56,7 +58,7 @@ impl From<Refusal> for Error {
 }
 
 /// Application port: agents depend on typed sessions and outcomes, not on a socket.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub trait BrowserUse {
     fn status(
         &self,

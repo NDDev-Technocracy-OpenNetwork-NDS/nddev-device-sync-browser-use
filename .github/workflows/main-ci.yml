@@ -115,16 +115,18 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
-      - name: Lint and test the platform-neutral code
+      - name: Lint and test the client and the host
         run: |
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
-      - name: Require an honest unsupported host
+      - name: Require an absent host to be unavailable
         shell: bash
+        env:
+          NDS_BROWSER_USE_RUNTIME_DIR: ${{ runner.temp }}/no-host
         run: |
           set +e
-          output="$(cargo run --locked --quiet --bin nds-browser-use -- status 2>&1)"
+          output="$(cargo run --locked --quiet --bin nds-browser-use -- status 2>/dev/null)"
           status=$?
           set -e
           test "$status" = 2
-          grep -q 'not supported on this platform' <<< "$output"
+          grep -q '"error":"unavailable"' <<< "$output"
