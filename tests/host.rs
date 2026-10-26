@@ -166,3 +166,39 @@ fn an_admitted_host_serves_owner_only_sockets_until_its_port_closes() {
     assert!(stderr(&mut host).contains(r#""error.type":"extension_closed""#));
     assert!(!control.exists() && !cdp.exists());
 }
+
+/// Many short control exchanges in a row. The host must not end a connection in a way that
+/// makes the agent client fail to read a reply it already sent.
+#[test]
+fn repeated_control_exchanges_all_reach_their_client() {
+    use nddev_device_sync_browser_use::{
+        BrowserUse, BrowserUseClient, CancellationToken, NativeIo,
+    };
+    let fixture = Fixture::new();
+    fixture.install();
+    let mut host = fixture.command(&[UNPACKED]).spawn().unwrap();
+    let control = fixture.runtime().join("control.sock");
+    appears(&control);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let client = BrowserUseClient::new(NativeIo::new(1).unwrap().local_handle(), control).unwrap();
+    let failures = runtime.block_on(async {
+        let mut failures = Vec::new();
+        for _ in 0..500 {
+            if let Err(error) = client.status(CancellationToken::new()).await {
+                failures.push(error.to_string());
+            }
+        }
+        failures
+    });
+    drop(host.stdin.take());
+    wait(&mut host, Duration::from_secs(5));
+    assert!(
+        failures.is_empty(),
+        "{} of 500 exchanges failed: {:?}",
+        failures.len(),
+        failures.first()
+    );
+}
