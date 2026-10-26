@@ -149,7 +149,11 @@ beforeAll(async () => {
     executablePath: chrome,
     headless: true,
     env,
-    args: [`--disable-extensions-except=${installed}`, `--load-extension=${installed}`],
+    args: [
+      `--disable-extensions-except=${installed}`,
+      `--load-extension=${installed}`,
+      ...(process.env.NDS_E2E_DIAGNOSTICS === "1" ? ["--enable-logging=stderr"] : []),
+    ],
   });
   // The observer stays passive: Playwright would otherwise dismiss every
   // dialog on pages it watches and race the agent's own handler.
@@ -163,6 +167,10 @@ beforeAll(async () => {
 afterAll(async () => {
   await observer?.close().catch(() => undefined);
   fixture?.stop(true);
+  // CI diagnostics: the host log carries event names and outcomes only, never page data.
+  if (process.env.NDS_E2E_DIAGNOSTICS === "1" && existsSync(hostLog)) {
+    console.error(`host log:\n${readFileSync(hostLog, "utf8")}`);
+  }
   rmSync(runtime, { recursive: true, force: true });
   rmSync(root, { recursive: true, force: true });
 });

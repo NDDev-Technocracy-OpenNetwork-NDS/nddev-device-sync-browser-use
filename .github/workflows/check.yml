@@ -67,6 +67,9 @@ jobs:
           ditto -x -k "$RUNNER_TEMP/chrome.zip" "$RUNNER_TEMP/cft"
           echo "NDS_TEST_CHROME=$RUNNER_TEMP/cft/$(jq -r .mac_arm64.executables.NDS_TEST_CHROME provider.lock.json)" >> "$GITHUB_ENV"
       - name: Real-browser acceptance in an isolated profile
+        env:
+          NDS_E2E_DIAGNOSTICS: "1"
+          DEBUG: pw:browser
         run: just browser-check
 
   windows:
