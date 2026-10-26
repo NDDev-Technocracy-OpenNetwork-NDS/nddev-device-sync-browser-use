@@ -366,6 +366,7 @@ impl Host {
             // The extension gave up adopting a new agent tab after its retries.
             Some("adoption") => {
                 let class = match message["failure"].as_str() {
+                    Some("tab") => "tab_missing",
                     Some("group") => "group_failed",
                     Some("attach") => "attach_failed",
                     _ => "invalid_frame",

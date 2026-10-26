@@ -244,6 +244,32 @@ async function adopted(tab, failure) {
     if (enabled && port && (await exists(tab)))
         send({ type: "adoption", tab, failure });
 }
+// webNavigation can report a new tab before the tabs API knows it.
+async function settled(tab) {
+    for (let attempt = 1; attempt <= ADOPT_ATTEMPTS; attempt++) {
+        const found = await chrome.tabs.get(tab).catch(() => undefined);
+        if (found)
+            return found;
+        await new Promise((done) => setTimeout(done, ADOPT_RETRY_MS * attempt));
+    }
+    return undefined;
+}
+// Chrome reports a new tab through several events in varying order, and grouping it suppresses
+// the group change event. A sweep of the agent group shortly after adopts any tab that ended up
+// in it without an announcement.
+const SWEEPS_MS = [300, 1500];
+function sweep(group) {
+    for (const delay of SWEEPS_MS) {
+        setTimeout(() => {
+            void owned(group).then((tabs) => {
+                for (const tab of tabs) {
+                    if (tab.id !== undefined && !attached.has(tab.id))
+                        void adopt(tab.id, group);
+                }
+            });
+        }, delay);
+    }
+}
 async function adopt(tab, group) {
     if (!enabled || !port || attached.has(tab) || adopting.has(tab))
         return;
@@ -284,10 +310,14 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => {
     if (group === undefined)
         return;
     const id = details.tabId;
+    sweep(group);
     void own(id, async () => {
-        const tab = await chrome.tabs.get(id).catch(() => undefined);
-        if (!tab)
+        const tab = await settled(id);
+        if (!tab) {
+            if (enabled && port)
+                send({ type: "adoption", tab: id, failure: "tab" });
             return;
+        }
         if (groupKey(tab.groupId) !== group && !(await retried(id, () => join(id, group)))) {
             await adopted(id, "group");
         }
