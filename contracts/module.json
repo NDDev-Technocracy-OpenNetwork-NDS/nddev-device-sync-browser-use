@@ -4,8 +4,7 @@
   "api_version": 1,
   "kind": "integration",
   "platforms": [
-    "linux",
-    "macos"
+    "linux"
   ],
   "capabilities": [
     "control_browser"

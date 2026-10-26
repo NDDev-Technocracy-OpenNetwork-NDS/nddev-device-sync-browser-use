@@ -93,16 +93,6 @@ jobs:
         run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
       - name: Run the module checks
         run: just check
-      - name: Fetch the pinned Chrome for Testing
-        run: |
-          url="$(jq -r .mac_arm64.asset provider.lock.json)"
-          curl --fail --location --max-time 300 "$url" --output "$RUNNER_TEMP/chrome.zip"
-          test "$(stat -f %z "$RUNNER_TEMP/chrome.zip")" = "$(jq -r .mac_arm64.size provider.lock.json)"
-          echo "$(jq -r .mac_arm64.sha256 provider.lock.json)  $RUNNER_TEMP/chrome.zip" | shasum -a 256 --check --strict
-          ditto -x -k "$RUNNER_TEMP/chrome.zip" "$RUNNER_TEMP/cft"
-          echo "NDS_TEST_CHROME=$RUNNER_TEMP/cft/$(jq -r .mac_arm64.executables.NDS_TEST_CHROME provider.lock.json)" >> "$GITHUB_ENV"
-      - name: Real-browser acceptance in an isolated profile
-        run: just browser-check
 
   windows:
     runs-on: windows-2025
