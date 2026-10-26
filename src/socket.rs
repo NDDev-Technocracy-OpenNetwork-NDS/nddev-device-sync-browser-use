@@ -1,7 +1,7 @@
 //! Local stream sockets of the host: the control channel and the CDP endpoint.
 //!
 //! Unix uses tokio's Unix sockets. Windows has `AF_UNIX` sockets that tokio does not drive, so
-//! `async-io` drives `uds_windows` sockets there and `Stream` exposes tokio's I/O traits.
+//! `async-io` drives `socket2` sockets there and `Stream` exposes tokio's I/O traits.
 
 use std::{io, path::Path};
 
@@ -25,11 +25,19 @@ pub(crate) fn answers(path: &Path) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) struct Listener(async_io::Async<uds_windows::UnixListener>);
+pub(crate) struct Listener(async_io::Async<socket2::Socket>);
+
+#[cfg(windows)]
+fn unix_socket() -> io::Result<socket2::Socket> {
+    socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+}
 
 #[cfg(windows)]
 pub(crate) fn bind(path: &Path) -> io::Result<Listener> {
-    async_io::Async::new(uds_windows::UnixListener::bind(path)?).map(Listener)
+    let socket = unix_socket()?;
+    socket.bind(&socket2::SockAddr::unix(path)?)?;
+    socket.listen(128)?;
+    async_io::Async::new(socket).map(Listener)
 }
 
 #[cfg(windows)]
@@ -40,13 +48,15 @@ pub(crate) async fn accept(listener: &Listener) -> io::Result<Stream> {
 
 #[cfg(windows)]
 pub(crate) fn answers(path: &Path) -> bool {
-    uds_windows::UnixStream::connect(path).is_ok()
+    socket2::SockAddr::unix(path)
+        .and_then(|address| unix_socket()?.connect(&address))
+        .is_ok()
 }
 
 /// A connected socket. Reads and writes go through the shared-reference stream impls of
 /// `async-io`, which need no `IoSafe` assertion.
 #[cfg(windows)]
-pub(crate) struct Stream(async_io::Async<uds_windows::UnixStream>);
+pub(crate) struct Stream(async_io::Async<socket2::Socket>);
 
 #[cfg(windows)]
 impl tokio::io::AsyncRead for Stream {

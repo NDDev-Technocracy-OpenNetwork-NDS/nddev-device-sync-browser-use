@@ -35,7 +35,7 @@ rustix = { version = "1.1", features = ["process"] }
 [target.'cfg(windows)'.dependencies]
 async-io = "2.6"
 futures-io = "0.3.34"
-uds_windows = "1.2.1"
+socket2 = "0.6.5"
 windows-registry = "0.100"
 
 [dev-dependencies]
