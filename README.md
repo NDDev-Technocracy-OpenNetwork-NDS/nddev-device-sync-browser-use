@@ -12,7 +12,10 @@ no TCP listener, debugging port, tunnel or vendor telemetry.
 
 Agent CLI: `nds-browser-use session new <project>`, then
 `nds-browser-use -s <project> -e '<playwright code>'`; `status`,
-`session list` and `session close` complete the surface. `install` registers
+`session list` and `session close` complete the surface. A session's executor
+starts with the session, and `session list` reports `executor: true` once it is
+ready; an execution that times out while the executor is still starting
+leaves the start running for the next one. `install` registers
 the host for one Chrome profile root; loading the unpacked extension stays the
 owner's action. Status: alpha work in progress. Linux, macOS and Windows are
 each accepted in CI with a real browser; none has been qualified on an owner
