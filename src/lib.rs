@@ -9,20 +9,22 @@
 pub mod protocol;
 pub mod view;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod adapter;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub mod host;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub mod install;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod runtime;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub use adapter::BrowserUseClient;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub use nddev_device_sync_adapter_io::{CancellationToken, IoError, LocalIo, NativeIo};
-use protocol::{Document, Refusal};
+#[cfg(unix)]
+use protocol::Document;
+use protocol::Refusal;
 
 /// Unpacked build: the ID follows the public key pinned in `packages/extension/manifest.json`.
 pub const UNPACKED_EXTENSION_ID: &str = "lcdkocghcaakekcaeopjanfbohpfacbk";
@@ -36,7 +38,7 @@ pub const NATIVE_HOST: &str = "ai.nddev.nds.browser_use";
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[error(transparent)]
     Io(#[from] IoError),
     #[error(transparent)]
@@ -54,7 +56,7 @@ impl From<Refusal> for Error {
 }
 
 /// Application port: agents depend on typed sessions and outcomes, not on a socket.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub trait BrowserUse {
     fn status(
         &self,

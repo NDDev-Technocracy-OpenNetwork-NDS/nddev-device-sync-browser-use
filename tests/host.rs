@@ -1,5 +1,5 @@
 //! The native host as Chrome starts it: caller identity and the lifetime of its sockets.
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
 use std::{
     io::Read,

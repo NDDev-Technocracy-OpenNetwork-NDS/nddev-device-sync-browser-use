@@ -1,13 +1,13 @@
 //! `nds-browser-use`: the agent CLI and, when Chrome starts it, the native host.
-#![cfg_attr(not(target_os = "linux"), allow(unused))]
+#![cfg_attr(not(unix), allow(unused))]
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use nddev_device_sync_browser_use::{
     BrowserUse, BrowserUseClient, CancellationToken, Error, NativeIo, host, install,
     protocol::Document,
 };
 use std::process::ExitCode;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::{path::PathBuf, time::Duration};
 
 const USAGE: &str = "usage:
@@ -21,13 +21,13 @@ const USAGE: &str = "usage:
 const ARGUMENT_LIMIT: usize = 16;
 const CODE_LIMIT: usize = 60_000;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn main() -> ExitCode {
     eprintln!("nds-browser-use is not supported on this platform");
     ExitCode::from(2)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[tokio::main]
 async fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -67,7 +67,7 @@ async fn main() -> ExitCode {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn host_error(error: &host::HostError) -> &'static str {
     match error {
         host::HostError::Origin => "origin_rejected",
@@ -76,7 +76,7 @@ fn host_error(error: &host::HostError) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 async fn client(words: &[&str]) -> ExitCode {
     let client = match BrowserUseClient::for_current_user(
         NativeIo::new(1).expect("one slot is valid").local_handle(),
@@ -143,14 +143,14 @@ async fn client(words: &[&str]) -> ExitCode {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct Execution {
     code: String,
     timeout: Duration,
     expect: Option<Document>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Execution {
     fn parse(mut words: &[&str]) -> Option<Self> {
         let (mut code, mut timeout, mut expect) = (None, Duration::from_secs(10), None);
@@ -179,7 +179,7 @@ impl Execution {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn read_code(path: &str) -> Option<String> {
     let metadata = std::fs::metadata(path).ok()?;
     (metadata.len() <= CODE_LIMIT as u64)
@@ -187,7 +187,7 @@ fn read_code(path: &str) -> Option<String> {
         .flatten()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn install_host(words: &[&str]) -> ExitCode {
     let (mut bun, mut executor, mut directory) = (None, None, None);
     let mut rest = words;
@@ -225,14 +225,14 @@ fn install_host(words: &[&str]) -> ExitCode {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn print<T: serde::Serialize>(value: &T) {
     if let Ok(text) = serde_json::to_string(value) {
         println!("{text}");
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn failed(error: &Error) -> ExitCode {
     let code = match error {
         Error::Io(error) => error.code(),
@@ -250,13 +250,13 @@ fn usage() -> ExitCode {
 }
 
 /// Schema-validated local events. Export follows agent composition (ADR 0015).
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct Telemetry {
     logger: Option<nddev_device_sync_telemetry::Logger>,
     provider: opentelemetry_sdk::trace::SdkTracerProvider,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Telemetry {
     fn install(host_mode: bool) -> Self {
         use opentelemetry::trace::TracerProvider;
@@ -286,7 +286,7 @@ impl Telemetry {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Drop for Telemetry {
     fn drop(&mut self) {
         if let Some(logger) = self.logger.as_mut() {
