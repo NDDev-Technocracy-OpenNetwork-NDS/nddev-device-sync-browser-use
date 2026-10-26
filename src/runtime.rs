@@ -6,19 +6,33 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// `sun_path` holds 108 bytes on Linux; keep margin for the terminator.
+/// `sun_path` holds 108 bytes on Linux and 104 on macOS; keep margin for the terminator.
 const SOCKET_PATH_LIMIT: usize = 100;
 
 pub(crate) fn directory() -> Result<PathBuf, IoError> {
     let path = match std::env::var_os("NDS_BROWSER_USE_RUNTIME_DIR") {
         Some(path) => PathBuf::from(path),
-        None => PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").ok_or(IoError::Unavailable)?)
-            .join("nds-browser-use"),
+        None => user_runtime()?.join("nds-browser-use"),
     };
     if !path.is_absolute() {
         return Err(IoError::InvalidConfiguration);
     }
     Ok(path)
+}
+
+/// The session's runtime directory on Linux.
+#[cfg(not(target_os = "macos"))]
+fn user_runtime() -> Result<PathBuf, IoError> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .ok_or(IoError::Unavailable)
+}
+
+/// macOS has no runtime directory; its per-user temporary directory is private to the user and
+/// shared by Chrome and the user's shells through launchd.
+#[cfg(target_os = "macos")]
+fn user_runtime() -> Result<PathBuf, IoError> {
+    Ok(std::env::temp_dir())
 }
 
 pub(crate) fn control_socket(directory: &Path) -> Result<PathBuf, IoError> {

@@ -52,7 +52,12 @@ type Result = { code: number; body: Record<string, unknown> };
 async function cli(...args: string[]): Promise<Result> {
   const child = Bun.spawn([binary, ...args], { env, stdout: "pipe", stderr: "ignore" });
   const text = await new Response(child.stdout).text();
-  return { code: await child.exited, body: JSON.parse(text) as Record<string, unknown> };
+  const result = { code: await child.exited, body: JSON.parse(text) as Record<string, unknown> };
+  // CI diagnostics: only the stable error code and message, never agent code or page data.
+  if (process.env.NDS_E2E_DIAGNOSTICS === "1" && typeof result.body.error === "string") {
+    console.error(`cli ${args[0]} refused: ${result.body.error} (${result.body.message})`);
+  }
+  return result;
 }
 
 async function run(project: string, code: string, ...flags: string[]): Promise<Result> {
@@ -149,13 +154,22 @@ beforeAll(async () => {
     executablePath: chrome,
     headless: true,
     env,
-    args: [`--disable-extensions-except=${installed}`, `--load-extension=${installed}`],
+    args: [
+      `--disable-extensions-except=${installed}`,
+      `--load-extension=${installed}`,
+      ...(process.env.NDS_E2E_DIAGNOSTICS === "1" ? ["--enable-logging=stderr"] : []),
+    ],
   });
   // The observer stays passive: Playwright would otherwise dismiss every
   // dialog on pages it watches and race the agent's own handler.
   for (const page of observer.pages()) page.on("dialog", () => undefined);
   observer.on("page", (page) => page.on("dialog", () => undefined));
-  for (let attempt = 0; attempt < 100 && !existsSync(join(runtime, "control.sock")); attempt++) {
+  // The host binds its sockets before the extension's hello arrives; scenarios start once the
+  // host reports the connected extension, which takes longer on slower runners.
+  for (let attempt = 0; attempt < 200; attempt++) {
+    if (existsSync(join(runtime, "control.sock")) && (await cli("status")).body.enabled === true) {
+      break;
+    }
     await Bun.sleep(100);
   }
 });
@@ -163,6 +177,10 @@ beforeAll(async () => {
 afterAll(async () => {
   await observer?.close().catch(() => undefined);
   fixture?.stop(true);
+  // CI diagnostics: the host log carries event names and outcomes only, never page data.
+  if (process.env.NDS_E2E_DIAGNOSTICS === "1" && existsSync(hostLog)) {
+    console.error(`host log:\n${readFileSync(hostLog, "utf8")}`);
+  }
   rmSync(runtime, { recursive: true, force: true });
   rmSync(root, { recursive: true, force: true });
 });

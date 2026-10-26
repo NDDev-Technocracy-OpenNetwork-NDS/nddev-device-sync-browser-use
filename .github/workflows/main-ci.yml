@@ -75,3 +75,44 @@ jobs:
           echo "NDS_TEST_CHROME=$RUNNER_TEMP/cft/$(jq -r .executables.NDS_TEST_CHROME provider.lock.json)" >> "$GITHUB_ENV"
       - name: Real-browser acceptance in an isolated profile
         run: just browser-check
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: package.json
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
+        with:
+          just-version: '1.59.0'
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+      - name: Run the module checks
+        run: just check
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+      - name: Lint and test the platform-neutral code
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - name: Require an honest unsupported host
+        shell: bash
+        run: |
+          set +e
+          output="$(cargo run --locked --quiet --bin nds-browser-use -- status 2>&1)"
+          status=$?
+          set -e
+          test "$status" = 2
+          grep -q 'not supported on this platform' <<< "$output"

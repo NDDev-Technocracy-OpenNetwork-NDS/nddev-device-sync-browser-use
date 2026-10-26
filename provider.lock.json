@@ -8,5 +8,13 @@
   "executables": {
     "NDS_TEST_CHROME": "chrome-linux64/chrome",
     "CHROME_DEVEL_SANDBOX": "chrome-linux64/chrome_sandbox"
+  },
+  "mac_arm64": {
+    "asset": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.47/mac-arm64/chrome-mac-arm64.zip",
+    "sha256": "ad7f2b49a4dc679af286b1b1b386670d93ca7868079f69012d21ba0ac8293df3",
+    "size": 194932023,
+    "executables": {
+      "NDS_TEST_CHROME": "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+    }
   }
 }

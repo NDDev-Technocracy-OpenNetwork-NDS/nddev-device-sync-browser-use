@@ -31,6 +31,8 @@ impl Browser {
         }
     }
 
+    /// The browser's default user data directory, relative to the platform's base.
+    #[cfg(not(target_os = "macos"))]
     fn profile_root(self) -> &'static str {
         match self {
             Self::Chrome => "google-chrome",
@@ -39,13 +41,39 @@ impl Browser {
             Self::Chromium => "chromium",
         }
     }
+
+    #[cfg(target_os = "macos")]
+    fn profile_root(self) -> &'static str {
+        match self {
+            Self::Chrome => "Google/Chrome",
+            Self::ChromeBeta => "Google/Chrome Beta",
+            Self::ChromeForTesting => "Google/Chrome for Testing",
+            Self::Chromium => "Chromium",
+        }
+    }
 }
 
 /// Where Chrome looks up user-level hosts: `<user data dir>/NativeMessagingHosts`.
 pub fn host_directory(browser: Browser) -> Result<PathBuf, IoError> {
-    Ok(config_home()?
+    Ok(user_data_base()?
         .join(browser.profile_root())
         .join("NativeMessagingHosts"))
+}
+
+/// Linux keeps browser user data under the XDG configuration home.
+#[cfg(not(target_os = "macos"))]
+fn user_data_base() -> Result<PathBuf, IoError> {
+    config_home()
+}
+
+/// macOS keeps browser user data under `~/Library/Application Support`.
+#[cfg(target_os = "macos")]
+fn user_data_base() -> Result<PathBuf, IoError> {
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or(IoError::Unavailable)?);
+    if !home.is_absolute() {
+        return Err(IoError::InvalidConfiguration);
+    }
+    Ok(home.join("Library").join("Application Support"))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -210,10 +238,25 @@ mod tests {
 
     #[test]
     fn browsers_map_to_their_profile_roots() {
+        let expected = if cfg!(target_os = "macos") {
+            "Google/Chrome Beta"
+        } else {
+            "google-chrome-beta"
+        };
         assert_eq!(
             Browser::parse("chrome-beta").map(Browser::profile_root),
-            Some("google-chrome-beta")
+            Some(expected)
         );
         assert_eq!(Browser::parse("firefox"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_hosts_live_under_application_support() {
+        let directory = host_directory(Browser::Chrome).unwrap();
+        assert!(
+            directory.ends_with("Library/Application Support/Google/Chrome/NativeMessagingHosts"),
+            "{directory:?}"
+        );
     }
 }
