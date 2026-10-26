@@ -229,14 +229,41 @@ function groupKey(groupId: number | undefined): string | undefined {
 
 // Tabs being announced; several Chrome events can report the same new tab.
 const adopting = new Set<number>();
+const ADOPT_ATTEMPTS = 5;
+const ADOPT_RETRY_MS = 200;
+
+function exists(tab: number): Promise<boolean> {
+  return chrome.tabs.get(tab).then(
+    () => true,
+    () => false,
+  );
+}
+
+// A new tab can refuse grouping or a debugger session while Chrome still sets it up, and the
+// event that reports it second is dropped while the first adoption runs. So both steps are
+// retried while the tab exists, and a final failure reaches the host instead of a silent miss.
+async function retried<T>(tab: number, work: () => Promise<T>): Promise<{ value: T } | undefined> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return { value: await work() };
+    } catch {
+      if (attempt === ADOPT_ATTEMPTS || !enabled || !port || !(await exists(tab))) return undefined;
+      await new Promise((done) => setTimeout(done, ADOPT_RETRY_MS * attempt));
+    }
+  }
+}
+
+async function adopted(tab: number, failure: "group" | "attach"): Promise<void> {
+  if (enabled && port && (await exists(tab))) send({ type: "adoption", tab, failure });
+}
 
 async function adopt(tab: number, group: string): Promise<void> {
   if (!enabled || !port || attached.has(tab) || adopting.has(tab)) return;
   adopting.add(tab);
   try {
-    // A failed attach leaves the tab unattached; nothing is announced.
-    const target = await attach(tab, group).catch(() => undefined);
-    if (target !== undefined) send({ type: "attached", tab, group, target });
+    const target = await retried(tab, () => attach(tab, group));
+    if (target) send({ type: "attached", tab, group, target: target.value });
+    else await adopted(tab, "attach");
   } finally {
     adopting.delete(tab);
   }
@@ -269,7 +296,9 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => {
   void own(id, async () => {
     const tab = await chrome.tabs.get(id).catch(() => undefined);
     if (!tab) return;
-    if (groupKey(tab.groupId) !== group) await join(id, group).catch(() => undefined);
+    if (groupKey(tab.groupId) !== group && !(await retried(id, () => join(id, group)))) {
+      await adopted(id, "group");
+    }
     await adopt(id, group);
   });
 });
