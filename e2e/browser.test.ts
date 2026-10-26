@@ -307,7 +307,7 @@ test("keyboard input and file uploads reach the page", async () => {
   writeFileSync(upload, "nds");
   const result = await run(
     "acceptance",
-    `const page = await context.newPage(); await page.goto("${origin}/form"); await page.locator("#text").pressSequentially("typed"); await page.setInputFiles("#file", "${upload}"); return [await page.locator("#echo").textContent(), await page.locator("#picked").textContent()].join(" ")`,
+    `const page = await context.newPage(); await page.goto("${origin}/form"); await page.locator("#text").pressSequentially("typed"); await page.setInputFiles("#file", ${JSON.stringify(upload)}); return [await page.locator("#echo").textContent(), await page.locator("#picked").textContent()].join(" ")`,
     "--timeout",
     "20000",
   );

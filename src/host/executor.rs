@@ -20,7 +20,7 @@ use tokio::{
 const LINE_LIMIT: u64 = 6 * OUTPUT_LIMIT as u64 + 4096;
 
 pub(crate) struct Executor {
-    _child: Child,
+    child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
     next: u64,
@@ -78,13 +78,18 @@ impl Executor {
         let line = within(deadline, read_line(&mut output)).await?;
         match serde_json::from_slice::<Ready>(&line) {
             Ok(Ready { ready: true }) => Ok(Self {
-                _child: child,
+                child,
                 input,
                 output,
                 next: 0,
             }),
             _ => Err(Refusal::ExecutorUnavailable),
         }
+    }
+
+    /// Kills the process and waits until it has exited.
+    pub async fn stop(mut self) {
+        let _ = self.child.kill().await;
     }
 
     pub async fn run(

@@ -114,6 +114,15 @@ struct Tab {
     document: Option<String>,
 }
 
+/// Ends a session: its executor exits before its artifact area is removed, because Windows keeps
+/// the working directory of a live process.
+async fn discard(session: Session) {
+    if let Some(executor) = session.executor {
+        executor.stop().await;
+    }
+    let _ = std::fs::remove_dir_all(&session.artifacts);
+}
+
 /// Whether Chrome started this host for one of the pinned NDS extension builds.
 pub fn admitted(origin: &str) -> bool {
     EXTENSION_IDS
@@ -570,7 +579,7 @@ impl Host {
             state.tabs.clear();
             state.children.clear();
             for (_, session) in state.sessions.drain() {
-                let _ = std::fs::remove_dir_all(&session.artifacts);
+                tokio::spawn(discard(session));
             }
         }
         let name = if enabled {
@@ -786,8 +795,9 @@ impl Host {
                 Ok(view_session(&state, project))
             }
             Err(refusal) => {
-                if let Some(session) = self.state().sessions.remove(project) {
-                    let _ = std::fs::remove_dir_all(session.artifacts);
+                let removed = self.state().sessions.remove(project);
+                if let Some(session) = removed {
+                    discard(session).await;
                 }
                 tracing::warn!(event.name = "browser.session.opened", outcome = "rejected", error.type = refusal.code());
                 Err(refusal)
@@ -814,8 +824,7 @@ impl Host {
             }
             session
         };
-        let _ = std::fs::remove_dir_all(&session.artifacts);
-        drop(session);
+        discard(session).await;
         let released = self
             .refusable(json!({ "type": "release", "group": project, "close": close_tabs }))
             .await;
