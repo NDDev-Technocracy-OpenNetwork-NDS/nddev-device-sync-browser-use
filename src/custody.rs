@@ -4,7 +4,9 @@
 //! project session; it is never an owner passkey. Agent composition implements this port with
 //! the NDS Vault adapter. This crate keeps no credential at rest: the host holds a released
 //! credential in zeroizing memory for one operation and imports it into a virtual authenticator
-//! of the agent tab, so agent code, the executor, logs and telemetry never carry it.
+//! of the agent tab; logs, telemetry and public DTOs never carry it. Chrome shares one debugger
+//! session per tab with agent code, so the relay has to withhold WebAuthn credential events and
+//! reads on host-owned authenticators; code running as the owner is still not sandboxed.
 
 use crate::protocol;
 use zeroize::Zeroizing;
