@@ -363,6 +363,16 @@ impl Host {
                 self.update();
             }
             Some("control") => self.on_control(message["enabled"].as_bool() == Some(true)),
+            // The extension gave up adopting a new agent tab after its retries.
+            Some("adoption") => {
+                let class = match message["failure"].as_str() {
+                    Some("tab") => "tab_missing",
+                    Some("group") => "group_failed",
+                    Some("attach") => "attach_failed",
+                    _ => "invalid_frame",
+                };
+                tracing::warn!(event.name = "browser.target.attached", outcome = "error", error.type = class);
+            }
             _ => {
                 tracing::warn!(event.name = "browser.extension.message", outcome = "rejected", error.type = "invalid_frame")
             }
