@@ -657,12 +657,25 @@ impl Host {
         })
         .unwrap_or_default();
         header.push(b'\n');
-        let _ = tokio::time::timeout(CONTROL_IO, async {
+        let written = tokio::time::timeout(CONTROL_IO, async {
             write.write_all(&header).await?;
             write.write_all(&payload).await?;
             write.flush().await
         })
         .await;
+        // A reply the client never receives is visible, with a stable class only.
+        let failure = match written {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(match error.kind() {
+                std::io::ErrorKind::BrokenPipe => "broken_pipe",
+                std::io::ErrorKind::ConnectionReset => "connection_reset",
+                _ => "io",
+            }),
+            Err(_) => Some("timeout"),
+        };
+        if let Some(class) = failure {
+            tracing::warn!(event.name = "browser.control.reply", outcome = "error", error.type = class);
+        }
     }
 
     async fn handle(&self, request: Request) -> Reply {
