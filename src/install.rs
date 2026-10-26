@@ -238,10 +238,25 @@ mod tests {
 
     #[test]
     fn browsers_map_to_their_profile_roots() {
+        let expected = if cfg!(target_os = "macos") {
+            "Google/Chrome Beta"
+        } else {
+            "google-chrome-beta"
+        };
         assert_eq!(
             Browser::parse("chrome-beta").map(Browser::profile_root),
-            Some("google-chrome-beta")
+            Some(expected)
         );
         assert_eq!(Browser::parse("firefox"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_hosts_live_under_application_support() {
+        let directory = host_directory(Browser::Chrome).unwrap();
+        assert!(
+            directory.ends_with("Library/Application Support/Google/Chrome/NativeMessagingHosts"),
+            "{directory:?}"
+        );
     }
 }
