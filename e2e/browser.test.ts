@@ -360,7 +360,8 @@ test("screenshots are written inside the session area", async () => {
     "--timeout",
     "20000",
   );
-  const path = String(result.body.output);
+  // Agent code joins with "/", which Windows accepts beside its own separator.
+  const path = resolve(String(result.body.output));
   expect(path).toBe(join(runtime, "sessions", "acceptance", "form.png"));
   expect([...readFileSync(path).subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
 });
