@@ -227,13 +227,15 @@ beforeAll(async () => {
   observer.on("page", (page) => page.on("dialog", () => undefined));
   // The host binds its sockets before the extension's hello arrives; scenarios start once the
   // host reports the connected extension, which takes longer on slower or loaded runners.
-  const connected = Date.now() + 45_000;
-  while (!(present(join(runtime, "control.sock")) && (await cli("status")).body.enabled === true)) {
+  // The host's own answer decides: a presence check never saw the control socket on Windows.
+  // On a hosted macOS runner with every core loaded, Chrome took over 45 s to start the host.
+  const connected = Date.now() + 120_000;
+  while ((await cli("status")).body.enabled !== true) {
     if (Date.now() > connected)
-      throw new Error("the extension did not connect to its host in 45 s");
+      throw new Error("the extension did not connect to its host in 120 s");
     await Bun.sleep(100);
   }
-});
+}, 180_000);
 
 afterAll(async () => {
   await observer?.close().catch(() => undefined);
