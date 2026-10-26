@@ -16,5 +16,13 @@
     "executables": {
       "NDS_TEST_CHROME": "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
     }
+  },
+  "win64": {
+    "asset": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.47/win64/chrome-win64.zip",
+    "sha256": "a4e0d57245e167e98a9d465af1e3774d2b4ec9f04e483d19bcd97a6f63cf46dd",
+    "size": 209154801,
+    "executables": {
+      "NDS_TEST_CHROME": "chrome-win64/chrome.exe"
+    }
   }
 }
