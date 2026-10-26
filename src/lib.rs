@@ -6,6 +6,7 @@
 //! session runs agent Playwright code in its own executor process. Pages,
 //! DOM and results are untrusted data and never enter telemetry or Debug.
 
+pub mod custody;
 pub mod protocol;
 pub mod view;
 
