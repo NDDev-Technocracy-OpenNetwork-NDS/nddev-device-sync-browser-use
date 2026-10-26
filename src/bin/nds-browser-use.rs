@@ -40,6 +40,11 @@ async fn main() -> ExitCode {
     // stdout carries native messaging in host mode; local telemetry uses stderr.
     let _telemetry = Telemetry::install(host_mode);
     if host_mode {
+        // A foreign caller is refused before any local configuration is read.
+        if !host::admitted(&arguments[0]) {
+            tracing::error!(event.name = "browser.host.failed", outcome = "error", error.type = host_error(&host::HostError::Origin));
+            return ExitCode::from(2);
+        }
         return match install::load() {
             Ok(config) => match host::run(&arguments[0], config).await {
                 Ok(()) => ExitCode::SUCCESS,

@@ -115,21 +115,33 @@ struct Tab {
     document: Option<String>,
 }
 
-pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
-    let admitted = EXTENSION_IDS
+/// Whether Chrome started this host for one of the pinned NDS extension builds.
+pub fn admitted(origin: &str) -> bool {
+    EXTENSION_IDS
         .iter()
-        .any(|id| origin == format!("chrome-extension://{id}/"));
-    if !admitted {
+        .any(|id| origin == format!("chrome-extension://{id}/"))
+}
+
+pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
+    if !admitted(origin) {
         return Err(HostError::Origin);
     }
     if !config.bun.is_absolute() || !config.executor.is_absolute() {
         return Err(IoError::InvalidConfiguration.into());
     }
     runtime::private_directory(&config.runtime)?;
-    runtime::private_directory(&config.runtime.join("sessions"))?;
     let control = bind(&runtime::control_socket(&config.runtime)?)?;
     let cdp_socket = runtime::cdp_socket(&config.runtime)?;
     let cdp = bind(&cdp_socket)?;
+    // Owning both sockets proves no other host is alive here, so session areas left by a
+    // host that died without its shutdown belong to no session and are removed.
+    let sessions = config.runtime.join("sessions");
+    match std::fs::remove_dir_all(&sessions) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(IoError::Unavailable.into()),
+    }
+    runtime::private_directory(&sessions)?;
     let (outbound, mut queue) = mpsc::channel::<Vec<u8>>(256);
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
