@@ -84,6 +84,26 @@ async function cli(...args: string[]): Promise<Result> {
   return result;
 }
 
+// A session's executor starts with it; like an agent that waits, scenarios run once the session
+// reports its executor ready, so a slow start never spends a run's deadline.
+async function opened(project: string): Promise<Result> {
+  const result = await cli("session", "new", project);
+  const ready = Date.now() + 45_000;
+  for (;;) {
+    const listed: unknown = (await cli("session", "list")).body;
+    const sessions = Array.isArray(listed) ? (listed as Record<string, unknown>[]) : [];
+    if (sessions.some((session) => session.project === project && session.executor === true)) {
+      return result;
+    }
+    if (result.code !== 0 || Date.now() > ready) {
+      throw new Error(
+        `the executor of ${project} did not report ready: ${JSON.stringify(result.body)}`,
+      );
+    }
+    await Bun.sleep(100);
+  }
+}
+
 async function run(project: string, code: string, ...flags: string[]): Promise<Result> {
   return cli("-s", project, "-e", code, ...flags);
 }
@@ -206,14 +226,16 @@ beforeAll(async () => {
   for (const page of observer.pages()) page.on("dialog", () => undefined);
   observer.on("page", (page) => page.on("dialog", () => undefined));
   // The host binds its sockets before the extension's hello arrives; scenarios start once the
-  // host reports the connected extension, which takes longer on slower runners.
-  for (let attempt = 0; attempt < 200; attempt++) {
-    if (present(join(runtime, "control.sock")) && (await cli("status")).body.enabled === true) {
-      break;
-    }
+  // host reports the connected extension, which takes longer on slower or loaded runners.
+  // The host's own answer decides: a presence check never saw the control socket on Windows.
+  // On a hosted macOS runner with every core loaded, Chrome took over 45 s to start the host.
+  const connected = Date.now() + 120_000;
+  while ((await cli("status")).body.enabled !== true) {
+    if (Date.now() > connected)
+      throw new Error("the extension did not connect to its host in 120 s");
     await Bun.sleep(100);
   }
-});
+}, 180_000);
 
 afterAll(async () => {
   await observer?.close().catch(() => undefined);
@@ -234,7 +256,7 @@ test("the connected extension reports enabled control", async () => {
 });
 
 test("agent code acts in its own tab and the browser shows the result", async () => {
-  expect((await cli("session", "new", "acceptance")).body).toMatchObject({ project: "acceptance" });
+  expect((await opened("acceptance")).body).toMatchObject({ project: "acceptance" });
   const before = requests;
   const result = await run(
     "acceptance",
@@ -446,7 +468,7 @@ test("the owner's switch revokes sessions until control is enabled again", async
   expect((await run("acceptance", "1")).body.error).toBe("permission_required");
   expect((await cli("session", "new", "other")).body.error).toBe("permission_required");
   await ownerSwitch(true);
-  const reopened = await cli("session", "new", "acceptance");
+  const reopened = await opened("acceptance");
   expect(reopened.body).toMatchObject({ project: "acceptance" });
   expect(Number(reopened.body.tabs)).toBeGreaterThan(0);
   const result = await run("acceptance", "context.pages().map((page) => page.url()).sort()");
@@ -485,7 +507,7 @@ test("a lost host is replaced and the agent group is reclaimed without owner tab
   // No executor outlives its host, and the dead host's artifacts are gone.
   expect(processes(cdpEndpoint)).toEqual([]);
   expect(existsSync(leftover)).toBe(false);
-  const reopened = await cli("session", "new", "acceptance");
+  const reopened = await opened("acceptance");
   expect(Number(reopened.body.tabs)).toBeGreaterThan(0);
   const reclaimed = await run(
     "acceptance",
