@@ -54,15 +54,13 @@ impl Browser {
     }
 
     /// The user registry key under which the browser looks up native messaging hosts on
-    /// Windows: the product's registry path, as each product has its own user data directory
-    /// on the other platforms.
+    /// Windows. It follows the build's branding: every Google Chrome channel reads the Google
+    /// Chrome key, and unbranded builds, Chromium and Chrome for Testing, read the Chromium key.
     #[cfg(windows)]
     fn registry_key(self) -> String {
         let product = match self {
-            Self::Chrome => r"Google\Chrome",
-            Self::ChromeBeta => r"Google\Chrome Beta",
-            Self::ChromeForTesting => r"Google\Chrome for Testing",
-            Self::Chromium => "Chromium",
+            Self::Chrome | Self::ChromeBeta => r"Google\Chrome",
+            Self::ChromeForTesting | Self::Chromium => "Chromium",
         };
         format!(r"Software\{product}\NativeMessagingHosts\{NATIVE_HOST}")
     }
@@ -306,7 +304,11 @@ mod tests {
     fn windows_browsers_name_their_registry_keys() {
         assert_eq!(
             Browser::ChromeForTesting.registry_key(),
-            r"Software\Google\Chrome for Testing\NativeMessagingHosts\ai.nddev.nds.browser_use"
+            r"Software\Chromium\NativeMessagingHosts\ai.nddev.nds.browser_use"
+        );
+        assert_eq!(
+            Browser::ChromeBeta.registry_key(),
+            r"Software\Google\Chrome\NativeMessagingHosts\ai.nddev.nds.browser_use"
         );
         assert_eq!(
             Browser::Chromium.registry_key(),

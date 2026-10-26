@@ -112,6 +112,8 @@ jobs:
         shell: bash
         env:
           NDS_E2E_DIAGNOSTICS: "1"
+          # Chrome's own log, which the e2e enables, reaches the job output only through Playwright.
+          DEBUG: pw:browser
         run: |
           bun install --frozen-lockfile --ignore-scripts
           cargo build --locked
