@@ -1,8 +1,8 @@
 //! Experiment (not for merge): does LocalChannel read buffered data after its peer closed?
 #![cfg(unix)]
 
-use nddev_device_sync_browser_use::CancellationToken;
 use nddev_device_sync_adapter_io::LocalChannel;
+use nddev_device_sync_browser_use::CancellationToken;
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixListener,
@@ -11,8 +11,13 @@ use std::{
 
 #[test]
 fn a_payload_written_before_the_peer_closes_stays_readable() {
-    let base = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| "/tmp".into());
-    let directory = tempfile::Builder::new().prefix("nds-bu-exp-").tempdir_in(base).unwrap();
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| "/tmp".into());
+    let directory = tempfile::Builder::new()
+        .prefix("nds-bu-exp-")
+        .tempdir_in(base)
+        .unwrap();
     let path = directory.path().join("s.sock");
     let listener = UnixListener::bind(&path).unwrap();
     let mut failures = Vec::new();
@@ -32,7 +37,13 @@ fn a_payload_written_before_the_peer_closes_stays_readable() {
                 // The host drops its connection right after the reply.
             })
         };
-        let mut channel = LocalChannel::connect(&path, Duration::from_secs(5), 65_536, CancellationToken::new()).unwrap();
+        let mut channel = LocalChannel::connect(
+            &path,
+            Duration::from_secs(5),
+            65_536,
+            CancellationToken::new(),
+        )
+        .unwrap();
         channel.send_frame(b"{\"op\":\"status\"}").unwrap();
         let header = channel.read_frame().unwrap();
         assert_eq!(header, b"{\"bytes\":5}");
@@ -43,5 +54,10 @@ fn a_payload_written_before_the_peer_closes_stays_readable() {
             Err(error) => failures.push(format!("{error:?}")),
         }
     }
-    assert!(failures.is_empty(), "{} of 50 reads failed after the peer closed: {:?}", failures.len(), failures.first());
+    assert!(
+        failures.is_empty(),
+        "{} of 50 reads failed after the peer closed: {:?}",
+        failures.len(),
+        failures.first()
+    );
 }
