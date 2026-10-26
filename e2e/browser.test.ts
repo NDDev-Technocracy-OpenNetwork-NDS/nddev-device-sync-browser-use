@@ -52,7 +52,12 @@ type Result = { code: number; body: Record<string, unknown> };
 async function cli(...args: string[]): Promise<Result> {
   const child = Bun.spawn([binary, ...args], { env, stdout: "pipe", stderr: "ignore" });
   const text = await new Response(child.stdout).text();
-  return { code: await child.exited, body: JSON.parse(text) as Record<string, unknown> };
+  const result = { code: await child.exited, body: JSON.parse(text) as Record<string, unknown> };
+  // CI diagnostics: only the stable error code and message, never agent code or page data.
+  if (process.env.NDS_E2E_DIAGNOSTICS === "1" && typeof result.body.error === "string") {
+    console.error(`cli ${args[0]} refused: ${result.body.error} (${result.body.message})`);
+  }
+  return result;
 }
 
 async function run(project: string, code: string, ...flags: string[]): Promise<Result> {
