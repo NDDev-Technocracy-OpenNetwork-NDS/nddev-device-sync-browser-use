@@ -504,6 +504,7 @@ test("host telemetry is schema-valid and carries no page data", () => {
     "browser.control.disabled",
     "browser.session.closed",
     "browser.extension.reload",
+    "browser.execute.cancelled",
     "browser.host.stopped",
   ]) {
     expect(names).toContain(name);

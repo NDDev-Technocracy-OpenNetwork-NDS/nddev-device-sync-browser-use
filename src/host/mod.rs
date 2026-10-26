@@ -643,7 +643,16 @@ impl Host {
                 let mut probe = [0u8; 1];
                 tokio::select! {
                     reply = self.execute(&project, &code, timeout_ms, expect) => reply,
-                    _ = reader.read(&mut probe) => return,
+                    read = reader.read(&mut probe) => {
+                        // The run is abandoned without a reply; the class shows which side ended it.
+                        let class = match read {
+                            Ok(0) => "client_closed",
+                            Ok(_) => "client_data",
+                            Err(_) => "client_error",
+                        };
+                        tracing::info!(event.name = "browser.execute.cancelled", outcome = "stopped", error.type = class);
+                        return;
+                    }
                 }
             }
             Some(request) => self.handle(request).await,
