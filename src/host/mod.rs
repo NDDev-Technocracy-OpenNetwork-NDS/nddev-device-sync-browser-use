@@ -684,7 +684,12 @@ impl Host {
         };
         if let Some(class) = failure {
             tracing::warn!(event.name = "browser.control.reply", outcome = "error", error.type = class);
+            return;
         }
+        // The client closes once it has read the reply. Closing first would race it: on macOS
+        // the agent client cannot read buffered reply bytes after its peer has closed.
+        let mut rest = [0u8; 1];
+        let _ = tokio::time::timeout(CONTROL_IO, reader.read(&mut rest)).await;
     }
 
     async fn handle(&self, request: Request) -> Reply {
