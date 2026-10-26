@@ -63,6 +63,12 @@ function tabs(result: Result): { target: string; document: string; url: string }
   return result.body.tabs as { target: string; document: string; url: string }[];
 }
 
+// Process IDs whose command line contains `pattern`; this run's paths make it unique.
+function processes(pattern: string): number[] {
+  const found = Bun.spawnSync(["pgrep", "-f", pattern]);
+  return found.stdout.toString().trim().split("\n").filter(Boolean).map(Number);
+}
+
 async function observed(path: string): Promise<Page | undefined> {
   return observer.pages().find((page) => page.url() === `${origin}${path}`);
 }
@@ -326,6 +332,37 @@ test("a timeout stops the run before its later action and resets state", async (
   expect((await run("acceptance", "state.value === undefined")).body.output).toBe("true");
 });
 
+test("a client that disconnects mid-run cancels it and frees the session", async () => {
+  const page = await observed("/");
+  const before = await page?.locator("#c").textContent();
+  expect((await run("acceptance", "state.value = 7")).code).toBe(0);
+  const client = Bun.spawn(
+    [
+      binary,
+      "-s",
+      "acceptance",
+      "-e",
+      `await new Promise((done) => setTimeout(done, 3000)); await context.pages().find((candidate) => candidate.url().endsWith("/")).click("#inc")`,
+      "--timeout",
+      "20000",
+    ],
+    { env, stdout: "ignore", stderr: "ignore" },
+  );
+  await Bun.sleep(500);
+  client.kill("SIGKILL");
+  await client.exited;
+  // The host drops the run with its client, which kills the session's executor.
+  let executors = processes(`${runtime}/cdp.sock`);
+  for (let attempt = 0; attempt < 50 && executors.length > 0; attempt++) {
+    await Bun.sleep(100);
+    executors = processes(`${runtime}/cdp.sock`);
+  }
+  expect(executors).toEqual([]);
+  expect((await run("acceptance", "state.value === undefined")).body.output).toBe("true");
+  await Bun.sleep(3000);
+  expect(await page?.locator("#c").textContent()).toBe(before ?? "");
+});
+
 test("a closed tab is reported, not acted on", async () => {
   const before = new Set(tabs(await run("acceptance", "1")).map((tab) => tab.target));
   const opened = await run(
@@ -354,6 +391,49 @@ test("the owner's switch revokes sessions until control is enabled again", async
   expect(Number(reopened.body.tabs)).toBeGreaterThan(0);
   const result = await run("acceptance", "context.pages().map((page) => page.url()).sort()");
   expect(result.body.output).toContain(`${origin}/`);
+});
+
+test("a lost host is replaced and the agent group is reclaimed without owner tabs", async () => {
+  const owner = await observed("/owner");
+  expect(owner).toBeDefined();
+  const leftover = join(runtime, "sessions", "acceptance", "before-loss.png");
+  const written = await run(
+    "acceptance",
+    `await context.pages()[0].screenshot({ path: artifacts + "/before-loss.png" }); return "written"`,
+    "--timeout",
+    "20000",
+  );
+  expect(written.body.output).toBe("written");
+  expect(existsSync(leftover)).toBe(true);
+  const hostCommand = `${join(prefix, "bin", "nds-browser-use")} chrome-extension://`;
+  const [lost, ...others] = processes(hostCommand);
+  expect(lost).toBeNumber();
+  expect(others).toEqual([]);
+  process.kill(lost as number, "SIGKILL");
+  // The extension sees its port close, releases the agent tabs and starts a new host.
+  let status: Result | undefined;
+  for (let attempt = 0; attempt < 150; attempt++) {
+    await Bun.sleep(100);
+    status = await cli("status");
+    if (status.code === 0 && status.body.enabled === true) break;
+  }
+  expect(status?.body.enabled).toBe(true);
+  const [replacement, ...extra] = processes(hostCommand);
+  expect(replacement).not.toBe(lost);
+  expect(extra).toEqual([]);
+  // No executor outlives its host, and the dead host's artifacts are gone.
+  expect(processes(`${runtime}/cdp.sock`)).toEqual([]);
+  expect(existsSync(leftover)).toBe(false);
+  const reopened = await cli("session", "new", "acceptance");
+  expect(Number(reopened.body.tabs)).toBeGreaterThan(0);
+  const reclaimed = await run(
+    "acceptance",
+    "[state.value === undefined, ...context.pages().map((page) => page.url())].join(' ')",
+  );
+  expect(reclaimed.body.output).toStartWith("true ");
+  expect(reclaimed.body.output).toContain(`${origin}/`);
+  expect(reclaimed.body.output).not.toContain("/owner");
+  expect(owner?.url()).toBe(`${origin}/owner`);
 });
 
 test("closing a session cleans only its own area", async () => {
