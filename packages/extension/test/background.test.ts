@@ -233,7 +233,9 @@ test("an attach the owner interrupts by moving the tab is never published and en
   browser.held.get(1)?.resolve();
   expect(await claim()).toMatchObject({ result: { tabs: [] } });
   await until(() => !browser.sessions.has(1));
-  expect(await send({ type: "cdp", tab: 1, method: "Runtime.evaluate" })()).toMatchObject({
+  expect(
+    await send({ type: "cdp", group: "p", tab: 1, method: "Runtime.evaluate" })(),
+  ).toMatchObject({
     error: { code: "target_closed" },
   });
 });
@@ -343,10 +345,10 @@ test("Runtime.enable makes Chrome report the page's execution contexts again", a
   const { browser, send } = await worker({ p: P }, [[1, P]]);
   await send({ type: "claim", group: "p" })();
   const runtime = () => browser.commands.filter((sent) => /^Runtime\.(en|dis)able/.test(sent));
-  await send({ type: "cdp", tab: 1, method: "Runtime.enable" })();
+  await send({ type: "cdp", group: "p", tab: 1, method: "Runtime.enable" })();
   expect(runtime()).toEqual(["Runtime.disable 1", "Runtime.enable 1"]);
   // A child session gets the same on that session.
-  await send({ type: "cdp", tab: 1, session: "frame", method: "Runtime.enable" })();
+  await send({ type: "cdp", group: "p", tab: 1, session: "frame", method: "Runtime.enable" })();
   expect(runtime().slice(2)).toEqual(["Runtime.disable 1/frame", "Runtime.enable 1/frame"]);
 });
 
@@ -379,7 +381,7 @@ test("a tab Chrome detaches on its own is attached again with its setup", async 
   const { browser, send } = await worker({ p: P }, [[1, P]]);
   await send({ type: "claim", group: "p" })();
   for (const method of ["Page.enable", "Network.enable", "Network.disable", "Runtime.enable"])
-    await send({ type: "cdp", tab: 1, method })();
+    await send({ type: "cdp", group: "p", tab: 1, method })();
   browser.events.cdp.fire({ tabId: 1 }, "Target.attachedToTarget", {
     sessionId: "frame",
     targetInfo: { url: "https://example.test/frame" },
@@ -404,7 +406,9 @@ test("a tab Chrome detaches on its own is attached again with its setup", async 
     "Runtime.enable 1",
   ]);
   expect(browser.scripted).toEqual([1]);
-  expect(await send({ type: "cdp", tab: 1, method: "Runtime.evaluate" })()).toMatchObject({
+  expect(
+    await send({ type: "cdp", group: "p", tab: 1, method: "Runtime.evaluate" })(),
+  ).toMatchObject({
     result: {},
   });
 });
@@ -427,7 +431,9 @@ test("a tab Chrome keeps detaching is given up after a few reattaches", async ()
     outcome: "rejected",
     error: "reattach_limit",
   });
-  expect(await send({ type: "cdp", tab: 1, method: "Runtime.evaluate" })()).toMatchObject({
+  expect(
+    await send({ type: "cdp", group: "p", tab: 1, method: "Runtime.evaluate" })(),
+  ).toMatchObject({
     error: { code: "target_closed" },
   });
 });
@@ -496,7 +502,7 @@ test("a release that waited for a reattach never closes a tab the owner took bac
 test("a reattach that lost its tab while waiting replays nothing into it", async () => {
   const { browser, send } = await worker({ p: P }, [[1, P]]);
   await send({ type: "claim", group: "p" })();
-  await send({ type: "cdp", tab: 1, method: "Page.enable" })();
+  await send({ type: "cdp", group: "p", tab: 1, method: "Page.enable" })();
   const info = deferred();
   browser.heldCommands.set("Target.getTargetInfo", info);
   browser.commands.length = 0;
@@ -532,10 +538,16 @@ test("setup a reattach could not restore in full is refused before it reaches Ch
   await send({ type: "claim", group: "p" })();
   const script = "Page.addScriptToEvaluateOnNewDocument";
   for (let index = 0; index < 256; index++)
-    await send({ type: "cdp", tab: 1, method: script, params: { source: `${index}` } })();
+    await send({
+      type: "cdp",
+      group: "p",
+      tab: 1,
+      method: script,
+      params: { source: `${index}` },
+    })();
   browser.commands.length = 0;
   expect(
-    await send({ type: "cdp", tab: 1, method: script, params: { source: "over" } })(),
+    await send({ type: "cdp", group: "p", tab: 1, method: script, params: { source: "over" } })(),
   ).toMatchObject({ error: { code: "capacity" } });
   expect(browser.commands).toEqual([]);
 });
@@ -545,12 +557,18 @@ test("of two setup commands in flight for the last slot exactly one is admitted"
   await send({ type: "claim", group: "p" })();
   const script = "Page.addScriptToEvaluateOnNewDocument";
   for (let index = 0; index < 255; index++)
-    await send({ type: "cdp", tab: 1, method: script, params: { source: `${index}` } })();
+    await send({
+      type: "cdp",
+      group: "p",
+      tab: 1,
+      method: script,
+      params: { source: `${index}` },
+    })();
   const held = deferred();
   browser.heldCommands.set(script, held);
-  const first = send({ type: "cdp", tab: 1, method: script, params: { source: "a" } });
+  const first = send({ type: "cdp", group: "p", tab: 1, method: script, params: { source: "a" } });
   await Bun.sleep(5);
-  const second = send({ type: "cdp", tab: 1, method: script, params: { source: "b" } });
+  const second = send({ type: "cdp", group: "p", tab: 1, method: script, params: { source: "b" } });
   expect(await second()).toMatchObject({ error: { code: "capacity" } });
   held.resolve();
   expect(await first()).toMatchObject({ result: {} });
@@ -601,7 +619,92 @@ test("a failed reattach never detaches the session another life took on its tab 
   await Bun.sleep(20);
   expect(browser.detachAttempts.length).toBe(attempts);
   expect(browser.sessions.has(1)).toBe(true);
-  expect(await send({ type: "cdp", tab: 1, method: "Runtime.evaluate" })()).toMatchObject({
+  expect(
+    await send({ type: "cdp", group: "q", tab: 1, method: "Runtime.evaluate" })(),
+  ).toMatchObject({
     result: {},
   });
+});
+
+test("a command held while its life ends never reaches the next life's attachment", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  const disable = deferred();
+  browser.heldCommands.set("Runtime.disable", disable);
+  const enable = send({ type: "cdp", group: "p", tab: 1, method: "Runtime.enable" });
+  await until(() => browser.commands.includes("Runtime.disable 1"));
+  expect(await send({ type: "release", group: "p", close: false })()).toMatchObject({
+    result: { released: true },
+  });
+  await send({ type: "claim", group: "p" })();
+  browser.heldCommands.delete("Runtime.disable");
+  browser.commands.length = 0;
+  disable.resolve();
+  expect(await enable()).toMatchObject({ error: { code: "target_closed" } });
+  expect(browser.commands).not.toContain("Runtime.enable 1");
+});
+
+test("setup answered after its life ended is never recorded for the next life", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  const answer = deferred();
+  browser.heldCommands.set("Page.enable", answer);
+  const enable = send({ type: "cdp", group: "p", tab: 1, method: "Page.enable" });
+  await until(() => browser.commands.includes("Page.enable 1"));
+  await send({ type: "release", group: "p", close: false })();
+  await send({ type: "claim", group: "p" })();
+  browser.heldCommands.delete("Page.enable");
+  answer.resolve();
+  expect(await enable()).toMatchObject({ error: { code: "target_closed" } });
+  // A reattach of the new life replays nothing the old one set up.
+  browser.commands.length = 0;
+  browser.end(1);
+  await until(() => browser.sessions.has(1) && browser.commands.includes("Runtime.evaluate 1"));
+  expect(browser.commands).not.toContain("Page.enable 1");
+});
+
+test("a command waiting for a reattach that failed is refused, not sent to the tab", async () => {
+  const { browser, send } = await worker({ p: P, q: Q }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  browser.commands.length = 0;
+  browser.held.set(1, deferred());
+  browser.end(1);
+  await Bun.sleep(5);
+  const waiting = send({ type: "cdp", group: "p", tab: 1, method: "Runtime.evaluate" });
+  await Bun.sleep(5);
+  browser.move(1, Q);
+  browser.held.get(1)?.resolve();
+  expect(await waiting()).toMatchObject({ error: { code: "target_closed" } });
+  // The old command went nowhere; life q's own attach then sends only its pin script.
+  expect(browser.commands).not.toContain("Runtime.evaluate 1");
+});
+
+test("a command or close of another group never acts on the tab", async () => {
+  const { browser, send } = await worker({ p: P, q: Q }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  await send({ type: "claim", group: "q" })();
+  // The owner moves p's tab into q; p is released, and q's claim takes the tab.
+  browser.move(1, Q);
+  await send({ type: "release", group: "p", close: false })();
+  await send({ type: "claim", group: "q" })();
+  expect(browser.sessions.has(1)).toBe(true);
+  browser.commands.length = 0;
+  // Requests p queued earlier arrive now: they refuse instead of acting on q's attachment.
+  expect(
+    await send({ type: "cdp", group: "p", tab: 1, method: "Runtime.evaluate" })(),
+  ).toMatchObject({ error: { code: "target_closed" } });
+  expect(await send({ type: "close", group: "p", tab: 1 })()).toMatchObject({
+    error: { code: "target_closed" },
+  });
+  // A request without its group never acts either.
+  expect(
+    await send({ type: "cdp", group: "p", tab: 1, method: "Runtime.evaluate" })(),
+  ).toMatchObject({
+    error: { code: "target_closed" },
+  });
+  expect(browser.commands).toEqual([]);
+  expect(browser.tabs.has(1)).toBe(true);
+  expect(
+    await send({ type: "cdp", group: "q", tab: 1, method: "Runtime.evaluate" })(),
+  ).toMatchObject({ result: {} });
 });
