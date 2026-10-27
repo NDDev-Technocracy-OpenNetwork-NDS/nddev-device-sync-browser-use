@@ -192,12 +192,19 @@ async function dispatch(message) {
             }
             if (message.session)
                 return (await command(target, message.method, message.params)) ?? {};
-            // Setup that would outgrow what a reattach can restore is refused before Chrome sees it.
-            if (!restore.admits(message.tab, message.method, message.params))
+            // Setup that would outgrow what a reattach can restore is refused before Chrome sees it; the
+            // room is held from here until the answer, so concurrent setup shares the bounds.
+            const release = restore.reserve(message.tab, message.method, message.params);
+            if (!release)
                 throw new Refusal("capacity");
-            const params = restore.chromeParams(message.tab, message.method, message.params);
-            const result = (await command(target, message.method, params)) ?? {};
-            return restore.record(message.tab, message.method, message.params, result);
+            try {
+                const params = restore.chromeParams(message.tab, message.method, message.params);
+                const result = (await command(target, message.method, params)) ?? {};
+                return restore.record(message.tab, message.method, message.params, result);
+            }
+            finally {
+                release();
+            }
         }
         case "open": {
             const life = lives.get(message.group);
@@ -366,8 +373,14 @@ function attach(tab, life) {
             throw new Refusal("busy");
         if (!attachment) {
             await removeForeignFrames(tab, life);
-            // Frame cleanup admits nothing; the attach itself needs the life still open.
-            if (!life.open)
+            // Frame cleanup admits nothing. The attach itself needs exactly this life, still its
+            // group's open life, and a tab that did not move and is in that group now.
+            const before = await chrome.tabs.get(tab).catch(() => undefined);
+            if (!life.open ||
+                lives.get(life.group) !== life ||
+                attempt.moved ||
+                !before ||
+                groupKey(before.groupId) !== life.group)
                 throw new Refusal("target_closed");
             await chrome.debugger.attach({ tabId: tab }, PROTOCOL);
             // The session exists from here on, so it is recorded before anything else is awaited:
@@ -386,7 +399,7 @@ function attach(tab, life) {
             }
             attachment.pending = false;
             restore.startSession(tab);
-            await remember(tab);
+            await remember(tab, () => usable(tab) === attachment);
         }
         else if (attachment.revoked || attachment.pending) {
             throw new Refusal("target_closed");
@@ -604,11 +617,16 @@ async function clearOwner(tab) {
     await chrome.notifications.clear(`${OWNER}${tab}`);
     return {};
 }
-// The element of a right-click in an agent tab is remembered there, for the owner's pin.
-async function remember(tab) {
+// The element of a right-click in an agent tab is remembered there, for the owner's pin. Each of
+// its two commands goes out only while `admitted` still holds.
+async function remember(tab, admitted) {
+    if (!admitted())
+        return;
     await chrome.debugger
         .sendCommand({ tabId: tab }, "Page.addScriptToEvaluateOnNewDocument", { source: CONTEXT })
         .catch(() => undefined);
+    if (!admitted())
+        return;
     await chrome.debugger
         .sendCommand({ tabId: tab }, "Runtime.evaluate", { expression: CONTEXT })
         .catch(() => undefined);
@@ -782,7 +800,7 @@ async function reattach(tab, attachment) {
                 params: { frameId, reason: "remove" },
             });
         await restore.replay(tab, (method, params) => step(() => command({ tabId: tab }, method, params)));
-        await step(() => remember(tab));
+        await step(() => remember(tab, current));
         return "restored";
     }
     catch {
