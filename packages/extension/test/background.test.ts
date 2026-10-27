@@ -592,3 +592,56 @@ test("a failed reattach never detaches the session another life took on its tab 
     result: {},
   });
 });
+
+test("a command held while its life ends never reaches the next life's attachment", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  const disable = deferred();
+  browser.heldCommands.set("Runtime.disable", disable);
+  const enable = send({ type: "cdp", tab: 1, method: "Runtime.enable" });
+  await until(() => browser.commands.includes("Runtime.disable 1"));
+  expect(await send({ type: "release", group: "p", close: false })()).toMatchObject({
+    result: { released: true },
+  });
+  await send({ type: "claim", group: "p" })();
+  browser.heldCommands.delete("Runtime.disable");
+  browser.commands.length = 0;
+  disable.resolve();
+  expect(await enable()).toMatchObject({ error: { code: "target_closed" } });
+  expect(browser.commands).not.toContain("Runtime.enable 1");
+});
+
+test("setup answered after its life ended is never recorded for the next life", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  const answer = deferred();
+  browser.heldCommands.set("Page.enable", answer);
+  const enable = send({ type: "cdp", tab: 1, method: "Page.enable" });
+  await until(() => browser.commands.includes("Page.enable 1"));
+  await send({ type: "release", group: "p", close: false })();
+  await send({ type: "claim", group: "p" })();
+  browser.heldCommands.delete("Page.enable");
+  answer.resolve();
+  expect(await enable()).toMatchObject({ error: { code: "target_closed" } });
+  // A reattach of the new life replays nothing the old one set up.
+  browser.commands.length = 0;
+  browser.end(1);
+  await until(() => browser.sessions.has(1) && browser.commands.includes("Runtime.evaluate 1"));
+  expect(browser.commands).not.toContain("Page.enable 1");
+});
+
+test("a command waiting for a reattach that failed is refused, not sent to the tab", async () => {
+  const { browser, send } = await worker({ p: P, q: Q }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  browser.commands.length = 0;
+  browser.held.set(1, deferred());
+  browser.end(1);
+  await Bun.sleep(5);
+  const waiting = send({ type: "cdp", tab: 1, method: "Runtime.evaluate" });
+  await Bun.sleep(5);
+  browser.move(1, Q);
+  browser.held.get(1)?.resolve();
+  expect(await waiting()).toMatchObject({ error: { code: "target_closed" } });
+  // The old command went nowhere; life q's own attach then sends only its pin script.
+  expect(browser.commands).not.toContain("Runtime.evaluate 1");
+});

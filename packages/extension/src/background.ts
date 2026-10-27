@@ -220,11 +220,18 @@ async function dispatch(message: HostRequest): Promise<unknown> {
   if (!enabled && message.type !== "release") throw new Refusal("permission_required");
   switch (message.type) {
     case "cdp": {
-      if (!usable(message.tab)) throw new Refusal("target_closed");
+      // The command belongs to exactly the attachment it found: after every wait and right before
+      // every command or record, that attachment must still hold the tab. A later life's
+      // attachment of the same tab never receives an earlier command, nor its recorded setup.
+      const held = usable(message.tab);
+      if (!held) throw new Refusal("target_closed");
+      const still = (): void => {
+        if (usable(message.tab) !== held) throw new Refusal("target_closed");
+      };
       if (message.method === "NDS.notifyOwner") return notifyOwner(message.tab, message.params);
       if (message.method === "NDS.clearOwner") return clearOwner(message.tab);
       await reattaching.get(message.tab);
-      if (!usable(message.tab)) throw new Refusal("target_closed");
+      still();
       const target: chrome.debugger.DebuggerSession = { tabId: message.tab };
       if (message.session) target.sessionId = message.session;
       if (message.method === "Runtime.enable") {
@@ -232,6 +239,7 @@ async function dispatch(message: HostRequest): Promise<unknown> {
         // later client of the tab, such as a replacement executor or a raw CDP session, would
         // otherwise never learn them, and its evaluations would wait forever.
         await command(target, "Runtime.disable").catch(() => undefined);
+        still();
       }
       if (message.session) return (await command(target, message.method, message.params)) ?? {};
       // Setup that would outgrow what a reattach can restore is refused before Chrome sees it; the
@@ -241,6 +249,7 @@ async function dispatch(message: HostRequest): Promise<unknown> {
       try {
         const params = restore.chromeParams(message.tab, message.method, message.params);
         const result = (await command(target, message.method, params)) ?? {};
+        still();
         return restore.record(message.tab, message.method, message.params, result);
       } finally {
         release();
