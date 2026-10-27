@@ -70,6 +70,30 @@ and OS dialogs, real authenticators' user verification, downloads events,
 browser-wide cookies, new browser contexts and permission grants are outside
 `chrome.debugger`.
 
+## Owned NDS sessions
+
+Native NDS composition uses `BrowserUse::create_owned` to reserve a fresh
+host generation, retains that opaque Rust handle, then calls `open_owned`,
+`execute_owned` and `close_owned` with the same handle. Reservation performs
+no browser action and starts no executor; a lost reservation reply cannot
+start one. Reservations share the existing finite session limit. Existing
+project-only CLI operations retain their local, project-oriented meaning.
+
+Successful owned close means the executor has stopped and been reaped,
+lifecycle mutations have answered, and an opened generation's release has
+been confirmed by the extension with exactly `{"released":true}`. An unopened
+reservation needs no browser action. An older `{}` release answer is refused.
+A lost or unknown lifecycle mutation still keeps admission
+closed: retain the handle instead of adopting or closing another session.
+
+A strict release may end that exact generation's outstanding CDP transport
+authority without a command reply. This does not report command success or
+undo website actions already issued. CDP admission and bounded enqueue share
+the close fence, so an old sender cannot queue work into a replacement.
+Older hosts refuse the new private operations; clients never fall back to
+project-only operations. The Chrome tab-group boundary remains in force;
+installation and extension control remain explicit.
+
 ## Privacy
 
 The extension talks only to the NDS host installed on the same device. Page

@@ -8,6 +8,7 @@
 
 pub mod protocol;
 pub mod view;
+pub use protocol::OwnedSession;
 
 #[cfg(any(unix, windows))]
 mod adapter;
@@ -60,6 +61,34 @@ impl From<Refusal> for Error {
 /// Application port: agents depend on typed sessions and outcomes, not on a socket.
 #[cfg(any(unix, windows))]
 pub trait BrowserUse {
+    /// Reserve before opening, retaining this handle even if opening is canceled.
+    /// A lost reserve reply can leave only a bounded, unstarted reservation.
+    fn create_owned(
+        &self,
+        project: &str,
+        cancellation: CancellationToken,
+    ) -> impl Future<Output = Result<OwnedSession, Error>> + Send;
+    fn open_owned(
+        &self,
+        session: &OwnedSession,
+        cancellation: CancellationToken,
+    ) -> impl Future<Output = Result<view::Session, Error>> + Send;
+    fn execute_owned(
+        &self,
+        session: &OwnedSession,
+        code: &str,
+        timeout: std::time::Duration,
+        expect: Option<Document>,
+        cancellation: CancellationToken,
+    ) -> impl Future<Output = Result<view::Outcome, Error>> + Send;
+    /// Success acknowledges stop/reap and release for this exact generation.
+    /// On a transport failure retain the handle and the unresolved drain state.
+    fn close_owned(
+        &self,
+        session: &OwnedSession,
+        close_tabs: bool,
+        cancellation: CancellationToken,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
     fn status(
         &self,
         cancellation: CancellationToken,

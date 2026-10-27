@@ -19,12 +19,29 @@ pub const MAX_SESSIONS: usize = 8;
 pub const MAX_TABS: usize = 32;
 const PROJECT_LIMIT: usize = 48;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     Status,
     Open {
         project: String,
+    },
+    /// Reserves a new generation without claiming tabs or starting an executor.
+    CreateOwned {
+        project: String,
+    },
+    OpenOwned {
+        session: OwnedSession,
+    },
+    ExecuteOwned {
+        session: OwnedSession,
+        code: String,
+        timeout_ms: u64,
+        expect: Option<Document>,
+    },
+    CloseOwned {
+        session: OwnedSession,
+        close_tabs: bool,
     },
     Sessions,
     Close {
@@ -41,6 +58,39 @@ pub enum Request {
     Update,
 }
 
+impl std::fmt::Debug for Request {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Request bodies may contain agent code and private project/document IDs.
+        formatter.write_str(match self {
+            Self::Status => "Request::Status",
+            Self::Open { .. } => "Request::Open(REDACTED)",
+            Self::CreateOwned { .. } => "Request::CreateOwned(REDACTED)",
+            Self::OpenOwned { .. } => "Request::OpenOwned(REDACTED)",
+            Self::ExecuteOwned { .. } => "Request::ExecuteOwned(REDACTED)",
+            Self::CloseOwned { .. } => "Request::CloseOwned(REDACTED)",
+            Self::Sessions => "Request::Sessions",
+            Self::Close { .. } => "Request::Close(REDACTED)",
+            Self::Execute { .. } => "Request::Execute(REDACTED)",
+            Self::Update => "Request::Update",
+        })
+    }
+}
+
+/// Private local control handle. Keep it in Rust, outside telemetry and UI DTOs.
+/// Only the host creates generations; a project name alone is not ownership.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnedSession {
+    pub(crate) project: String,
+    pub(crate) generation: String,
+}
+
+impl std::fmt::Debug for OwnedSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OwnedSession(REDACTED)")
+    }
+}
+
 /// Identity of one loaded document: the tab target and its main-frame loader.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,6 +104,7 @@ pub struct Document {
 pub enum Reply {
     Status(view::Status),
     Session(view::Session),
+    OwnedSession(OwnedSession),
     Sessions { sessions: Vec<view::Session> },
     Closed,
     Executed(view::Outcome),
@@ -132,6 +183,48 @@ pub fn valid_execution(timeout_ms: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_requests_keep_the_handle_private_and_reject_incomplete_generations() {
+        let handle = OwnedSession {
+            project: "project".into(),
+            generation: "host-generation".into(),
+        };
+        assert_eq!(format!("{handle:?}"), "OwnedSession(REDACTED)");
+        let request = Request::OpenOwned {
+            session: handle.clone(),
+        };
+        assert_eq!(format!("{request:?}"), "Request::OpenOwned(REDACTED)");
+        assert_eq!(
+            format!(
+                "{:?}",
+                Request::ExecuteOwned {
+                    session: handle.clone(),
+                    code: "INERT-PRIVATE-CODE".into(),
+                    timeout_ms: 1,
+                    expect: None,
+                }
+            ),
+            "Request::ExecuteOwned(REDACTED)"
+        );
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["op"], "open_owned");
+        assert_eq!(serde_json::from_value::<Request>(wire).unwrap(), request);
+        for invalid in [
+            r#"{"op":"open_owned","session":{"project":"project"}}"#,
+            r#"{"op":"close_owned","session":{"project":"project","generation":"g","extra":true},"close_tabs":false}"#,
+        ] {
+            assert!(serde_json::from_str::<Request>(invalid).is_err());
+        }
+        // Existing project clients keep their original wire operation and fields.
+        assert_eq!(
+            serde_json::to_value(Request::Open {
+                project: "project".into()
+            })
+            .unwrap(),
+            serde_json::json!({ "op": "open", "project": "project" })
+        );
+    }
 
     #[test]
     fn project_names_are_bounded_titles_and_path_segments() {
