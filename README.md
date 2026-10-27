@@ -15,7 +15,9 @@ which an agent reads once per task. `nds-browser-use session new <project>`, the
 `nds-browser-use -s <project> -e '<playwright code>'`; `status`,
 `session list` and `session close` complete the surface. An agent closes its
 session when its task is done; that closes the session's tabs too, unless
-`--keep-tabs` leaves them for the owner. A session's executor
+`--keep-tabs` leaves them for the owner. A session that runs nothing for 30
+minutes closes by itself with its tabs; owned sessions stay with the NDS
+component that composes them. A session's executor
 starts with the session, and `session list` reports `executor: true` once it is
 ready; an execution that times out while the executor is still starting
 leaves the start running for the next one. `install` registers
