@@ -12,7 +12,9 @@ no TCP listener, debugging port, tunnel or vendor telemetry.
 
 Agent CLI: `nds-browser-use session new <project>`, then
 `nds-browser-use -s <project> -e '<playwright code>'`; `status`,
-`session list` and `session close` complete the surface. A session's executor
+`session list` and `session close` complete the surface. An agent closes its
+session when its task is done; that closes the session's tabs too, unless
+`--keep-tabs` leaves them for the owner. A session's executor
 starts with the session, and `session list` reports `executor: true` once it is
 ready; an execution that times out while the executor is still starting
 leaves the start running for the next one. `install` registers
