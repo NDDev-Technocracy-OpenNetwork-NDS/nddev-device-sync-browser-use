@@ -6,9 +6,12 @@ import { inspect } from "node:util";
 import vm from "node:vm";
 import { chromium, type Page } from "playwright-core";
 import { checks, owner } from "./agent/checks";
+import { getCleanHTML, getPageMarkdown } from "./agent/content";
 import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
+import { getLocatorStringForElement } from "./agent/locators";
 import { getLatestLogs, notified, attach as watchLogs } from "./agent/logs";
+import { resizeImageForAgent, screenshotWithAccessibilityLabels } from "./agent/screens";
 import { ref, refToLocator, snapshot, attach as watchSnapshots } from "./agent/snapshot";
 
 const OUTPUT_LIMIT = 900_000;
@@ -67,6 +70,13 @@ const sandbox = vm.createContext({
   getLatestLogs,
   waitForPageLoad,
   inspect: describe,
+  getCleanHTML,
+  getPageMarkdown,
+  getLocatorStringForElement,
+  screenshotWithAccessibilityLabels: (options: { page: Page }) =>
+    screenshotWithAccessibilityLabels(options, artifacts),
+  resizeImageForAgent,
+  resizeImage: resizeImageForAgent,
   checks,
   notifyOwner: (page: Page, reason: string) => owner(page, "NDS.notifyOwner", { reason }),
   clearOwner: (page: Page) => owner(page, "NDS.clearOwner", {}),
