@@ -63,6 +63,8 @@ export class Restore {
             children: new Set(),
             reattaches: [],
             bytes: 0,
+            reservedCommands: 0,
+            reservedBytes: 0,
         });
     }
     endSession(tab) {
@@ -126,19 +128,32 @@ export class Restore {
         const chrome = this.sessions.get(tab)?.setup.get(`script:${identifier}`)?.scriptIdentifier;
         return chrome ? { ...params, identifier: chrome } : params;
     }
-    // Whether recording this command keeps the tab's setup within its bounds. A command that only
-    // removes setup, or records nothing, always fits.
-    admits(tab, method, params) {
+    // Reserves room for a setup command before it is sent, counting the room that commands still
+    // in flight hold, so concurrent commands near a bound cannot all fit. Answers false when it does
+    // not fit; otherwise a release, to call once the command answered or failed, after `record`.
+    reserve(tab, method, params) {
         const session = this.sessions.get(tab);
         const change = effect(method, params);
         if (!session || !change || !("put" in change))
-            return true;
+            return () => { };
         const script = change.put === "script:";
         const previous = script ? undefined : session.setup.get(change.put);
         const entry = { method, params: script ? { ...params, runImmediately: false } : params };
-        const commands = session.setup.size + (previous ? 0 : 1);
-        const bytes = session.bytes - (previous ? size(previous) : 0) + size(entry);
-        return commands <= MAX_SETUP_COMMANDS && bytes <= MAX_SETUP_BYTES;
+        const commands = previous ? 0 : 1;
+        const bytes = Math.max(0, size(entry) - (previous ? size(previous) : 0));
+        if (session.setup.size + session.reservedCommands + commands > MAX_SETUP_COMMANDS ||
+            session.bytes + session.reservedBytes + bytes > MAX_SETUP_BYTES)
+            return false;
+        session.reservedCommands += commands;
+        session.reservedBytes += bytes;
+        let released = false;
+        return () => {
+            if (released)
+                return;
+            released = true;
+            session.reservedCommands -= commands;
+            session.reservedBytes -= bytes;
+        };
     }
     // Records a successful root-session command when it is setup; any other command is ignored.
     // An init script's result is returned with the stable identifier agents keep.
