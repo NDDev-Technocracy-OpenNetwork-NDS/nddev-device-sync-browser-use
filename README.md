@@ -46,6 +46,17 @@ refuse running against a replaced document.
   streams, and reports `{ success, readyState, pendingRequests, waitTimeMs }`.
 - `inspect({ locator, properties })` describes an element's box, scroll state,
   styles, visibility, input state and aria attributes.
+- `getCleanHTML({ locator })` returns an element's HTML without scripts,
+  styles and SVG, one indented line per element, and `getPageMarkdown({ page })`
+  the main article as text through Mozilla Readability; both take `search` and
+  diff like snapshots.
+- `screenshotWithAccessibilityLabels({ page })` writes a screenshot into
+  `artifacts` with a label on every visible interactive element, named by the
+  ref of the snapshot it returns, for layouts where position matters.
+  `resizeImageForAgent({ input, maxDimension })` makes a smaller copy through
+  ffmpeg, which must be on PATH.
+- `getLocatorStringForElement(locator)` returns a stable locator string for a
+  script: a test id, a unique role and name, an id, or a tag path.
 
 A result also carries `[PAGE ERROR]` lines for uncaught errors and
 `[WARNING] New page opened` lines for new tabs of the pages an agent keeps in
