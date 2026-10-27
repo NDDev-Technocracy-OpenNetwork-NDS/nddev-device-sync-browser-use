@@ -362,7 +362,7 @@ function attach(tab, life) {
         if (attachment && attachment.life !== life)
             throw new Refusal("busy");
         if (!attachment) {
-            await removeForeignFrames(tab, life.group);
+            await removeForeignFrames(tab, life);
             await chrome.debugger.attach({ tabId: tab }, PROTOCOL);
             // The session exists from here on, so it is recorded before anything else is awaited:
             // Chrome's report of its end then finds it, and a release of this life waits for this
@@ -433,10 +433,17 @@ function ended(tab, attachment) {
 }
 // Removes other extensions' frames from an agent tab before a debugger session starts on it:
 // Chrome refuses to attach to a tab that holds one, and detaches from a tab when one navigates.
-// Only a tab that is in the agent group now is touched (ADR 0015); nothing else of the page is.
-async function removeForeignFrames(tab, group) {
+// Per ADR 0015 only the current agent life's own tab is touched, and only those frame elements:
+// the life must still be its group's open life, the tab must be in that group now, and a
+// reattach must still hold the tab's attachment. A stale continuation touches nothing.
+async function removeForeignFrames(tab, life, attachment) {
     const current = await chrome.tabs.get(tab).catch(() => undefined);
-    if (!current || groupKey(current.groupId) !== group)
+    const admitted = current !== undefined &&
+        life.open &&
+        lives.get(life.group) === life &&
+        groupKey(current.groupId) === life.group &&
+        (attachment === undefined || (attached.get(tab) === attachment && !attachment.revoked));
+    if (!admitted)
         return;
     // Best effort: a page that refuses scripts still gets its attach attempt.
     await Promise.resolve()
@@ -717,7 +724,7 @@ async function reattach(tab, attachment) {
     for (const child of restore.takeChildren(tab))
         send({ type: "event", tab, method: "Target.detachedFromTarget", params: { sessionId: child } });
     try {
-        await removeForeignFrames(tab, attachment.life.group);
+        await removeForeignFrames(tab, attachment.life, attachment);
         await chrome.debugger.attach({ tabId: tab }, PROTOCOL);
     }
     catch {

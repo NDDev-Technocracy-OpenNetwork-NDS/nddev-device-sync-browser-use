@@ -417,3 +417,18 @@ test("foreign frames are removed only from tabs in the agent group", async () =>
   await send({ type: "claim", group: "p" })();
   expect(browser.scripted).toEqual([1]);
 });
+
+test("a stale life or a tab that left its group gets no frame removal", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  await send({ type: "release", group: "p", close: false })();
+  browser.scripted.length = 0;
+  // The released life's tab moves out and back; no later attach of that life touches it.
+  browser.move(1, -1);
+  browser.move(1, P);
+  await Bun.sleep(30);
+  expect(browser.scripted).toEqual([]);
+  // A new life scripts the tab it attaches.
+  await send({ type: "claim", group: "p" })();
+  expect(browser.scripted).toEqual([1]);
+});
