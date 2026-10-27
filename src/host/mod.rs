@@ -1151,10 +1151,10 @@ impl Host {
             .sessions
             .get_mut(project)
             .filter(|s| Arc::ptr_eq(&s.life, life))
+            && !session.owned
+            && !life.stop.is_cancelled()
         {
-            if !session.owned && !life.stop.is_cancelled() {
-                session.closing = false;
-            }
+            session.closing = false;
         }
         Ok(())
     }
