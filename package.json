@@ -5,12 +5,15 @@
   "type": "module",
   "packageManager": "bun@1.4.4",
   "scripts": {
-    "check": "tsc -p tsconfig.extension.json --noEmit && tsc -p tsconfig.executor.json && tsc -p tsconfig.e2e.json && biome check packages e2e",
+    "check": "tsc -p tsconfig.extension.json --noEmit && tsc -p tsconfig.executor.json && tsc -p tsconfig.e2e.json && tsc -p tsconfig.unit.json && biome check packages e2e",
+    "test": "bun test packages/extension/test packages/executor/test",
     "generate": "tsc -p tsconfig.extension.json",
     "check:generated": "tsc -p tsconfig.extension.json && git diff --exit-code -- packages/extension/background.js packages/extension/popup.js",
     "e2e": "bun test e2e --timeout 60000"
   },
   "dependencies": {
+    "@mozilla/readability": "0.6.0",
+    "linkedom": "0.18.13",
     "playwright-core": "1.64.1"
   },
   "devDependencies": {

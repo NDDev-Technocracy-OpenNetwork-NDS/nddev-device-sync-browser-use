@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -161,6 +162,7 @@ beforeAll(async () => {
         "/linked": "<title>Linked</title><p>linked</p>",
         "/target": "<title>Popup target</title><p>popup</p>",
         "/owner": "<title>Owner</title><p>owner work</p>",
+        "/owned": "<title>Owned</title><p>owned work</p>",
         "/dialog": `<button id="ask" onclick="answer.textContent = confirm('Proceed?') ? 'accepted' : 'dismissed'">Ask</button><span id="answer"></span>`,
         "/form": `<input id="text" oninput="echo.textContent = this.value"><span id="echo"></span><input id="file" type="file" onchange="picked.textContent = this.files[0].name + ':' + this.files[0].size"><span id="picked"></span>`,
         "/fetch": `<button id="load" onclick="fetch('/api').then((r) => r.text()).then((t) => (out.textContent = t))">Load</button><span id="out"></span>`,
@@ -168,6 +170,11 @@ beforeAll(async () => {
         // A different site (localhost vs 127.0.0.1) renders out of process.
         "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
         "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
+        "/article": `<title>Fixture article</title><style>p { color: black }</style><script>window.unused = 1</script><nav><a href="/">Home</a></nav><article><h1>Fixture heading</h1><p>First. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><p>Second. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><ul><li>One point</li><li>Two points</li></ul><button id="go">Go</button></article>`,
+        "/helpers": `<title>Helpers</title><script>console.log("loaded helpers")</script><main><button id="save" onclick="this.textContent = 'Saved'">Save</button><button id="fail" onclick="setTimeout(() => { throw new Error('boom') })">Fail</button><a id="pop" href="/linked" target="_blank">Pop</a><div id="box" style="overflow-y: auto; height: 50px"><p style="height: 200px">tall</p></div><input id="name" value="x" aria-label="Name"></main>`,
+        // A Turnstile widget with its response field, and reCAPTCHA's invisible badge, which is no
+        // check a person passes; the test routes both vendors' frames.
+        "/check": `<iframe src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv0/0/e2e/0x4AAAAAAA/auto/normal" width="300" height="65"></iframe><iframe src="https://www.google.com/recaptcha/api2/anchor?ar=1&k=e2e&size=invisible" width="256" height="60"></iframe><input type="hidden" name="cf-turnstile-response" value="">`,
         // WebAuthn needs a domain RP ID; localhost is a secure context.
         "/passkey": `<button id="register" onclick="navigator.credentials.create({ publicKey: { rp: { name: 'NDS', id: 'localhost' }, user: { id: new Uint8Array(16), name: 'agent', displayName: 'Agent' }, challenge: new Uint8Array(32), pubKeyCredParams: [{ type: 'public-key', alg: -7 }], authenticatorSelection: { residentKey: 'required', userVerification: 'required' } } }).then(() => (outcome.textContent = 'registered'), (e) => (outcome.textContent = e.name))">Register</button><button id="signin" onclick="navigator.credentials.get({ publicKey: { rpId: 'localhost', challenge: new Uint8Array(32), userVerification: 'required' } }).then(() => (outcome.textContent = 'signed-in'), (e) => (outcome.textContent = e.name))">Sign in</button><span id="outcome"></span>`,
       };
@@ -308,7 +315,12 @@ test("popups opened by an agent page join the agent session", async () => {
     "--timeout",
     "20000",
   );
-  expect(result.body.output).toBe(`${origin}/target ${origin}/linked`);
+  // Both new tabs are announced after the result, since the agent keeps their opener in state.
+  const [value, ...notices] = String(result.body.output).split("\n");
+  expect(value).toBe(`${origin}/target ${origin}/linked`);
+  expect(notices).toHaveLength(2);
+  for (const notice of notices)
+    expect(notice).toStartWith(`[WARNING] New page opened from ${origin}/`);
   const popup = tabs(result).find((tab) => tab.url === `${origin}/target`);
   expect(popup?.document).toBeString();
 });
@@ -349,6 +361,129 @@ test("network interception and cross-origin frames work in agent tabs", async ()
     .find((candidate) => candidate.url().endsWith("/inner"));
   expect(await frame?.locator("#inner").textContent()).toBe("inside");
 });
+
+// Only a person passes a bot check: agent code finds it, hands it to the owner through a Chrome
+// notification and sees it solved, without acting inside it.
+test("bot checks are reported and handed to the owner", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage();
+     await page.route((url) => ["challenges.cloudflare.com", "www.google.com"].includes(url.hostname), (route) => route.fulfill({ contentType: "text/html", body: "<p>check</p>" }));
+     await page.goto("${origin}/check");
+     await page.frameLocator("iframe").first().locator("p").waitFor();
+     const before = await checks(page);
+     const notified = await notifyOwner(page, "Pass the check on the fixture");
+     await page.evaluate(() => { document.getElementsByName("cf-turnstile-response")[0].value = "passed"; });
+     const after = await checks(page);
+     const cleared = await clearOwner(page);
+     return JSON.stringify({ before, notified: notified.notification.startsWith("owner:"), after, cleared })`,
+    "--timeout",
+    "20000",
+  );
+  expect(JSON.parse(String(result.body.output))).toEqual({
+    before: [{ vendor: "cloudflare", solved: false }],
+    notified: true,
+    after: [{ vendor: "cloudflare", solved: true }],
+    cleared: {},
+  });
+});
+
+// The agent helpers: load detection, snapshots with refs, searches and diffs, page logs, element
+// inspection, and the page errors and new tabs reported with a result.
+test("agent helpers observe a page and report its errors and new tabs", async () => {
+  await opened("helpers");
+  try {
+    await helpers();
+  } finally {
+    await cli("session", "close", "helpers", "--close-tabs");
+  }
+});
+
+async function helpers(): Promise<void> {
+  const result = await run(
+    "helpers",
+    `const page = await context.newPage(); state.page = page; await page.goto("${origin}/helpers");
+     const loaded = await waitForPageLoad({ page, timeout: 5000 });
+     const first = await snapshot({ page });
+     const again = await snapshot({ page });
+     const found = await snapshot({ page, search: /button/ });
+     const save = first.match(/button "Save" \\[ref=(e\\d+)\\]/)[1];
+     await page.locator(refToLocator({ ref: save })).click();
+     const changed = await snapshot({ page });
+     const logs = getLatestLogs({ page, sinceLastCall: true });
+     const none = getLatestLogs({ page, sinceLastCall: true });
+     const box = await inspect({ locator: page.locator("#box") });
+     const input = await inspect({ locator: page.locator("#name") });
+     await page.click("#fail"); await page.click("#pop"); await page.waitForTimeout(500);
+     return JSON.stringify({ loaded: loaded.success, first, again, found, changed, logs, none, box, input })`,
+    "--timeout",
+    "20000",
+  );
+  const [json = "{}", ...notices] = String(result.body.output).split("\n");
+  const seen = JSON.parse(json) as Record<string, string | boolean>;
+  expect(seen.loaded).toBe(true);
+  expect(seen.first).toStartWith(`URL: ${origin}/helpers\n\n`);
+  expect(seen.again).toBe(`URL: ${origin}/helpers\n\nNo changes since last call`);
+  expect(seen.found).toContain('button "Save"');
+  expect(seen.found).not.toContain("link");
+  expect(seen.changed).toContain("+ ");
+  expect(seen.changed).toContain('"Saved"');
+  expect(seen.logs).toContain("[log] loaded helpers");
+  expect(seen.none).toBe("No new logs since last call");
+  expect(seen.box).toMatch(/Scroll Y: size=\d+ client=50 overflowing=true/);
+  expect(seen.input).toContain('Input: value="x"');
+  expect(seen.input).toContain("Aria: aria-label=Name");
+  expect(notices.some((line) => line.startsWith("[PAGE ERROR]") && line.includes("boom"))).toBe(
+    true,
+  );
+  expect(notices.some((line) => line.startsWith("[WARNING] New page opened"))).toBe(true);
+}
+
+// Content helpers: cleaned HTML, the article as text, a labeled screenshot and its smaller copy,
+// and a stable locator string.
+test("content helpers read a page and label its interactive elements", async () => {
+  await opened("content");
+  try {
+    await content();
+  } finally {
+    await cli("session", "close", "content", "--close-tabs");
+  }
+});
+
+async function content(): Promise<void> {
+  const resize = Bun.which("ffmpeg") !== null;
+  const result = await run(
+    "content",
+    `const page = await context.newPage(); await page.goto("${origin}/article");
+     const html = await getCleanHTML({ locator: page.locator("article") });
+     const text = await getPageMarkdown({ page });
+     const shot = await screenshotWithAccessibilityLabels({ page });
+     const path = shot.match(/^Screenshot: (\\S+)/)[1];
+     const small = ${resize} ? await resizeImageForAgent({ input: path, maxDimension: 320 }) : "";
+     const go = await getLocatorStringForElement(page.locator("#go"));
+     return JSON.stringify({ html, text, shot, path, small, go })`,
+    "--timeout",
+    "20000",
+  );
+  const seen = JSON.parse(String(result.body.output)) as Record<string, string>;
+  expect(seen.html).toContain("<h1>");
+  expect(seen.html).toContain('<button id="go">');
+  expect(seen.html).not.toContain("script");
+  expect(seen.text).toContain("Fixture heading");
+  expect(seen.text).toContain("First. This paragraph");
+  expect(seen.text).toContain("- One point");
+  expect(seen.text).not.toContain("Home");
+  expect(seen.shot).toMatch(/^Screenshot: \S+\.jpg \([1-9]\d* labels\)/);
+  expect(seen.shot).toContain('button "Go" [ref=');
+  expect(seen.shot).not.toContain("[box=");
+  expect(seen.path?.startsWith(join(runtime, "sessions", "content"))).toBe(true);
+  expect(existsSync(seen.path ?? "")).toBe(true);
+  if (resize) {
+    expect(existsSync(seen.small ?? "")).toBe(true);
+    expect(statSync(seen.small ?? "").size).toBeLessThan(statSync(seen.path ?? "").size);
+  }
+  expect(seen.go).toBe('getByRole("button", { name: "Go", exact: true })');
+}
 
 // Chrome serves WebAuthn only to a focused page: a background agent tab is
 // refused, and the agent must bring its tab to the front for a passkey step.
@@ -462,6 +597,117 @@ test("a closed tab is reported, not acted on", async () => {
   expect(failed).toEqual({ code: 1, body: expect.objectContaining({ failure: "target_closed" }) });
 });
 
+// The owned-session operations NDS composes, over the host's control socket: a request is one
+// JSON line, and a reply is a {"bytes":N} line followed by N bytes of JSON.
+async function control(request: object): Promise<Record<string, unknown>> {
+  const { promise, resolve, reject } = Promise.withResolvers<Record<string, unknown>>();
+  let buffer = Buffer.alloc(0);
+  const socket = await Bun.connect({
+    unix: join(runtime, "control.sock"),
+    socket: {
+      data(_, chunk) {
+        buffer = Buffer.concat([buffer, chunk]);
+        const line = buffer.indexOf(10);
+        if (line < 0) return;
+        const { bytes } = JSON.parse(buffer.subarray(0, line).toString()) as { bytes: number };
+        if (buffer.length >= line + 1 + bytes) {
+          resolve(JSON.parse(buffer.subarray(line + 1, line + 1 + bytes).toString()));
+        }
+      },
+      error(_, error) {
+        reject(error);
+      },
+      close() {
+        reject(new Error("the host closed the control connection before replying"));
+      },
+    },
+  });
+  socket.write(`${JSON.stringify(request)}\n`);
+  try {
+    return await promise;
+  } finally {
+    socket.end();
+  }
+}
+
+// Bun has no AF_UNIX client on Windows; there the host's own tests cover the owned operations.
+test.skipIf(windows)(
+  "owned sessions keep their generation and drain before close is acknowledged",
+  async () => {
+    const created = await control({ op: "create_owned", project: "owned" });
+    expect(created.result).toBe("owned_session");
+    // The handle stays in this test's memory and is passed back verbatim; it is never printed.
+    const handle = { project: created.project, generation: created.generation };
+    const foreign = { project: "owned", generation: "0".repeat(32) };
+    expect(await control({ op: "open_owned", session: foreign })).toEqual({
+      result: "refused",
+      refusal: "session_not_found",
+    });
+    // A project name alone does not adopt the reserved generation.
+    expect((await control({ op: "open", project: "owned" })).refusal).toBe("busy");
+    expect(await control({ op: "open_owned", session: handle })).toMatchObject({
+      result: "session",
+      project: "owned",
+    });
+    expect(
+      await control({
+        op: "execute_owned",
+        session: handle,
+        code: `const page = await context.newPage(); await page.goto("${origin}/owned"); return await page.title()`,
+        timeout_ms: 20000,
+        expect: null,
+      }),
+    ).toMatchObject({ result: "executed", failure: null, output: "Owned" });
+    expect(await observed("/owned")).toBeDefined();
+    // Close while an owned execution runs: the acknowledgement comes only after its executor ended.
+    const executor = join(runtime, "sessions", "owned");
+    expect(processes(executor)).toHaveLength(1);
+    const running = control({
+      op: "execute_owned",
+      session: handle,
+      code: "await new Promise((done) => setTimeout(done, 15000)); return 'late'",
+      timeout_ms: 20000,
+      expect: null,
+    }).catch(
+      (error: Error): Record<string, unknown> => ({ result: "lost", message: error.message }),
+    );
+    await Bun.sleep(1000);
+    expect(await control({ op: "close_owned", session: handle, close_tabs: true })).toEqual({
+      result: "closed",
+    });
+    expect(processes(executor)).toHaveLength(0);
+    expect((await running).output).not.toBe("late");
+    expect(await observed("/owned")).toBeUndefined();
+    // The closed generation is stale everywhere.
+    for (const request of [
+      { op: "open_owned", session: handle },
+      { op: "execute_owned", session: handle, code: "1", timeout_ms: 1000, expect: null },
+      { op: "close_owned", session: handle, close_tabs: false },
+    ]) {
+      expect(await control(request)).toEqual({ result: "refused", refusal: "session_not_found" });
+    }
+  },
+  60000,
+);
+
+// An execution that times out while its page waits on a long CDP call leaves that call to Chrome.
+// Once the extension's deadline for the call passed, the session still closes and opens again.
+test("a session whose execution timed out during a long wait closes and opens again", async () => {
+  await opened("waiting");
+  const waited = await run(
+    "waiting",
+    `const page = await context.newPage(); await page.goto("${origin}/"); await page.waitForFunction(() => false, null, { timeout: 0 })`,
+    "--timeout",
+    "3000",
+  );
+  expect(waited.body.error).toBe("timeout");
+  // The extension answers or drops the abandoned call within its 30 s reply deadline.
+  await Bun.sleep(32_000);
+  expect((await cli("session", "close", "waiting", "--close-tabs")).code).toBe(0);
+  expect((await cli("session", "new", "waiting")).code).toBe(0);
+  expect((await cli("session", "close", "waiting", "--close-tabs")).code).toBe(0);
+}, 60_000);
+
 test("the owner's switch revokes sessions until control is enabled again", async () => {
   await ownerSwitch(false);
   expect((await cli("status")).body.enabled).toBe(false);
@@ -520,7 +766,7 @@ test("a lost host is replaced and the agent group is reclaimed without owner tab
 });
 
 test("closing a session cleans only its own area", async () => {
-  expect((await cli("session", "close", "acceptance", "--close-tabs")).code).toBe(0);
+  expect((await cli("session", "close", "acceptance")).code).toBe(0);
   await Bun.sleep(500);
   expect(await observed("/")).toBeUndefined();
   expect(await observed("/owner")).toBeDefined();

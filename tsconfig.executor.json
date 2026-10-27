@@ -1,9 +1,22 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "lib": ["ES2024", "DOM"],
-    "types": ["node"],
-    "noEmit": true
+    "lib": [
+      "ES2024",
+      "DOM"
+    ],
+    "types": [
+      "node"
+    ],
+    "noEmit": true,
+    "paths": {
+      "linkedom": [
+        "./packages/executor/agent/linkedom.d.ts"
+      ]
+    }
   },
-  "files": ["packages/executor/executor.ts"]
+  "include": [
+    "packages/executor/executor.ts",
+    "packages/executor/agent/*.ts"
+  ]
 }

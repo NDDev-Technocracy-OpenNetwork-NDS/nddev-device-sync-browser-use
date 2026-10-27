@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "DOM"],
+    "types": ["bun"],
+    "noEmit": true
+  },
+  "include": ["packages/extension/test/*.ts", "packages/executor/test/*.ts"]
+}
