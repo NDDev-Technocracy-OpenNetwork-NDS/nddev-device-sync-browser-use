@@ -26,26 +26,42 @@ owner's action. Status: alpha work in progress. Linux, macOS and Windows are
 each accepted in CI with a real browser; none has been qualified on an owner
 device. Not a replacement for Playwriter in current NDS acceptance.
 
-Agent code runs as an async function body with `context`, `browser`, a
-persistent `state` object, `artifacts` (the session's private directory for
-screenshots and files, removed with the session), the helpers below, and
-`fetch`/timers. A single expression is returned; otherwise use `return`.
-`context.pages()` lists only the session's tabs, and
-`context.newCDPSession(page)` gives raw CDP for those tabs. Each reply lists
-the tabs with `target` and `document`; pass `--expect <target>:<document>` to
-refuse running against a replaced document.
+Agent code runs as an async function body. It gets:
+- `context` and `browser`;
+- a persistent `state` object;
+- `signal`, its own abort signal;
+- `artifacts`, the session's private directory for screenshots and files, removed with the session;
+- the helpers below;
+- `fetch` and timers.
 
-- `snapshot({ page })` returns the page's accessibility snapshot, headed by its
-  URL, in which every element carries a ref such as `[ref=e5]`;
-  `page.locator(refToLocator({ ref: "e5" }))` or `ref({ page, ref: "e5" })`
-  reaches it until the next snapshot. The first call shows the whole page,
-  later calls only the lines that changed, and a navigation starts over.
-  `search` (a string or pattern) shows the first matching lines,
-  `showDiffSinceLastCall: false` the whole page again, and a `locator` or
-  `frame` only that part.
-- `getLatestLogs({ page, sinceLastCall, search, count })` reads the page's
-  console messages and errors, kept from the moment the session first saw the
-  page; with `sinceLastCall` it returns only what is new.
+A single expression is returned; otherwise use `return`. `context.pages()` lists only the session's
+tabs, and `context.newCDPSession(page)` gives raw CDP for those tabs.
+
+- **Replies.** A reply is plain text in Playwriter's form: `[WARNING]` and `[PAGE ERROR]` lines,
+  then `Console output:`, then `[return value]`. It is cut at 10000 characters, and Playwright
+  objects print as tags. `--json` gives the protocol answer with each tab's `target` and
+  `document`; `--expect <target>:<document>` refuses to run against a replaced document.
+- **Timeouts.** A script still running at its deadline is aborted: its later Playwright calls
+  throw, and the session keeps its executor and state. A script that cannot be aborted is stopped,
+  and its state is reset. Playwright's default waits end before the deadline, so a stuck action
+  fails with its reason first.
+
+[docs/agent-guide.md](docs/agent-guide.md), printed by `nds-browser-use skill`, is the full guide
+for agents.
+
+- `snapshot({ page })` returns the page's accessibility tree, headed by its URL.
+  - Unnamed wrappers are flattened, and every interactive line ends with a Playwright locator,
+    preferring a test id, then an id, then role and name.
+  - The first call shows the whole page; later calls show only the lines that changed, when that
+    is shorter. A navigation starts over.
+  - `search` shows the first ten matches with five lines of context; `showDiffSinceLastCall: false`
+    shows the whole page again.
+  - A `locator` or `frame` shows only that part, and `interactiveOnly` only the controls.
+  - Short refs such as `e5`, used by screenshot labels, resolve through
+    `refToLocator({ ref, page })`.
+- `getLatestLogs({ page, sinceLastCall, search, count })` reads the page's console messages and
+  errors, kept from the moment the session first saw the page. With `sinceLastCall` it returns
+  only what is new, and `clearAllLogs()` forgets every page's logs.
 - `waitForPageLoad({ page, timeout })` waits until the document is complete
   and its own requests have finished, ignoring analytics, ads, long polls and
   streams, and reports `{ success, readyState, pendingRequests, waitTimeMs }`.
@@ -95,9 +111,9 @@ A result also carries `[PAGE ERROR]` lines for uncaught errors and
 `[WARNING] New page opened` lines for new tabs of the pages an agent keeps in
 `state`, so a failure or a popup is seen without asking for it.
 
-Bot checks such as Cloudflare Turnstile, reCAPTCHA and hCaptcha are for a person
-to pass, so agent code never acts inside one. `checks(page)` lists the visible
-checks of a page with their vendor and whether the page holds a passed response.
+Bot checks such as Cloudflare Turnstile, reCAPTCHA and hCaptcha, and sign-in confirmations such
+as Google's "Verify it's you", are for a person to pass, so agent code never acts inside one.
+`checks(page)` lists the visible checks of a page, each with its vendor and whether it is passed.
 When one stays unsolved, `notifyOwner(page, reason)` shows the owner a Chrome
 notification that names the agent and the site and opens the tab when clicked.
 The agent continues with other work, checks the page again later and calls

@@ -8,6 +8,8 @@ const LIMIT = 5000;
 
 type Log = { entries: string[]; read: number };
 const logs = new WeakMap<Page, Log>();
+// Every page's log, so all of them can be cleared at once; a closed page's goes with it.
+const all = new Set<Log>();
 // Errors and new tabs of the pages an agent keeps in `state`, printed with its next result.
 let notices: string[] = [];
 
@@ -17,6 +19,8 @@ export function attach(page: Page, context: BrowserContext, keys: (page: Page) =
   if (logs.has(page)) return;
   const log: Log = { entries: [], read: 0 };
   logs.set(page, log);
+  all.add(log);
+  page.on("close", () => all.delete(log));
   const push = (entry: string) => {
     log.entries.push(entry);
     if (log.entries.length > LIMIT) {
@@ -74,6 +78,14 @@ export function getLatestLogs({ page, count, search, sinceLastCall }: LogOptions
   if (count !== undefined) lines = lines.slice(-count);
   if (lines.length > 0) return lines.join("\n");
   return sinceLastCall ? "No new logs since last call" : "No logs";
+}
+
+/** Forgets the logs of every page the session sees, so later reads start empty. */
+export function clearAllLogs(): void {
+  for (const log of all) {
+    log.entries = [];
+    log.read = 0;
+  }
 }
 
 /** The notices collected since the last execution, which its output carries. */
