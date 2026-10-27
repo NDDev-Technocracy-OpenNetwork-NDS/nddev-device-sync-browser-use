@@ -195,3 +195,41 @@ test("setup commands in flight hold their room, so only one of two fits the last
   if (failed) failed();
   expect(restore.reserve(3, script, { source: "next" })).not.toBe(false);
 });
+
+test("a replacement that waits while its key is removed never lets the setup outgrow the bound", async () => {
+  const restore = new Restore();
+  restore.startSession(1);
+  const script = "Page.addScriptToEvaluateOnNewDocument";
+  const add = (method: string, params: object, result: object = {}) => {
+    const release = restore.reserve(1, method, params);
+    if (!release) return false;
+    restore.record(1, method, params, result);
+    release();
+    return true;
+  };
+  const recorded = async () => {
+    let count = 0;
+    await restore.replay(1, async () => {
+      count++;
+      return { identifier: "x" };
+    });
+    return count;
+  };
+  expect(add("Runtime.addBinding", { name: "B" })).toBe(true);
+  for (let index = 1; index < MAX_SETUP_COMMANDS; index++)
+    expect(add(script, { source: `${index}` }, { identifier: `c${index}` })).toBe(true);
+  // At the bound even a replacement of the recorded binding B finds no room.
+  expect(restore.reserve(1, "Runtime.addBinding", { name: "B" })).toBe(false);
+  restore.record(1, "Page.removeScriptToEvaluateOnNewDocument", { identifier: "nds-2" }, {});
+  // The replacement of B waits for Chrome, holding a whole entry; B is removed meanwhile, and a
+  // new script takes the room that is left.
+  const waiting = restore.reserve(1, "Runtime.addBinding", { name: "B" });
+  expect(waiting).not.toBe(false);
+  restore.record(1, "Runtime.removeBinding", { name: "B" }, {});
+  expect(add(script, { source: "third" }, { identifier: "c-third" })).toBe(true);
+  expect(restore.reserve(1, script, { source: "fourth" })).toBe(false);
+  // The late answer records B again: the setup is exactly at its bound, never past it.
+  restore.record(1, "Runtime.addBinding", { name: "B" }, {});
+  if (waiting) waiting();
+  expect(await recorded()).toBe(MAX_SETUP_COMMANDS);
+});

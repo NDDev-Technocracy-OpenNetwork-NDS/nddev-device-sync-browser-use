@@ -155,29 +155,28 @@ export class Restore {
   }
 
   // Reserves room for a setup command before it is sent, counting the room that commands still
-  // in flight hold, so concurrent commands near a bound cannot all fit. Answers false when it does
-  // not fit; otherwise a release, to call once the command answered or failed, after `record`.
+  // in flight hold, so concurrent commands near a bound cannot all fit. Every pending put holds a
+  // whole new entry, even when its key is recorded now: a removal of that key while it waits must
+  // not hand its room to another command. Answers false when it does not fit; otherwise a
+  // release, to call once the command answered or failed, after `record`.
   reserve(tab: number, method: string, params: object | undefined): (() => void) | false {
     const session = this.sessions.get(tab);
     const change = effect(method, params);
     if (!session || !change || !("put" in change)) return () => {};
     const script = change.put === "script:";
-    const previous = script ? undefined : session.setup.get(change.put);
-    const entry = { method, params: script ? { ...params, runImmediately: false } : params };
-    const commands = previous ? 0 : 1;
-    const bytes = Math.max(0, size(entry) - (previous ? size(previous) : 0));
+    const bytes = size({ method, params: script ? { ...params, runImmediately: false } : params });
     if (
-      session.setup.size + session.reservedCommands + commands > MAX_SETUP_COMMANDS ||
+      session.setup.size + session.reservedCommands + 1 > MAX_SETUP_COMMANDS ||
       session.bytes + session.reservedBytes + bytes > MAX_SETUP_BYTES
     )
       return false;
-    session.reservedCommands += commands;
+    session.reservedCommands += 1;
     session.reservedBytes += bytes;
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      session.reservedCommands -= commands;
+      session.reservedCommands -= 1;
       session.reservedBytes -= bytes;
     };
   }
