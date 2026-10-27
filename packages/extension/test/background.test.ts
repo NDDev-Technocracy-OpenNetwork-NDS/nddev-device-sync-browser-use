@@ -697,9 +697,7 @@ test("a command or close of another group never acts on the tab", async () => {
     error: { code: "target_closed" },
   });
   // A request without its group never acts either.
-  expect(
-    await send({ type: "cdp", group: "p", tab: 1, method: "Runtime.evaluate" })(),
-  ).toMatchObject({
+  expect(await send({ type: "cdp", tab: 1, method: "Runtime.evaluate" })()).toMatchObject({
     error: { code: "target_closed" },
   });
   expect(browser.commands).toEqual([]);
