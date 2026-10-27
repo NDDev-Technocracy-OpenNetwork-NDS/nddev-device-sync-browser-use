@@ -105,6 +105,7 @@ impl Client {
 
 /// A client command awaiting Chrome's reply; holds one in-flight slot.
 pub(crate) struct Forward {
+    pub work: super::PendingWork,
     pub project: String,
     pub client: u64,
     pub id: Value,
@@ -236,7 +237,7 @@ impl Host {
         let (project, session) = state
             .sessions
             .iter_mut()
-            .find(|(_, session)| session.token == token)?;
+            .find(|(_, session)| session.token == token && session.opened && !session.closing)?;
         if session.client.is_some() {
             return None;
         }
@@ -272,11 +273,16 @@ impl Host {
         via: Option<String>,
         command: Value,
     ) -> Value {
+        let mut work = match self.session_work(project, client) {
+            Ok(work) => work,
+            Err(error) => return reply(command["id"].clone(), via, Err(error)),
+        };
         let method = command["method"].as_str().unwrap_or_default();
         let params = command.get("params").cloned().unwrap_or_else(|| json!({}));
         let result = self
             .browser_command(project, client, via.as_deref(), method, params)
             .await;
+        work.settle();
         reply(command["id"].clone(), via, result)
     }
 
@@ -305,7 +311,18 @@ impl Host {
         permit: OwnedSemaphorePermit,
     ) {
         let session = command["sessionId"].as_str().unwrap_or_default().to_owned();
+        let work = match self.session_work(project, client) {
+            Ok(work) => work,
+            Err(error) => {
+                return self.reply_to(
+                    project,
+                    client,
+                    reply(command["id"].clone(), Some(session), Err(error)),
+                );
+            }
+        };
         let forward = Forward {
+            work,
             project: project.to_owned(),
             client,
             id: command["id"].clone(),
@@ -432,7 +449,11 @@ impl Host {
                     .filter(|url| !url.is_empty())
                     .unwrap_or("about:blank");
                 let opened = self
-                    .request(json!({ "type": "open", "group": project, "url": url }))
+                    .session_request(
+                        project,
+                        client,
+                        json!({ "type": "open", "group": project, "url": url }),
+                    )
                     .await?;
                 let tab = opened["tab"]
                     .as_i64()
@@ -447,7 +468,8 @@ impl Host {
             "Target.closeTarget" => {
                 let tab =
                     self.owned_target(project, params["targetId"].as_str().unwrap_or_default())?;
-                self.request(json!({ "type": "close", "tab": tab })).await?;
+                self.session_request(project, client, json!({ "type": "close", "tab": tab }))
+                    .await?;
                 Ok(json!({ "success": true }))
             }
             _ => Err(Failure::Cdp(json!({
@@ -575,7 +597,10 @@ mod tests {
                 token: String::new(),
                 artifacts: std::path::PathBuf::new(),
                 client: None,
-                executor: None,
+                life: std::sync::Arc::new(super::super::SessionLife::new().unwrap()),
+                owned: false,
+                opened: true,
+                closing: false,
                 running: false,
                 aliases,
             },

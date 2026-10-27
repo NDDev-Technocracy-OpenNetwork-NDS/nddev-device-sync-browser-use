@@ -1,5 +1,5 @@
 use crate::{
-    BrowserUse, CancellationToken, Error, IoError, LocalIo,
+    BrowserUse, CancellationToken, Error, IoError, LocalIo, OwnedSession,
     protocol::{self, Document, Header, Reply, Request},
     runtime, view,
 };
@@ -69,6 +69,95 @@ impl BrowserUseClient {
 }
 
 impl BrowserUse for BrowserUseClient {
+    async fn create_owned(
+        &self,
+        project: &str,
+        cancellation: CancellationToken,
+    ) -> Result<OwnedSession, Error> {
+        match self
+            .exchange(
+                Request::CreateOwned {
+                    project: project.into(),
+                },
+                CONTROL_DEADLINE,
+                cancellation,
+            )
+            .await?
+        {
+            Reply::OwnedSession(session) => Ok(session),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    async fn open_owned(
+        &self,
+        session: &OwnedSession,
+        cancellation: CancellationToken,
+    ) -> Result<view::Session, Error> {
+        match self
+            .exchange(
+                Request::OpenOwned {
+                    session: session.clone(),
+                },
+                CONTROL_DEADLINE,
+                cancellation,
+            )
+            .await?
+        {
+            Reply::Session(view) => Ok(view),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    async fn execute_owned(
+        &self,
+        session: &OwnedSession,
+        code: &str,
+        timeout: Duration,
+        expect: Option<Document>,
+        cancellation: CancellationToken,
+    ) -> Result<view::Outcome, Error> {
+        let timeout_ms = timeout.as_millis() as u64;
+        if !protocol::valid_execution(timeout_ms) {
+            return Err(protocol::Refusal::InvalidRequest.into());
+        }
+        let request = Request::ExecuteOwned {
+            session: session.clone(),
+            code: code.into(),
+            timeout_ms,
+            expect,
+        };
+        match self
+            .exchange(request, timeout + EXECUTION_HEADROOM, cancellation)
+            .await?
+        {
+            Reply::Executed(outcome) => Ok(outcome),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    async fn close_owned(
+        &self,
+        session: &OwnedSession,
+        close_tabs: bool,
+        cancellation: CancellationToken,
+    ) -> Result<(), Error> {
+        match self
+            .exchange(
+                Request::CloseOwned {
+                    session: session.clone(),
+                    close_tabs,
+                },
+                CONTROL_DEADLINE,
+                cancellation,
+            )
+            .await?
+        {
+            Reply::Closed => Ok(()),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
     async fn status(&self, cancellation: CancellationToken) -> Result<view::Status, Error> {
         match self
             .exchange(Request::Status, CONTROL_DEADLINE, cancellation)
