@@ -40,9 +40,17 @@ const SETUP = new Set([
 const SETUP_TIMEOUT_MS = 10_000;
 
 type HostRequest =
-  | { type: "cdp"; id: number; tab: number; session?: string; method: string; params?: object }
+  | {
+      type: "cdp";
+      id: number;
+      group: string;
+      tab: number;
+      session?: string;
+      method: string;
+      params?: object;
+    }
   | { type: "open"; id: number; group: string; url: string }
-  | { type: "close"; id: number; tab: number }
+  | { type: "close"; id: number; group: string; tab: number }
   | { type: "claim"; id: number; group: string }
   | { type: "release"; id: number; group: string; close: boolean }
   | { type: "tabs"; id: number; tabs: number[] }
@@ -173,6 +181,8 @@ function connect(): void {
     type: "hello",
     protocol: PROTOCOL,
     version: chrome.runtime.getManifest().version,
+    // The host admits only this contract: every cdp and close request names its group.
+    contract: 2,
     userAgent: navigator.userAgent,
     enabled,
   });
@@ -238,11 +248,19 @@ async function dispatch(message: HostRequest): Promise<unknown> {
   if (!enabled && message.type !== "release") throw new Refusal("permission_required");
   switch (message.type) {
     case "cdp": {
-      if (!usable(message.tab)) throw new Refusal("target_closed");
+      // The command belongs to exactly the attachment it found: after every wait and right before
+      // every command or record, that attachment must still hold the tab. A later life's
+      // attachment of the same tab never receives an earlier command, nor its recorded setup.
+      const held = usable(message.tab);
+      // A request of another group, or one without its group, never acts on this attachment.
+      if (!held || held.life.group !== message.group) throw new Refusal("target_closed");
+      const still = (): void => {
+        if (usable(message.tab) !== held) throw new Refusal("target_closed");
+      };
       if (message.method === "NDS.notifyOwner") return notifyOwner(message.tab, message.params);
       if (message.method === "NDS.clearOwner") return clearOwner(message.tab);
       await reattaching.get(message.tab);
-      if (!usable(message.tab)) throw new Refusal("target_closed");
+      still();
       const target: chrome.debugger.DebuggerSession = { tabId: message.tab };
       if (message.session) target.sessionId = message.session;
       if (message.method === "Runtime.enable") {
@@ -250,6 +268,7 @@ async function dispatch(message: HostRequest): Promise<unknown> {
         // later client of the tab, such as a replacement executor or a raw CDP session, would
         // otherwise never learn them, and its evaluations would wait forever.
         await command(target, "Runtime.disable").catch(() => undefined);
+        still();
       }
       if (message.session) return (await command(target, message.method, message.params)) ?? {};
       // Setup that would outgrow what a reattach can restore is refused before Chrome sees it; the
@@ -259,6 +278,7 @@ async function dispatch(message: HostRequest): Promise<unknown> {
       try {
         const params = restore.chromeParams(message.tab, message.method, message.params);
         const result = (await command(target, message.method, params)) ?? {};
+        still();
         return restore.record(message.tab, message.method, message.params, result);
       } finally {
         release();
@@ -270,7 +290,8 @@ async function dispatch(message: HostRequest): Promise<unknown> {
       return admitted(life, opened(life, message.url));
     }
     case "close": {
-      if (!usable(message.tab)) throw new Refusal("target_closed");
+      const held = usable(message.tab);
+      if (!held || held.life.group !== message.group) throw new Refusal("target_closed");
       await chrome.tabs.remove(message.tab);
       return {};
     }
@@ -454,6 +475,17 @@ function attach(tab: number, life: Life): Promise<unknown> {
       const info = (await command({ tabId: tab }, "Target.getTargetInfo")) as {
         targetInfo: { targetId?: string };
       };
+      // A claim or an adoption reports only the attachment it holds now: the same record, of the
+      // group's current open life, neither moved out nor still unconfirmed.
+      if (
+        attached.get(tab) !== attachment ||
+        attachment.life !== life ||
+        !life.open ||
+        lives.get(life.group) !== life ||
+        attachment.revoked ||
+        attachment.pending
+      )
+        throw new Refusal("target_closed");
       attachment.target = info.targetInfo.targetId;
       return info.targetInfo;
     })(),
@@ -647,7 +679,8 @@ async function adopt(tab: number, life: Life): Promise<void> {
   try {
     const target = await retried(tab, life, () => attach(tab, life));
     if (!life.open) return;
-    if (target) send({ type: "attached", tab, group: life.group, target: target.value });
+    if (target && usable(tab)?.life === life)
+      send({ type: "attached", tab, group: life.group, target: target.value });
     else await adopted(tab, life, "attach");
   } finally {
     adopting.delete(tab);
