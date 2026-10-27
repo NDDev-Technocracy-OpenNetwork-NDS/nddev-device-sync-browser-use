@@ -128,10 +128,12 @@ console.log(getLatestLogs({ page: state.page, sinceLastCall: true }));
   - `search` shows the first ten matching lines with five lines around each;
     `showDiffSinceLastCall: false` shows the whole tree again.
   - A `locator` (a dialog, a form, `main`) or a `frame` limits it to that part and saves most of
-    the output. `interactiveOnly: true` keeps only controls and the labels and landmarks around
-    them.
-  - Screenshot labels use short refs such as `e5`: `refToLocator({ ref: "e5", page })` or
-    `ref({ page, ref: "e5" })` gives that element's locator from the last snapshot.
+    the output. Its locators are relative to that part: `part.locator(...)`, `frame.locator(...)`.
+    `interactiveOnly: true` keeps only controls and the labels and landmarks around them.
+  - Refs such as `[ref=e5]` appear in screenshot labels and in the snapshot of a frame of another
+    process. `ref({ page, ref: "e5" })` reaches that element through its frame, and
+    `refToLocator({ ref: "e5", page })` gives its selector, until the next labeled screenshot or
+    such frame snapshot.
   - Prefer it to screenshots.
 - **`getLatestLogs({ page, sinceLastCall?, search?, count? })`** returns the page's console
   messages and errors since the session first saw the page. The first `sinceLastCall` call

@@ -773,6 +773,62 @@ async function frameIdOf(session: CDPSession, frame: Frame): Promise<string | nu
   return found.length === 1 ? (found[0]?.id ?? null) : null;
 }
 
+type LocatorParts = { _frame?: Frame; _selector?: string };
+
+// The selector part before a ref's own locator: the frames to enter from the page's main frame,
+// then the scope locator. With it, every ref of a frame or locator snapshot works as
+// `page.locator()`.
+async function refPrefix(
+  page: Page,
+  frame: Frame | undefined,
+  locator: Locator | undefined,
+): Promise<string> {
+  const parts = locator as unknown as LocatorParts | undefined;
+  const owner = parts?._frame ?? frame;
+  const chain = owner && owner !== page.mainFrame() ? await frameScope(owner) : "";
+  return typeof parts?._selector === "string" ? `${chain}${parts._selector} >> ` : chain;
+}
+
+/** The selector that enters a frame from its page's main frame, ending in ` >> `. */
+export async function frameScope(frame: Frame): Promise<string> {
+  const steps: string[] = [];
+  for (
+    let current = frame, parent = frame.parentFrame();
+    parent;
+    current = parent, parent = parent.parentFrame()
+  ) {
+    const owner = await current.frameElement();
+    try {
+      steps.unshift(await owner.evaluate(ownerSelector));
+    } finally {
+      await owner.dispose();
+    }
+  }
+  return steps.map((step) => `${step} >> internal:control=enter-frame >> `).join("");
+}
+
+// A selector unique in its document for a frame's element: its id, its name, or its child path.
+// It runs in the page.
+function ownerSelector(element: Element): string {
+  const document = element.ownerDocument;
+  const unique = (selector: string) => document.querySelectorAll(selector).length === 1;
+  const id = element.id ? `#${CSS.escape(element.id)}` : "";
+  if (id && unique(id)) return id;
+  const name = element.getAttribute("name");
+  const named = name ? `${element.localName}[name="${CSS.escape(name)}"]` : "";
+  if (named && unique(named)) return named;
+  const path: string[] = [];
+  for (
+    let node: Element | null = element;
+    node && node !== document.documentElement;
+    node = node.parentElement
+  ) {
+    const siblings = node.parentElement ? [...node.parentElement.children] : [node];
+    path.unshift(`${node.localName}:nth-child(${siblings.indexOf(node) + 1})`);
+  }
+  return `:root > ${path.join(" > ")}`;
+}
+
 export async function getAriaSnapshot({
   page,
   frame,
@@ -787,43 +843,45 @@ export async function getAriaSnapshot({
   interactiveOnly?: boolean | undefined;
 }): Promise<AriaSnapshotResult> {
   const session = await page.context().newCDPSession(page);
-  const frameId = frame && frame !== page.mainFrame() ? await frameIdOf(session, frame) : null;
-  if (frame && frame !== page.mainFrame() && !frameId) {
-    await session.detach().catch(() => undefined);
-    throw new FrameOutOfReach(`frame ${frame.url()} is not reachable through its page`);
-  }
-  const resolvedFrame = frame;
+  // The scope mark is an attribute of this call alone, so neither the page's own attributes nor a
+  // concurrent snapshot's mark is ever changed or removed.
+  const scopeValue = crypto.randomUUID();
+  const scopeAttr = `data-nds-scope-${scopeValue}`;
+  const scopeLocator = locator;
+  // The session is this call's own from here on: every exit below detaches it.
+  try {
+    const frameId = frame && frame !== page.mainFrame() ? await frameIdOf(session, frame) : null;
+    if (frame && frame !== page.mainFrame() && !frameId) {
+      throw new FrameOutOfReach(`frame ${frame.url()} is not reachable through its page`);
+    }
+    const resolvedFrame = frame;
+    const prefix = await refPrefix(page, frame, locator);
 
-  await Promise.all([
-    session.send("DOM.enable"),
-    session.send("Accessibility.enable"),
-    // Blink updates its AX cache during rendering, after framework navigation changes the DOM.
-    (resolvedFrame || page).evaluate(() => {
-      return new Promise<void>((resolve) => {
-        const window = document.defaultView;
-        if (!window) {
-          resolve();
-          return;
-        }
-        if (document.visibilityState !== "visible") {
-          document.documentElement.getBoundingClientRect();
-          resolve();
-          return;
-        }
-        window.requestAnimationFrame(() => {
-          window.requestAnimationFrame(() => {
+    await Promise.all([
+      session.send("DOM.enable"),
+      session.send("Accessibility.enable"),
+      // Blink updates its AX cache during rendering, after framework navigation changes the DOM.
+      (resolvedFrame || page).evaluate(() => {
+        return new Promise<void>((resolve) => {
+          const window = document.defaultView;
+          if (!window) {
             resolve();
+            return;
+          }
+          if (document.visibilityState !== "visible") {
+            document.documentElement.getBoundingClientRect();
+            resolve();
+            return;
+          }
+          window.requestAnimationFrame(() => {
+            window.requestAnimationFrame(() => {
+              resolve();
+            });
           });
         });
-      });
-    }),
-  ]);
-  const scopeAttr = "data-pw-scope";
-  const scopeValue = crypto.randomUUID();
-  let scopeApplied = false;
-  const scopeLocator = locator;
+      }),
+    ]);
 
-  try {
     if (scopeLocator) {
       await scopeLocator.evaluate(
         (element, data) => {
@@ -831,7 +889,6 @@ export async function getAriaSnapshot({
         },
         { attr: scopeAttr, value: scopeValue },
       );
-      scopeApplied = true;
     }
 
     const { nodes: domNodes } = await session.send("DOM.getFlattenedDocument", {
@@ -1054,26 +1111,41 @@ export async function getAriaSnapshot({
 
     const snapshot = result.snapshot;
 
+    // The locator each ref's line shows, with its nth among equal locators.
+    const shown = new Map<string, string>();
+    const collect = (nodes: AriaSnapshotNode[]): void => {
+      for (const node of nodes) {
+        if (node.ref && node.locator) shown.set(node.ref, node.locator);
+        collect(node.children);
+      }
+    };
+    collect(result.tree);
+
+    // Every selector is the shown one after the frame and scope prefix, so it works as
+    // `page.locator()` and names the element the line shows.
     const getSelectorForRef = (ref: string): string | null => {
-      const mapped = refToSelector.get(ref);
+      const mapped = shown.get(ref) ?? refToSelector.get(ref);
       if (mapped) {
-        return mapped;
+        return prefix + mapped;
       }
       const info = refToElement.get(ref);
       if (!info) {
         return null;
       }
       const escapedName = info.name.replace(/"/g, '\\"');
-      return `role=${info.role}[name="${escapedName}"i]`;
+      return `${prefix}role=${info.role}[name="${escapedName}"i]`;
     };
 
     return { snapshot, tree: result.tree, refs: result.refs, getSelectorForRef };
   } finally {
-    if (scopeApplied && scopeLocator) {
+    if (scopeLocator) {
       await scopeLocator
-        .evaluate((element, attr) => {
-          element.removeAttribute(attr);
-        }, scopeAttr)
+        .evaluate(
+          (element, data) => {
+            if (element.getAttribute(data.attr) === data.value) element.removeAttribute(data.attr);
+          },
+          { attr: scopeAttr, value: scopeValue },
+        )
         .catch(() => undefined);
     }
     await session.detach().catch(() => undefined);

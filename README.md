@@ -56,9 +56,11 @@ for agents.
     is shorter. A navigation starts over.
   - `search` shows the first ten matches with five lines of context; `showDiffSinceLastCall: false`
     shows the whole page again.
-  - A `locator` or `frame` shows only that part, and `interactiveOnly` only the controls.
-  - Short refs such as `e5`, used by screenshot labels, resolve through
-    `refToLocator({ ref, page })`.
+  - Equal locators carry `>> nth=N`. A `locator` or `frame` shows only that part, and its
+    locators are relative to it; `interactiveOnly` keeps only the controls.
+  - Refs such as `[ref=e5]` appear in screenshot labels and in the snapshot of a frame of another
+    process. `ref({ page, ref })` or `refToLocator({ ref, page })` reaches that element through
+    its frame, until the next view that shows refs.
 - `getLatestLogs({ page, sinceLastCall, search, count })` reads the page's console messages and
   errors, kept from the moment the session first saw the page. With `sinceLastCall` it returns
   only what is new, and `clearAllLogs()` forgets every page's logs.
