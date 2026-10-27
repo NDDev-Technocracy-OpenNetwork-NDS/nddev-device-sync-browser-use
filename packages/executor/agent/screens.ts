@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Page } from "playwright-core";
+import { useAriaRefs } from "./snapshot";
 
 // Interactive roles and their label colors: links, buttons, inputs, checks, sliders, menus, tabs.
 const COLORS: Record<string, string> = {
@@ -54,6 +55,8 @@ export async function screenshotWithAccessibilityLabels(
   artifacts: string,
 ): Promise<string> {
   const view = await page.ariaSnapshot({ mode: "ai", boxes: true });
+  // Its labels name Playwright's refs, which now are the page's refs.
+  useAriaRefs(page);
   const size =
     page.viewportSize() ??
     (await page.evaluate(() => ({ width: innerWidth, height: innerHeight })));

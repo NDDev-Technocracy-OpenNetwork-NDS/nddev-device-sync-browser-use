@@ -182,6 +182,8 @@ beforeAll(async () => {
         // A different site (localhost vs 127.0.0.1) renders out of process.
         "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
         "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
+        // Equal buttons in two parts, and a frame of the same site, which shares the process.
+        "/refs": `<title>Refs</title><section id="first"><button onclick="out.textContent = 'first'">Save</button></section><section id="second"><button onclick="out.textContent = 'second'">Save</button></section><span id="out"></span><iframe id="same" src="/inner"></iframe>`,
         "/article": `<title>Fixture article</title><style>p { color: black }</style><script>window.unused = 1</script><nav><a href="/">Home</a></nav><article><h1>Fixture heading</h1><p>First. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><p>Second. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><ul><li>One point</li><li>Two points</li></ul><button id="go">Go</button></article>`,
         "/devtools": [
           "<title>Devtools</title><style>.card { color: rgb(1, 2, 3); padding: 4px }</style>",
@@ -395,6 +397,50 @@ test("network interception and cross-origin frames work in agent tabs", async ()
   expect(snapped.body.value).not.toContain("[cursor=pointer]");
 });
 
+// What a snapshot line or a shown ref names is the element an action reaches: equal locators by
+// their nth, a part's and a frame's locators inside it, and the refs of a frame of another
+// process and of a labeled screenshot through the frames they are of.
+test("snapshot locators and shown refs reach the element their line shows", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/refs");
+    const same = page.frames().find((frame) => frame.url().endsWith("/inner"));
+    await same.locator("#inner").waitFor();
+    const out = () => page.locator("#out").textContent();
+    const seen = [];
+    const whole = await snapshot({ page });
+    seen.push(whole.includes('role=button[name="Save"i] >> nth=1'));
+    await page.locator('role=button[name="Save"i] >> nth=1').click();
+    seen.push(await out());
+    const part = await snapshot({ page, locator: page.locator("#first") });
+    seen.push(part.includes("Locators are inside the locator") && !part.includes("nth="));
+    await page.locator("#first").locator('role=button[name="Save"i]').click();
+    seen.push(await out());
+    const framed = await snapshot({ frame: same });
+    seen.push(framed.includes("Locators are inside the frame") && framed.includes('[id="inner"]'));
+    await same.locator('[id="inner"]').click();
+    seen.push(await same.locator("#inner").textContent());
+    const shot = await screenshotWithAccessibilityLabels({ page });
+    const labels = [...shot.matchAll(/button "Save" \\[ref=([^\\]]+)\\]/g)].map((found) => found[1]);
+    await snapshot({ page, showDiffSinceLastCall: false });
+    await ref({ page, ref: labels[1] }).click();
+    seen.push(labels.length, await out());
+    const far = await context.newPage(); await far.goto("${origin}/frame");
+    const other = far.frames().find((frame) => frame.url().endsWith("/inner"));
+    await other.locator("#inner").waitFor();
+    const remote = await snapshot({ frame: other });
+    const shown = remote.match(/button "Inner" \\[ref=([^\\]]+)\\]/)?.[1];
+    seen.push(Boolean(shown));
+    await ref({ page: far, ref: shown }).click();
+    seen.push(await other.locator("#inner").textContent());
+    await page.close(); await far.close();
+    return seen.join(" ")`,
+    "--timeout",
+    "25000",
+  );
+  expect(result.body.value).toBe("true second true first true inside 2 second true inside");
+});
+
 // Only a person passes a bot check: agent code finds it, hands it to the owner through a Chrome
 // notification and sees it solved, without acting inside it.
 test("bot checks are reported and handed to the owner", async () => {
@@ -441,7 +487,8 @@ async function helpers(): Promise<void> {
      const again = await snapshot({ page });
      const found = await snapshot({ page, search: /button/ });
      const save = first.match(/- button "Save" (\\[id="save"\\])/)[1];
-     const ref = refToLocator({ ref: "e1", page });
+     // Snapshot lines show locators, not refs, so a ref still means Playwright's own.
+    const ref = refToLocator({ ref: "e1", page });
      await page.locator(save).click();
      const changed = await snapshot({ page });
      const logs = getLatestLogs({ page, sinceLastCall: true });
@@ -461,7 +508,7 @@ async function helpers(): Promise<void> {
   // Interactive lines carry a Playwright locator; short refs name the same elements.
   expect(seen.found).toContain('button "Save" [id="save"]');
   expect(seen.save).toBe('[id="save"]');
-  expect(seen.ref).toBe('[id="save"]');
+  expect(seen.ref).toBe("aria-ref=e1");
   expect(seen.changed).toContain("+ ");
   expect(seen.changed).toContain('"Saved"');
   expect(seen.logs).toContain("[log] loaded helpers");
