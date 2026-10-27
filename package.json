@@ -12,6 +12,8 @@
     "e2e": "bun test e2e --timeout 60000"
   },
   "dependencies": {
+    "@mozilla/readability": "0.6.0",
+    "linkedom": "0.18.13",
     "playwright-core": "1.64.1"
   },
   "devDependencies": {

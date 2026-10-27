@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -168,6 +169,7 @@ beforeAll(async () => {
         // A different site (localhost vs 127.0.0.1) renders out of process.
         "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
         "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
+        "/article": `<title>Fixture article</title><style>p { color: black }</style><script>window.unused = 1</script><nav><a href="/">Home</a></nav><article><h1>Fixture heading</h1><p>First. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><p>Second. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><ul><li>One point</li><li>Two points</li></ul><button id="go">Go</button></article>`,
         "/helpers": `<title>Helpers</title><script>console.log("loaded helpers")</script><main><button id="save" onclick="this.textContent = 'Saved'">Save</button><button id="fail" onclick="setTimeout(() => { throw new Error('boom') })">Fail</button><a id="pop" href="/linked" target="_blank">Pop</a><div id="box" style="overflow-y: auto; height: 50px"><p style="height: 200px">tall</p></div><input id="name" value="x" aria-label="Name"></main>`,
         // A Turnstile widget with its response field, and reCAPTCHA's invisible badge, which is no
         // check a person passes; the test routes both vendors' frames.
@@ -434,6 +436,52 @@ async function helpers(): Promise<void> {
     true,
   );
   expect(notices.some((line) => line.startsWith("[WARNING] New page opened"))).toBe(true);
+}
+
+// Content helpers: cleaned HTML, the article as text, a labeled screenshot and its smaller copy,
+// and a stable locator string.
+test("content helpers read a page and label its interactive elements", async () => {
+  await opened("content");
+  try {
+    await content();
+  } finally {
+    await cli("session", "close", "content", "--close-tabs");
+  }
+});
+
+async function content(): Promise<void> {
+  const resize = Bun.which("ffmpeg") !== null;
+  const result = await run(
+    "content",
+    `const page = await context.newPage(); await page.goto("${origin}/article");
+     const html = await getCleanHTML({ locator: page.locator("article") });
+     const text = await getPageMarkdown({ page });
+     const shot = await screenshotWithAccessibilityLabels({ page });
+     const path = shot.match(/^Screenshot: (\\S+)/)[1];
+     const small = ${resize} ? await resizeImageForAgent({ input: path, maxDimension: 320 }) : "";
+     const go = await getLocatorStringForElement(page.locator("#go"));
+     return JSON.stringify({ html, text, shot, path, small, go })`,
+    "--timeout",
+    "20000",
+  );
+  const seen = JSON.parse(String(result.body.output)) as Record<string, string>;
+  expect(seen.html).toContain("<h1>");
+  expect(seen.html).toContain('<button id="go">');
+  expect(seen.html).not.toContain("script");
+  expect(seen.text).toContain("Fixture heading");
+  expect(seen.text).toContain("First. This paragraph");
+  expect(seen.text).toContain("- One point");
+  expect(seen.text).not.toContain("Home");
+  expect(seen.shot).toMatch(/^Screenshot: \S+\.jpg \([1-9]\d* labels\)/);
+  expect(seen.shot).toContain('button "Go" [ref=');
+  expect(seen.shot).not.toContain("[box=");
+  expect(seen.path?.startsWith(join(runtime, "sessions", "content"))).toBe(true);
+  expect(existsSync(seen.path ?? "")).toBe(true);
+  if (resize) {
+    expect(existsSync(seen.small ?? "")).toBe(true);
+    expect(statSync(seen.small ?? "").size).toBeLessThan(statSync(seen.path ?? "").size);
+  }
+  expect(seen.go).toBe('getByRole("button", { name: "Go", exact: true })');
 }
 
 // Chrome serves WebAuthn only to a focused page: a background agent tab is
