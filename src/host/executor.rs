@@ -197,22 +197,54 @@ impl Executor {
                 .map_err(|_| Refusal::ExecutorUnavailable)
         })
         .await?;
+        // A script past its deadline is asked to abort. The executor answers for exactly that
+        // script within the grace and keeps its state; otherwise the caller stops it.
+        let completed = match within(deadline, self.completion()).await {
+            Err(Refusal::Timeout) => {
+                let grace = Instant::now() + ABORT_GRACE;
+                self.abort(grace).await?;
+                within(grace, self.completion()).await?
+            }
+            other => other?,
+        };
+        let failure = match (completed.ok, completed.error.as_deref()) {
+            (true, _) => None,
+            (false, Some("target_closed")) => Some(ScriptFailure::TargetClosed),
+            (false, Some("browser_disconnected")) => Some(ScriptFailure::BrowserDisconnected),
+            (false, Some("aborted")) => Some(ScriptFailure::Aborted),
+            (false, Some("invalid_request")) => return Err(Refusal::InvalidRequest),
+            (false, _) => Some(ScriptFailure::ScriptError),
+        };
+        Ok((failure, completed.output, completed.truncated))
+    }
+
+    /// The answer to the current script; answers to earlier ones are skipped.
+    async fn completion(&mut self) -> Result<Completed, Refusal> {
         loop {
-            let line = within(deadline, read_line(&mut self.output)).await?;
+            let line = read_line(&mut self.output).await?;
             let completed: Completed =
                 serde_json::from_slice(&line).map_err(|_| Refusal::ExecutorUnavailable)?;
-            if completed.id != self.next {
-                continue;
+            if completed.id == self.next {
+                return Ok(completed);
             }
-            let failure = match (completed.ok, completed.error.as_deref()) {
-                (true, _) => None,
-                (false, Some("target_closed")) => Some(ScriptFailure::TargetClosed),
-                (false, Some("browser_disconnected")) => Some(ScriptFailure::BrowserDisconnected),
-                (false, Some("invalid_request")) => return Err(Refusal::InvalidRequest),
-                (false, _) => Some(ScriptFailure::ScriptError),
-            };
-            return Ok((failure, completed.output, completed.truncated));
         }
+    }
+
+    async fn abort(&mut self, until: Instant) -> Result<(), Refusal> {
+        let mut line = serde_json::to_vec(&serde_json::json!({ "abort": self.next }))
+            .map_err(|_| Refusal::InvalidRequest)?;
+        line.push(b'\n');
+        within(until, async {
+            self.input
+                .write_all(&line)
+                .await
+                .map_err(|_| Refusal::ExecutorUnavailable)?;
+            self.input
+                .flush()
+                .await
+                .map_err(|_| Refusal::ExecutorUnavailable)
+        })
+        .await
     }
 }
 
@@ -262,6 +294,9 @@ pub(super) async fn owned_test_child() -> (Executor, u32) {
         pid,
     )
 }
+
+/// How long an executor has to confirm that it aborted a script past its deadline.
+const ABORT_GRACE: Duration = Duration::from_secs(2);
 
 async fn within<T>(
     deadline: Instant,

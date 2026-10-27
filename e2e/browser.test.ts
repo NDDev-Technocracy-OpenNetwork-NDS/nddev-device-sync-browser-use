@@ -771,19 +771,32 @@ test("concurrent execution in one session is refused as busy", async () => {
   expect((await slow).body.value).toBe("slow");
 });
 
-test("a timeout stops the run before its later action and resets state", async () => {
+test("a timeout aborts the script: its later action never happens and the state stays", async () => {
   const page = await observed("/");
   const before = await page?.locator("#c").textContent();
+  expect((await run("acceptance", "state.kept = 7")).code).toBe(0);
   const result = await run(
     "acceptance",
-    `await new Promise((done) => setTimeout(done, 3000)); await state.page.click("#inc")`,
+    `console.log("started"); await new Promise((done) => setTimeout(done, 3000)); await state.page.click("#inc")`,
     "--timeout",
     "1000",
   );
-  expect(result).toEqual({ code: 2, body: expect.objectContaining({ error: "timeout" }) });
+  expect(result.code).toBe(1);
+  expect(result.body.failure).toBe("aborted");
+  expect(String(result.body.output)).toContain("[log] started");
+  expect(String(result.body.output)).toContain("reached its deadline and was aborted");
   await Bun.sleep(3500);
   expect(await page?.locator("#c").textContent()).toBe(before ?? "");
-  expect((await run("acceptance", "state.value === undefined")).body.value).toBe("true");
+  expect((await run("acceptance", "state.kept")).body.value).toBe("7");
+});
+
+test("a script that blocks its executor past the deadline is stopped and its state resets", async () => {
+  await opened("blocking");
+  expect((await run("blocking", "state.kept = 1")).code).toBe(0);
+  const blocked = await run("blocking", "while (true) {}", "--timeout", "1000");
+  expect(blocked).toEqual({ code: 2, body: expect.objectContaining({ error: "timeout" }) });
+  expect((await run("blocking", "state.kept === undefined")).body.value).toBe("true");
+  expect((await cli("session", "close", "blocking")).code).toBe(0);
 });
 
 test("a replacement executor sees its page and none of the old executor's interception", async () => {
@@ -792,10 +805,11 @@ test("a replacement executor sees its page and none of the old executor's interc
   // outlives its deadline.
   const first = await run(
     "replaced",
-    `state.page = await context.newPage(); await state.page.goto("${origin}/"); await state.page.route("**/*", () => {}); await new Promise((done) => setTimeout(done, 3000))`,
+    `state.page = await context.newPage(); await state.page.goto("${origin}/"); await state.page.route("**/*", () => {}); while (true) {}`,
     "--timeout",
     "1500",
   );
+  // A script that blocks its executor cannot confirm an abort, so the executor is replaced.
   expect(first.body.error).toBe("timeout");
   // Its replacement evaluates in the same tab and loads it again.
   const replaced = await run(
@@ -1023,7 +1037,7 @@ test("a session whose execution timed out during a long wait closes and opens ag
     "--timeout",
     "3000",
   );
-  expect(waited.body.error).toBe("timeout");
+  expect(waited.body.failure).toBe("aborted");
   // The extension answers or drops the abandoned call within its 30 s reply deadline.
   await Bun.sleep(32_000);
   expect((await cli("session", "close", "waiting", "--close-tabs")).code).toBe(0);
