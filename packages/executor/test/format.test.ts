@@ -8,6 +8,7 @@ import {
   render,
   shortUrl,
   tag,
+  waitBudget,
 } from "../agent/format.js";
 
 // A stand-in for a Playwright client object: a channel owner with a type and a guid.
@@ -97,4 +98,59 @@ test("a timeout names why the action could not proceed and keeps its last call l
   expect(describeError(new TypeError("x is not a function"))).toBe(
     "TypeError: x is not a function",
   );
+});
+
+test("no edge of a value lets inspect reach a Playwright object's internals", () => {
+  const marker = "SECRET-ENV-MARKER";
+  const secret = () => ({
+    _type: "Page",
+    _guid: "page@2",
+    url: () => "https://example.test/",
+    _connection: { _platform: { env: { TOKEN: marker } } },
+  });
+  class Wrapper {
+    constructor(readonly page: object) {}
+  }
+  const cyclic: Record<string, unknown> = { page: secret() };
+  cyclic.self = cyclic;
+  let read = false;
+  const getter = {
+    get page() {
+      read = true;
+      return secret();
+    },
+  };
+  const failed = Object.assign(new Error("boom"), { page: secret() });
+  for (const value of [
+    new Map([[secret(), 1]]),
+    new Map([[1, secret()]]),
+    new Set([secret()]),
+    new Wrapper(secret()),
+    [new Wrapper(new Wrapper(secret()))],
+    cyclic,
+    getter,
+    failed,
+    Promise.resolve(secret()),
+  ]) {
+    const text = render(value);
+    expect(text).not.toContain(marker);
+    expect(text).not.toContain("_connection");
+  }
+  expect(read).toBe(false);
+  expect(render(new Wrapper(secret()))).toBe("Wrapper { page: <Page https://example.test/> }");
+  expect(render(cyclic)).toContain("[Circular]");
+  expect(render(new Map([[secret(), 1]]))).toContain("<Page https://example.test/> => 1");
+  expect(render({ when: new Date(0), pattern: /a/ })).toContain("1970-01-01");
+});
+
+test("Playwright waits always end inside the execution's remaining budget", () => {
+  expect(waitBudget(10_000)).toBe(9_000);
+  expect(waitBudget(2_000)).toBe(1_000);
+  expect(waitBudget(1_000)).toBe(500);
+  expect(waitBudget(100)).toBe(50);
+  expect(waitBudget(1)).toBe(1);
+  for (const budget of [1, 2, 10, 999, 1_000, 1_999, 25_000]) {
+    expect(waitBudget(budget)).toBeGreaterThan(0);
+    expect(waitBudget(budget) <= budget).toBe(true);
+  }
 });
