@@ -762,11 +762,11 @@ impl Host {
             .map(|(project, session)| (project.clone(), session.life.clone()))
             .collect();
         for (project, life) in sessions {
-            let enabled = self.state().enabled;
-            if enabled {
-                let _ = self.stop_interrupted(&project, &life).await;
+            if life.stop.is_cancelled() {
+                // Re-enabling the extension cannot revive this canceled lifetime.
+                let _ = self.close_generation(&project, &life, false, true).await;
             } else {
-                let _ = self.close_generation(&project, &life, false, false).await;
+                let _ = self.stop_interrupted(&project, &life).await;
             }
         }
     }
@@ -1046,15 +1046,25 @@ impl Host {
     }
 
     async fn open(&self, project: &str) -> Result<view::Session, Refusal> {
-        {
+        let closing = {
             let mut state = self.state();
             Self::ready(&state)?;
             if let Some(session) = state.sessions.get(project) {
-                if session.closing || (session.owned && !session.opened) {
+                if session.owned && (session.closing || !session.opened) {
                     return Err(Refusal::Busy);
                 }
-                return Ok(view_session(&mut state, project));
+                if session.closing {
+                    Some(session.life.clone())
+                } else {
+                    return Ok(view_session(&mut state, project));
+                }
+            } else {
+                None
             }
+        };
+        if let Some(life) = closing {
+            // Drain only the captured legacy generation. A replacement is never adopted.
+            self.close_generation(project, &life, false, true).await?;
         }
         let life = self.reserve(project, false)?;
         self.open_generation(project, &life).await

@@ -44,6 +44,51 @@ fn answer(host: &Host, request: &Value) {
 }
 
 #[tokio::test]
+async fn disabled_then_enabled_before_sweep_still_finishes_the_canceled_generation() {
+    let (host, mut queue, _root) = fixture();
+    let old = host.reserve("legacy", false).unwrap();
+    host.on_control(false);
+    host.on_control(true);
+    assert!(old.stop.is_cancelled());
+    host.drain_closing().await;
+    assert!(!host.state().sessions.contains_key("legacy"));
+    let replacement = host.reserve("legacy", false).unwrap();
+    assert!(!Arc::ptr_eq(&old, &replacement));
+    assert!(queue.try_recv().is_err());
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_open_drains_only_the_captured_closing_generation() {
+    let (host, mut queue, _root) = fixture();
+    let old = host.reserve("legacy", false).unwrap();
+    host.on_control(false);
+    host.on_control(true);
+    let opened = {
+        let host = host.clone();
+        tokio::spawn(async move { host.open("legacy").await })
+    };
+    let claim = message(&mut queue).await;
+    let replacement = host.session_life("legacy", None).unwrap();
+    assert!(!Arc::ptr_eq(&old, &replacement));
+    host.on_extension(json!({ "type": "result", "id": claim["id"],
+        "error": { "code": "permission_required", "message": "permission_required" } }));
+    assert!(matches!(
+        opened.await.unwrap(),
+        Err(Refusal::PermissionRequired)
+    ));
+    assert!(matches!(
+        host.close_generation("legacy", &old, false, true).await,
+        Err(Refusal::SessionNotFound)
+    ));
+    assert!(Arc::ptr_eq(
+        &host.session_life("legacy", None).unwrap(),
+        &replacement
+    ));
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn legacy_open_reuses_its_pending_session_without_adopting_owned_reservations() {
     let (host, mut queue, _root) = fixture();
     host.reserve("legacy", false).unwrap();
