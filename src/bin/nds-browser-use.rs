@@ -15,7 +15,7 @@ const USAGE: &str = "usage:
   nds-browser-use update
   nds-browser-use session new <project>
   nds-browser-use session list
-  nds-browser-use session close <project> [--close-tabs]
+  nds-browser-use session close <project> [--keep-tabs]
   nds-browser-use -s <project> (-e <code> | -f <file>) [--timeout <ms>] [--expect <target>:<document>]
   nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)";
 const ARGUMENT_LIMIT: usize = 16;
@@ -102,12 +102,14 @@ async fn client(words: &[&str]) -> ExitCode {
             .sessions(cancellation)
             .await
             .map(|sessions| print(&sessions)),
-        ["session", "close", project] => client
-            .close(project, false, cancellation)
+        // Closing a session closes its tabs unless the agent keeps them for the owner;
+        // `--close-tabs` stays accepted for scripts written before that was the default.
+        ["session", "close", project] | ["session", "close", project, "--close-tabs"] => client
+            .close(project, true, cancellation)
             .await
             .map(|()| print(&serde_json::json!({ "closed": project }))),
-        ["session", "close", project, "--close-tabs"] => client
-            .close(project, true, cancellation)
+        ["session", "close", project, "--keep-tabs"] => client
+            .close(project, false, cancellation)
             .await
             .map(|()| print(&serde_json::json!({ "closed": project }))),
         ["-s", project, rest @ ..] => {

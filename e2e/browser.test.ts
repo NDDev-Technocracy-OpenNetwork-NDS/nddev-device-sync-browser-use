@@ -549,7 +549,7 @@ test("a lost host is replaced and the agent group is reclaimed without owner tab
 });
 
 test("closing a session cleans only its own area", async () => {
-  expect((await cli("session", "close", "acceptance", "--close-tabs")).code).toBe(0);
+  expect((await cli("session", "close", "acceptance")).code).toBe(0);
   await Bun.sleep(500);
   expect(await observed("/")).toBeUndefined();
   expect(await observed("/owner")).toBeDefined();
