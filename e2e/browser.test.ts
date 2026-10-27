@@ -612,6 +612,42 @@ test("devtools helpers style, edit and debug an agent page", async () => {
   }
 });
 
+// The recorder: a person acts in an agent tab, and the agent reads a timeline of actions with
+// locators and a frame of the screen.
+test("the recorder turns a person's actions in an agent tab into events and frames", async () => {
+  await opened("recorder");
+  try {
+    const started = await run(
+      "recorder",
+      `const page = await context.newPage(); await page.goto("${origin}/helpers?recorder"); return JSON.stringify(await recorder.start())`,
+    );
+    expect(JSON.parse(String(started.body.output)).path).toStartWith(
+      join(runtime, "sessions", "recorder"),
+    );
+    const tab = await observed("/helpers?recorder");
+    await tab?.click("#save");
+    await tab?.fill("#name", "Ada");
+    await tab?.locator("#name").press("Tab");
+    await Bun.sleep(1000);
+    const result = await run(
+      "recorder",
+      `const stopped = await recorder.stop(); return JSON.stringify({ stopped, timeline: recorder.events(), first: recorder.frame({ eventId: 1 }) })`,
+    );
+    const seen = JSON.parse(String(result.body.output)) as {
+      stopped: { events: number; frames: number };
+      timeline: string;
+      first: string;
+    };
+    expect(seen.timeline).toContain('click getByRole("button", { name: "Save" })');
+    expect(seen.timeline).toContain('fill getByRole("textbox", { name: "Name" }) = "Ada"');
+    expect(seen.timeline).toContain("press");
+    expect(seen.stopped.frames).toBeGreaterThan(0);
+    expect(existsSync(seen.first)).toBe(true);
+  } finally {
+    await cli("session", "close", "recorder", "--close-tabs");
+  }
+});
+
 // Chrome serves WebAuthn only to a focused page: a background agent tab is
 // refused, and the agent must bring its tab to the front for a passkey step.
 test("raw CDP sessions reach agent tabs, including a virtual authenticator", async () => {

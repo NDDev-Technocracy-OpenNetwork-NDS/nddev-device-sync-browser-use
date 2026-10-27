@@ -20,6 +20,7 @@ import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
 import { getLocatorStringForElement } from "./agent/locators";
 import { getLatestLogs, notified, attach as watchLogs } from "./agent/logs";
+import { recorderFor } from "./agent/recorder";
 import { createDemoVideo, executing, ghostCursor, recording } from "./agent/recording";
 import { resizeImageForAgent, screenshotWithAccessibilityLabels } from "./agent/screens";
 import { ref, refToLocator, snapshot, attach as watchSnapshots } from "./agent/snapshot";
@@ -97,6 +98,7 @@ const sandbox = vm.createContext({
   formatStylesAsText,
   getReactComponentInfo,
   getReactSource,
+  recorder: recorderFor(context, artifacts),
   checks,
   notifyOwner: (page: Page, reason: string) => owner(page, "NDS.notifyOwner", { reason }),
   clearOwner: (page: Page) => owner(page, "NDS.clearOwner", {}),
