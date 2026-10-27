@@ -8,6 +8,34 @@
 //
 // Adapted from Playwriter's extension/src/session-reattach.ts (MIT License, Copyright (c) 2026
 // Tommy D. Rossi, https://github.com/remorses/playwriter).
+// The setup a tab may record, so restoring it stays finite: a command that would grow it past
+// either bound is refused before it reaches Chrome, never recorded short.
+export const MAX_SETUP_COMMANDS = 256;
+export const MAX_SETUP_BYTES = 1_048_576;
+function size(command) {
+    return command.method.length + JSON.stringify(command.params ?? {}).length;
+}
+function effect(method, params) {
+    const [domain = "", command = ""] = method.split(".");
+    const fields = params;
+    if (method === "Page.addScriptToEvaluateOnNewDocument")
+        return { put: "script:" };
+    if (command === "enable")
+        return { put: domain };
+    if (command === "disable")
+        return { remove: domain };
+    if (method === "Page.removeScriptToEvaluateOnNewDocument")
+        return { remove: `script:${fields?.identifier}` };
+    if (method === "Runtime.addBinding")
+        return { put: `binding:${fields?.name}` };
+    if (method === "Runtime.removeBinding")
+        return { remove: `binding:${fields?.name}` };
+    if (domain === "Emulation" && command.startsWith("clear"))
+        return { remove: `Emulation.set${command.slice("clear".length)}` };
+    if ((domain === "Emulation" && command.startsWith("set")) || REPLAYED_SETTERS.has(method))
+        return { put: method };
+    return undefined;
+}
 // An extension that injects its frame again right after every attach must not loop forever.
 export const MAX_REATTACHES = 5;
 export const REATTACH_WINDOW_MS = 5_000;
@@ -34,6 +62,7 @@ export class Restore {
             frames: new Set(),
             children: new Set(),
             reattaches: [],
+            bytes: 0,
         });
     }
     endSession(tab) {
@@ -97,20 +126,46 @@ export class Restore {
         const chrome = this.sessions.get(tab)?.setup.get(`script:${identifier}`)?.scriptIdentifier;
         return chrome ? { ...params, identifier: chrome } : params;
     }
+    // Whether recording this command keeps the tab's setup within its bounds. A command that only
+    // removes setup, or records nothing, always fits.
+    admits(tab, method, params) {
+        const session = this.sessions.get(tab);
+        const change = effect(method, params);
+        if (!session || !change || !("put" in change))
+            return true;
+        const script = change.put === "script:";
+        const previous = script ? undefined : session.setup.get(change.put);
+        const entry = { method, params: script ? { ...params, runImmediately: false } : params };
+        const commands = session.setup.size + (previous ? 0 : 1);
+        const bytes = session.bytes - (previous ? size(previous) : 0) + size(entry);
+        return commands <= MAX_SETUP_COMMANDS && bytes <= MAX_SETUP_BYTES;
+    }
     // Records a successful root-session command when it is setup; any other command is ignored.
     // An init script's result is returned with the stable identifier agents keep.
     record(tab, method, params, result) {
-        const setup = this.sessions.get(tab)?.setup;
-        if (!setup)
+        const session = this.sessions.get(tab);
+        const change = effect(method, params);
+        if (!session || !change)
             return result;
+        const { setup } = session;
+        const remove = (key) => {
+            const previous = setup.get(key);
+            if (!previous)
+                return;
+            session.bytes -= size(previous);
+            setup.delete(key);
+        };
         // The latest command moves to the end, so a replay keeps the order agents gave.
         const put = (key, command) => {
-            setup.delete(key);
+            remove(key);
             setup.set(key, command);
+            session.bytes += size(command);
         };
-        const [domain = "", command = ""] = method.split(".");
-        const fields = params;
-        if (method === "Page.addScriptToEvaluateOnNewDocument") {
+        if ("remove" in change) {
+            remove(change.remove);
+            return result;
+        }
+        if (change.put === "script:") {
             const identifier = `nds-${this.nextScript++}`;
             // The script already ran in the current documents; a replay is for later ones only.
             put(`script:${identifier}`, {
@@ -120,20 +175,7 @@ export class Restore {
             });
             return { ...result, identifier };
         }
-        if (command === "enable")
-            put(domain, { method, params });
-        else if (command === "disable")
-            setup.delete(domain);
-        else if (method === "Page.removeScriptToEvaluateOnNewDocument")
-            setup.delete(`script:${fields?.identifier}`);
-        else if (method === "Runtime.addBinding")
-            put(`binding:${fields?.name}`, { method, params });
-        else if (method === "Runtime.removeBinding")
-            setup.delete(`binding:${fields?.name}`);
-        else if (domain === "Emulation" && command.startsWith("clear"))
-            setup.delete(`Emulation.set${command.slice("clear".length)}`);
-        else if ((domain === "Emulation" && command.startsWith("set")) || REPLAYED_SETTERS.has(method))
-            put(method, { method, params });
+        put(change.put, { method, params });
         return result;
     }
     // Replays the recorded setup in order. One rejected command must not drop the tab; the failed

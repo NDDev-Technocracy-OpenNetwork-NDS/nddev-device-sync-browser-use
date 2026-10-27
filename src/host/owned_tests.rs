@@ -849,3 +849,47 @@ async fn an_execution_after_the_switch_is_refused_for_the_switch_even_once_drain
         Some(Refusal::SessionNotFound)
     );
 }
+
+#[tokio::test]
+async fn a_replacement_whose_life_closes_during_its_release_claims_and_starts_nothing() {
+    let (host, mut queue, _root) = fixture();
+    let handle = host.create_owned("project").unwrap();
+    let life = host
+        .session_life(&handle.project, Some(&handle.generation))
+        .unwrap();
+    {
+        let mut state = host.state();
+        let session = state.sessions.get_mut("project").unwrap();
+        runtime::private_directory(&session.artifacts).unwrap();
+        session.opened = true;
+    }
+    // An earlier executor ran, so the next start is a replacement that first refreshes its tabs.
+    life.started.store(true, Ordering::Release);
+    let run = {
+        let host = host.clone();
+        let life = life.clone();
+        tokio::spawn(async move { host.run("project", &life, "inert", 25_000, None).await })
+    };
+    let release = message(&mut queue).await;
+    assert_eq!(release["type"], "release");
+    assert_eq!(release["close"], false);
+    // The owner turns control off and on while that release is answered.
+    host.on_control(false);
+    host.on_control(true);
+    answer(&host, &release);
+    assert_eq!(run.await.unwrap().err(), Some(Refusal::PermissionRequired));
+    // No claim reached the extension and no executor started.
+    assert!(queue.try_recv().is_err());
+    assert!(life.executor.lock().await.is_none());
+    // The closed life is still drained by its own strict release.
+    let drained = {
+        let host = host.clone();
+        tokio::spawn(async move { host.drain_closing().await })
+    };
+    let close = message(&mut queue).await;
+    assert_eq!(close["type"], "release");
+    answer(&host, &close);
+    drained.await.unwrap();
+    assert!(!host.state().sessions.contains_key("project"));
+    host.shutdown().await.unwrap();
+}

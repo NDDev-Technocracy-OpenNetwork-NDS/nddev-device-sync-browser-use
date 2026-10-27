@@ -203,6 +203,9 @@ async function dispatch(message) {
             }
             if (message.session)
                 return (await command(target, message.method, message.params)) ?? {};
+            // Setup that would outgrow what a reattach can restore is refused before Chrome sees it.
+            if (!restore.admits(message.tab, message.method, message.params))
+                throw new Refusal("capacity");
             const params = restore.chromeParams(message.tab, message.method, message.params);
             const result = (await command(target, message.method, params)) ?? {};
             return restore.record(message.tab, message.method, message.params, result);
@@ -374,6 +377,9 @@ function attach(tab, life) {
             throw new Refusal("busy");
         if (!attachment) {
             await removeForeignFrames(tab, life);
+            // Frame cleanup admits nothing; the attach itself needs the life still open.
+            if (!life.open)
+                throw new Refusal("target_closed");
             await chrome.debugger.attach({ tabId: tab }, PROTOCOL);
             // The session exists from here on, so it is recorded before anything else is awaited:
             // Chrome's report of its end then finds it, and a release of this life waits for this
@@ -419,7 +425,13 @@ function relinquish(tab, attachment, close) {
         try {
             // A reattach in progress ends first, so the session it may create is the one detached.
             await reattaching.get(tab);
-            if (close)
+            // What held during the wait is decided again: an attachment that ended or no longer holds
+            // its tab never acts, and a tab the owner took back meanwhile is detached, never closed.
+            if (attachment.ended)
+                return;
+            if (attached.get(tab) !== attachment)
+                throw new Refusal("target_closed");
+            if (close && !attachment.revoked)
                 await chrome.tabs.remove(tab);
             else
                 await chrome.debugger.detach({ tabId: tab });
@@ -716,11 +728,10 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     const live = reason === "target_closed" && usable(tab) && !reattaching.has(tab);
     if (live && restore.mayReattach(tab, Date.now())) {
         const attempt = admitted(attachment.life, reattach(tab, attachment))
-            .then((failure) => {
-            report("browser.target.reattached", failure);
-            if (failure)
-                lose(tab, attachment, reason);
-            return failure === undefined;
+            .then(({ outcome, error }) => {
+            report("browser.target.reattached", error);
+            settle(tab, attachment, reason, outcome);
+            return outcome === "restored";
         })
             .finally(() => {
             if (reattaching.get(tab) === attempt)
@@ -737,31 +748,57 @@ function lose(tab, attachment, reason) {
     ended(tab, attachment);
     send({ type: "detached", tab, reason });
 }
+// Agents lose a tab that was not restored. A session this worker still holds is never counted as
+// ended: it stays recorded, out of agents' reach, until a detach resolves or Chrome reports its
+// end, so a release cannot confirm while it lives.
+function settle(tab, attachment, reason, outcome) {
+    if (outcome === "restored" || attachment.ended)
+        return;
+    if (outcome === "gone") {
+        lose(tab, attachment, reason);
+        return;
+    }
+    attachment.revoked = true;
+    send({ type: "detached", tab, reason });
+}
 // Attaches a tab again after Chrome detached it on its own and restores what agents saw: the old
 // session's contexts and child sessions are reported gone, frames that vanished meanwhile are
-// detached, and Playwright's setup is replayed. A tab whose target changed, or that left its
-// agent group meanwhile, is not restored.
+// detached, and Playwright's setup is replayed. Exactly this attachment must still be current
+// before the attach and after every later wait; a tab whose target changed, that left its agent
+// group or whose life closed meanwhile gets no further command and is detached again.
 async function reattach(tab, attachment) {
+    const current = () => usable(tab) === attachment;
     send({ type: "event", tab, method: "Runtime.executionContextsCleared", params: {} });
     for (const child of restore.takeChildren(tab))
         send({ type: "event", tab, method: "Target.detachedFromTarget", params: { sessionId: child } });
+    await removeForeignFrames(tab, attachment.life, attachment);
+    // Frame cleanup admits nothing; the attach itself needs this attachment still current.
+    if (!current())
+        return { outcome: "gone", error: "attach_failed" };
     try {
-        await removeForeignFrames(tab, attachment.life, attachment);
         await chrome.debugger.attach({ tabId: tab }, PROTOCOL);
     }
     catch {
-        return "attach_failed";
+        return { outcome: "gone", error: "attach_failed" };
     }
-    let failure = "attach_failed";
-    try {
-        if (attached.get(tab) !== attachment || !usable(tab))
+    let error = "attach_failed";
+    // A session of this worker exists from here on. It ends only through a detach that resolved or
+    // Chrome's own report, never because a step failed.
+    const step = async (work) => {
+        if (!current())
             throw new Refusal("target_closed");
-        const info = (await command({ tabId: tab }, "Target.getTargetInfo"));
+        const value = await work();
+        if (!current())
+            throw new Refusal("target_closed");
+        return value;
+    };
+    try {
+        const info = (await step(() => command({ tabId: tab }, "Target.getTargetInfo")));
         if (info.targetInfo.targetId !== attachment.target) {
-            failure = "target_changed";
+            error = "target_changed";
             throw new Refusal("target_closed");
         }
-        const { frameTree } = (await command({ tabId: tab }, "Page.getFrameTree"));
+        const { frameTree } = (await step(() => command({ tabId: tab }, "Page.getFrameTree")));
         for (const frameId of restore.takeRemovedFrames(tab, frameTree))
             send({
                 type: "event",
@@ -769,13 +806,13 @@ async function reattach(tab, attachment) {
                 method: "Page.frameDetached",
                 params: { frameId, reason: "remove" },
             });
-        await restore.replay(tab, (method, params) => command({ tabId: tab }, method, params));
-        await remember(tab);
-        return undefined;
+        await restore.replay(tab, (method, params) => step(() => command({ tabId: tab }, method, params)));
+        await step(() => remember(tab));
+        return { outcome: "restored" };
     }
     catch {
-        await chrome.debugger.detach({ tabId: tab }).catch(() => undefined);
-        return failure;
+        const outcome = await chrome.debugger.detach({ tabId: tab }).then(() => "gone", () => "held");
+        return { outcome, error };
     }
 }
 // A tab created inside an agent group (for example with the group's "+")
