@@ -839,37 +839,42 @@ async function plain(...args: string[]): Promise<{ code: number; stdout: string;
 
 test("agents read plain text, and a stuck action fails with its reason before the deadline", async () => {
   await opened("plain");
-  // The host records every request; the client's stderr stays empty for the agent.
-  const value = await plain("-s", "plain", "-e", "1 + 1");
-  expect(value).toEqual({ code: 0, stdout: "[return value] 2\n", stderr: "" });
-  const logged = await plain(
-    "-s",
-    "plain",
-    "-e",
-    `state.page = await context.newPage(); await state.page.goto("${origin}/"); await state.page.evaluate(() => console.log("%cstyled %s", "color: red", "text")); state.kept = 1; return getLatestLogs({ page: state.page, sinceLastCall: true })`,
-  );
-  expect(logged.stdout).toContain("[log] styled text");
-  expect(logged.stdout).not.toContain("color: red");
-  // A locator that matches nothing fails with Playwright's reason within the run's own deadline;
-  // the session keeps its state.
-  const stuck = await plain(
-    "-s",
-    "plain",
-    "-e",
-    'await state.page.click("#missing")',
-    "--timeout",
-    "4000",
-  );
-  expect(stuck.code).toBe(1);
-  expect(stuck.stderr).toContain("no element matched the locator");
-  expect((await plain("-s", "plain", "-e", "state.kept")).stdout).toBe("[return value] 1\n");
-  const closed = await plain("-s", "plain", "-e", "await state.page.close()");
-  expect(closed.stdout).toStartWith("[WARNING] Page closed");
-  expect(closed.stdout).toContain("for state.page");
-  const refused = await plain("-s", "nowhere", "-e", "1");
-  expect(refused.code).toBe(2);
-  expect(refused.stderr).toStartWith("Error (session_not_found)");
-  expect((await cli("session", "close", "plain")).code).toBe(0);
+  try {
+    // The host records every request; the client's stderr stays empty for the agent.
+    const value = await plain("-s", "plain", "-e", "1 + 1");
+    expect(value).toEqual({ code: 0, stdout: "[return value] 2\n", stderr: "" });
+    const logged = await plain(
+      "-s",
+      "plain",
+      "-e",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/"); await state.page.evaluate(() => console.log("%cstyled %s", "color: red", "text")); state.kept = 1; return getLatestLogs({ page: state.page, sinceLastCall: true })`,
+    );
+    expect(logged.stdout).toContain("[log] styled text");
+    expect(logged.stdout).not.toContain("color: red");
+    // A locator that matches nothing fails with Playwright's reason within the run's own deadline;
+    // the session keeps its state.
+    const stuck = await plain(
+      "-s",
+      "plain",
+      "-e",
+      'await state.page.click("#missing")',
+      "--timeout",
+      "4000",
+    );
+    expect(stuck.code).toBe(1);
+    expect(stuck.stderr).toContain("no element matched the locator");
+    expect((await plain("-s", "plain", "-e", "state.kept")).stdout).toBe("[return value] 1\n");
+    const closed = await plain("-s", "plain", "-e", "await state.page.close()");
+    expect(closed.stdout).toStartWith("[WARNING] Page closed");
+    expect(closed.stdout).toContain("for state.page");
+    const refused = await plain("-s", "nowhere", "-e", "1");
+    expect(refused.code).toBe(2);
+    expect(refused.stderr).toStartWith("Error (session_not_found)");
+    expect((await cli("session", "close", "plain")).code).toBe(0);
+  } finally {
+    // A failure above must not leave this session's executor and tab to the tests after it.
+    await cli("session", "close", "plain");
+  }
 });
 
 test("a client that disconnects mid-run cancels it and frees the session", async () => {
