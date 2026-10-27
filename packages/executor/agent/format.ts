@@ -61,30 +61,55 @@ export function tag(value: unknown): string | undefined {
   return `<${parts.filter(Boolean).join(" ")}>`;
 }
 
-// Replaces Playwright objects inside plain data with their tags, so inspect never walks them.
-function shield(value: unknown, depth: number, seen: Set<object>): unknown {
-  const tagged = tag(value);
-  if (tagged !== undefined) return { [inspect.custom]: () => tagged };
-  if (typeof value !== "object" || value === null || depth > INSPECT.depth || seen.has(value))
-    return value;
-  if (Array.isArray(value)) {
-    seen.add(value);
-    return value.map((item) => shield(item, depth + 1, seen));
-  }
-  if (value instanceof Map) {
-    seen.add(value);
-    return new Map([...value].map(([key, item]) => [key, shield(item, depth + 1, seen)]));
-  }
-  if (value instanceof Set) {
-    seen.add(value);
-    return new Set([...value].map((item) => shield(item, depth + 1, seen)));
-  }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) return value;
-  seen.add(value);
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [key, shield(item, depth + 1, seen)]),
+// A value inspect prints as given text, without looking into anything.
+function opaque(text: string): object {
+  return { [inspect.custom]: () => text };
+}
+
+// Built-in values whose printing walks no object graph of the agent's.
+function inert(value: object): boolean {
+  return (
+    value instanceof Date ||
+    value instanceof RegExp ||
+    value instanceof URL ||
+    ArrayBuffer.isView(value) ||
+    value instanceof ArrayBuffer
   );
+}
+
+// A copy of a value that inspect may walk: Playwright objects become tags, and every edge of the
+// graph (array items, Map keys and values, Set members, own data fields) is copied the same way.
+// Getters are never called, other class instances keep only their own data fields under their
+// class name, errors and promises print as tags, and a cycle prints as such. inspect never
+// reaches an original object, so no connection internals or environment can show.
+function shield(value: unknown, depth: number, ancestors: Set<object>): unknown {
+  const tagged = tag(value);
+  if (tagged !== undefined) return opaque(tagged);
+  if (typeof value !== "object" || value === null) return value;
+  if (ancestors.has(value)) return opaque("[Circular]");
+  if (inert(value)) return value;
+  if (value instanceof Error) return opaque(`[${value.name}: ${value.message}]`);
+  if (value instanceof Promise) return opaque("Promise");
+  if (depth > INSPECT.depth) return opaque(Array.isArray(value) ? "[Array]" : "[Object]");
+  ancestors.add(value);
+  try {
+    const inner = (item: unknown) => shield(item, depth + 1, ancestors);
+    if (Array.isArray(value)) return value.map(inner);
+    if (value instanceof Map)
+      return new Map([...value].map(([key, item]) => [inner(key), inner(item)]));
+    if (value instanceof Set) return new Set([...value].map(inner));
+    const fields: Record<string, unknown> = {};
+    for (const [key, field] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+      if (!field.enumerable) continue;
+      fields[key] = "value" in field ? inner(field.value) : opaque("[Getter]");
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype === Object.prototype || prototype === null) return fields;
+    const name = (prototype?.constructor as { name?: string } | undefined)?.name || "Object";
+    return opaque(`${name} ${inspect(fields, INSPECT)}`);
+  } finally {
+    ancestors.delete(value);
+  }
 }
 
 /** One value as text: a string as it is, anything else inspected within fixed bounds. */
@@ -121,6 +146,12 @@ export function compose(parts: {
   if (parts.error !== undefined) sections.push(`Error: ${parts.error}`);
   else if (shown(parts.value)) sections.push(`[return value] ${render(parts.value)}`);
   return sections.length > 0 ? sections.join("\n\n") : "Code executed successfully (no output)";
+}
+
+/** How long Playwright's own waits may take within an execution's remaining budget: a second less,
+ * or half of a budget shorter than two seconds, and never the whole budget. */
+export function waitBudget(budget: number): number {
+  return Math.max(1, budget - Math.min(1_000, Math.floor(budget / 2)));
 }
 
 /** Cuts text at the output limit and says so. */

@@ -17,7 +17,7 @@ import {
   getReactSource,
   getStylesForLocator,
 } from "./agent/devtools";
-import { bounded, type Console, compose, describeError } from "./agent/format";
+import { bounded, type Console, compose, describeError, waitBudget } from "./agent/format";
 import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
 import { getLocatorStringForElement, pinnedElements } from "./agent/locators";
@@ -28,8 +28,6 @@ import { resizeImageForAgent, screenshotWithAccessibilityLabels } from "./agent/
 import { ref, refToLocator, snapshot, attach as watchSnapshots } from "./agent/snapshot";
 
 const LOG_LIMIT = 200;
-// Playwright's waits end this long before an execution's deadline.
-const WAIT_MARGIN_MS = 1_000;
 
 type Request = { id: number; code: string; timeout_ms?: number };
 type Failure = "script_error" | "target_closed" | "browser_disconnected" | "invalid_request";
@@ -145,7 +143,7 @@ function classify(error: unknown): Failure {
 async function run(request: Request): Promise<void> {
   logs = [];
   executing(true);
-  const wait = Math.max(1_000, (request.timeout_ms ?? 10_000) - WAIT_MARGIN_MS);
+  const wait = waitBudget(request.timeout_ms ?? 10_000);
   context.setDefaultTimeout(wait);
   context.setDefaultNavigationTimeout(wait);
   try {
