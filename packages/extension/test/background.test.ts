@@ -32,6 +32,9 @@ class Browser {
   readonly held = new Map<number, ReturnType<typeof deferred>>();
   readonly failingDetach = new Set<number>();
   readonly actions: string[] = [];
+  readonly notifications: { id: string; message: string }[] = [];
+  readonly evaluated: string[] = [];
+  readonly menu = new Event();
   readonly posted: Message[] = [];
   readonly port = { onMessage: new Event(), onDisconnect: new Event() };
   readonly events = {
@@ -132,15 +135,35 @@ class Browser {
           if (!this.sessions.delete(tabId)) throw new Error("Debugger is not attached.");
           this.actions.push(`detach ${tabId}`);
         },
-        sendCommand: async ({ tabId }: Session, method: string) => {
+        sendCommand: async (
+          { tabId }: Session,
+          method: string,
+          params?: { expression?: string },
+        ) => {
           if (!this.sessions.has(tabId)) throw new Error("Debugger is not attached.");
+          if (method === "Runtime.evaluate" && params?.expression) {
+            this.evaluated.push(params.expression);
+            if (params.expression.includes("ndsPinnedElem")) return { result: { value: 1 } };
+          }
           return method === "Target.getTargetInfo" ? { targetInfo: { targetId: `t${tabId}` } } : {};
         },
         onEvent: event(),
         onDetach: this.events.detached,
       },
       webNavigation: { onCreatedNavigationTarget: event() },
-      notifications: { create: async () => "", clear: async () => true, onClicked: event() },
+      notifications: {
+        create: async (id: string, options: { message: string }) => {
+          this.notifications.push({ id, message: options.message });
+          return id;
+        },
+        clear: async () => true,
+        onClicked: event(),
+      },
+      contextMenus: {
+        create: () => {},
+        removeAll: (done: () => void) => done(),
+        onClicked: this.menu,
+      },
     };
   }
 }
@@ -265,4 +288,30 @@ test("a closing release never closes a tab the owner took back", async () => {
   expect(browser.actions).not.toContain("remove 1");
   expect(browser.tabs.has(1)).toBe(true);
   expect(browser.sessions.size).toBe(0);
+});
+
+test("the owner pins an element only in an agent tab", async () => {
+  const { browser, send } = await worker({ p: P }, [
+    [1, P],
+    [9, -1],
+  ]);
+  await send({ type: "claim", group: "p" })();
+  // Attaching installs the listener that remembers the element of a right-click.
+  expect(browser.evaluated.some((expression) => expression.includes("__ndsContextTarget"))).toBe(
+    true,
+  );
+  browser.menu.fire({ menuItemId: "nds-pin" }, { id: 1 });
+  await until(() => browser.notifications.find((note) => note.id === "pin:1"));
+  expect(browser.notifications.find((note) => note.id === "pin:1")?.message).toBe(
+    "Pinned as ndsPinnedElem1.",
+  );
+  // A tab outside every agent group is never evaluated; the owner learns why.
+  browser.menu.fire({ menuItemId: "nds-pin" }, { id: 9 });
+  await until(() => browser.notifications.find((note) => note.id === "pin:9"));
+  expect(browser.notifications.find((note) => note.id === "pin:9")?.message).toContain(
+    "Only tabs in an NDS agent group",
+  );
+  expect(
+    browser.evaluated.filter((expression) => expression.includes("ndsPinnedElem")),
+  ).toHaveLength(1);
 });

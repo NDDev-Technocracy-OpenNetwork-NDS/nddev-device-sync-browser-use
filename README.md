@@ -81,6 +81,12 @@ refuse running against a replaced document.
   `recorder.frame({ eventId, offset })` names the frame closest to an event.
   Recordings live in `artifacts`, removed with the session, unless
   `recorder.start({ outputDir })` names another directory.
+- `require` and `import()` load Node.js built-ins, packages and local modules;
+  relative paths resolve in `artifacts`, the executor's working directory.
+- `pinnedElements({ page })` lists the elements the owner pinned in an agent
+  tab with right-click, "Pin this element for the NDS agent": each is
+  `globalThis.ndsPinnedElemN` in the page and `[data-nds-pin="N"]` for a
+  locator. Tabs outside the agent groups cannot be pinned.
 
 A result also carries `[PAGE ERROR]` lines for uncaught errors and
 `[WARNING] New page opened` lines for new tabs of the pages an agent keeps in

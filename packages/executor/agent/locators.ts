@@ -1,6 +1,6 @@
 // A stable Playwright locator string for an element, for scripts that outlive one snapshot: a
 // test id, else its role and accessible name, else its id, else its tag path.
-import type { Locator } from "playwright-core";
+import type { Locator, Page } from "playwright-core";
 
 export async function getLocatorStringForElement(locator: Locator): Promise<string> {
   const element = locator.first();
@@ -43,4 +43,24 @@ export async function getLocatorStringForElement(locator: Locator): Promise<stri
     }
     return `locator(${JSON.stringify(path.join(" > "))})`;
   });
+}
+
+/**
+ * The elements the owner pinned in a tab with right-click, "Pin this element for the NDS agent":
+ * each is `globalThis.ndsPinnedElemN` in the page and `[data-nds-pin="N"]` for a locator.
+ */
+export async function pinnedElements({ page }: { page: Page }): Promise<string> {
+  const count = await page.evaluate(
+    () => (globalThis as { __ndsPins?: unknown[] }).__ndsPins?.length ?? 0,
+  );
+  if (!count) return "No pinned elements";
+  const lines: string[] = [];
+  for (let number = 1; number <= count; number++) {
+    const pin = `[data-nds-pin="${number}"]`;
+    const stable = await getLocatorStringForElement(page.locator(pin)).catch(() => "");
+    lines.push(
+      `ndsPinnedElem${number}: locator(${JSON.stringify(pin)})${stable ? ` = ${stable}` : ""}`,
+    );
+  }
+  return lines.join("\n");
 }

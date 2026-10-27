@@ -1,6 +1,8 @@
 // Per-session Playwright executor for ADR 0015. The Rust host spawns it with a
 // session-scoped CDP endpoint on its private socket and talks JSON lines over
 // stdio. The vm context only keeps per-session state; it is not a sandbox.
+import { createRequire } from "node:module";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { inspect } from "node:util";
 import vm from "node:vm";
@@ -18,7 +20,7 @@ import {
 } from "./agent/devtools";
 import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
-import { getLocatorStringForElement } from "./agent/locators";
+import { getLocatorStringForElement, pinnedElements } from "./agent/locators";
 import { getLatestLogs, notified, attach as watchLogs } from "./agent/logs";
 import { recorderFor } from "./agent/recorder";
 import { createDemoVideo, executing, ghostCursor, recording } from "./agent/recording";
@@ -84,6 +86,8 @@ const sandbox = vm.createContext({
   getCleanHTML,
   getPageMarkdown,
   getLocatorStringForElement,
+  pinnedElements,
+  require: createRequire(join(artifacts, "agent.js")),
   screenshotWithAccessibilityLabels: (options: { page: Page }) =>
     screenshotWithAccessibilityLabels(options, artifacts),
   resizeImageForAgent,
@@ -114,11 +118,18 @@ const sandbox = vm.createContext({
 });
 
 // A single expression returns its value; statements need an explicit return.
+// `import()` in agent code loads modules as the executor does; relative paths resolve in the
+// session's artifacts, the executor's working directory.
+const modules = {
+  filename: join(artifacts, "agent.js"),
+  importModuleDynamically: vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER,
+};
+
 function compile(code: string): vm.Script {
   try {
-    return new vm.Script(`(async () => (\n${code.trim().replace(/;+$/, "")}\n))()`);
+    return new vm.Script(`(async () => (\n${code.trim().replace(/;+$/, "")}\n))()`, modules);
   } catch {
-    return new vm.Script(`(async () => {\n${code}\n})()`);
+    return new vm.Script(`(async () => {\n${code}\n})()`, modules);
   }
 }
 

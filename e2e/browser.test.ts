@@ -648,6 +648,35 @@ test("the recorder turns a person's actions in an agent tab into events and fram
   }
 });
 
+// Agent code loads modules, and reads the elements the owner pinned with right-click. The menu
+// itself is browser chrome, so the pin is applied the way the extension applies it.
+test("agent code loads modules and lists the elements the owner pinned", async () => {
+  await opened("pins");
+  try {
+    writeFileSync(join(runtime, "sessions", "pins", "helper.mjs"), "export const answer = 42;\n");
+    const page = await run(
+      "pins",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/helpers?pins"); return require("node:path").basename("/a/b.txt")`,
+    );
+    expect(page.body.output).toBe("b.txt");
+    expect((await run("pins", `(await import("./helper.mjs")).answer`)).body.output).toBe("42");
+    await (await observed("/helpers?pins"))?.click("#save", { button: "right" });
+    const result = await run(
+      "pins",
+      `const remembered = await state.page.evaluate(() => globalThis.__ndsContextTarget?.id);
+       await state.page.evaluate(() => { const target = globalThis.__ndsContextTarget; globalThis.__ndsPins = [target]; globalThis.ndsPinnedElem1 = target; target.setAttribute("data-nds-pin", "1"); });
+       return JSON.stringify({ remembered, pinned: await pinnedElements({ page: state.page }) })`,
+    );
+    const seen = JSON.parse(String(result.body.output)) as { remembered: string; pinned: string };
+    expect(seen.remembered).toBe("save");
+    expect(seen.pinned).toBe(
+      'ndsPinnedElem1: locator("[data-nds-pin=\\"1\\"]") = getByRole("button", { name: "Save", exact: true })',
+    );
+  } finally {
+    await cli("session", "close", "pins", "--close-tabs");
+  }
+});
+
 // Chrome serves WebAuthn only to a focused page: a background agent tab is
 // refused, and the agent must bring its tab to the front for a passkey step.
 test("raw CDP sessions reach agent tabs, including a virtual authenticator", async () => {
