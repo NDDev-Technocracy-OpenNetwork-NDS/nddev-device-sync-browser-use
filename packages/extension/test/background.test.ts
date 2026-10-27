@@ -360,6 +360,9 @@ test("another extension's frame is detached and never reaches the host", async (
   const events = browser.posted.slice(before).filter((posted) => posted.type === "event");
   expect(events.map((posted) => posted.method)).toEqual(["Target.attachedToTarget"]);
   expect(events[0]?.params).toMatchObject({ sessionId: "frame" });
+  expect(browser.posted.slice(before).filter((posted) => posted.type === "telemetry")).toEqual([
+    { type: "telemetry", event: "browser.target.restricted", outcome: "ok" },
+  ]);
 });
 
 test("a tab Chrome detaches on its own is attached again with its setup", async () => {
@@ -378,6 +381,10 @@ test("a tab Chrome detaches on its own is attached again with its setup", async 
   await until(() => browser.sessions.has(1) && browser.commands.includes("Runtime.evaluate 1"));
   const posted = browser.posted.slice(before);
   expect(posted.some((message) => message.type === "detached")).toBe(false);
+  await until(() => browser.posted.slice(before).find((message) => message.type === "telemetry"));
+  expect(browser.posted.slice(before).filter((message) => message.type === "telemetry")).toEqual([
+    { type: "telemetry", event: "browser.target.reattached", outcome: "ok" },
+  ]);
   expect(posted.filter((message) => message.type === "event").map((event) => event.method)).toEqual(
     ["Runtime.executionContextsCleared", "Target.detachedFromTarget"],
   );
@@ -404,6 +411,12 @@ test("a tab Chrome keeps detaching is given up after a few reattaches", async ()
   expect(
     await until(() => browser.posted.find((posted) => posted.type === "detached")),
   ).toMatchObject({ tab: 1, reason: "target_closed" });
+  expect(browser.posted.filter((posted) => posted.type === "telemetry").at(-1)).toEqual({
+    type: "telemetry",
+    event: "browser.target.reattached",
+    outcome: "rejected",
+    error: "reattach_limit",
+  });
   expect(await send({ type: "cdp", tab: 1, method: "Runtime.evaluate" })()).toMatchObject({
     error: { code: "target_closed" },
   });

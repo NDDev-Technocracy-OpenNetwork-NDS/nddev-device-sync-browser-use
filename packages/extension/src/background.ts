@@ -105,10 +105,10 @@ async function command(
     return await Promise.race([
       sent,
       new Promise((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`${method} got no answer; the tab may be frozen`)),
-          SETUP_TIMEOUT_MS,
-        );
+        timer = setTimeout(() => {
+          report("browser.cdp.setup_timeout", "timeout");
+          reject(new Error(`${method} got no answer; the tab may be frozen`));
+        }, SETUP_TIMEOUT_MS);
       }),
     ]);
   } finally {
@@ -134,6 +134,24 @@ async function badge(): Promise<void> {
 
 function send(message: object): void {
   port?.postMessage(message);
+}
+
+type Reported =
+  | "browser.target.reattached"
+  | "browser.target.restricted"
+  | "browser.target.foreign_frames_removed"
+  | "browser.cdp.setup_timeout";
+type ReportedError = "attach_failed" | "target_changed" | "reattach_limit" | "timeout";
+
+// One event about this worker's own Chrome work for the host's telemetry: a fixed name, an
+// outcome and a fixed error type, never anything of a page.
+function report(event: Reported, error?: ReportedError): void {
+  const outcome = error === undefined ? "ok" : error === "timeout" ? "error" : "rejected";
+  send(
+    error === undefined
+      ? { type: "telemetry", event, outcome }
+      : { type: "telemetry", event, outcome, error },
+  );
 }
 
 function connect(): void {
@@ -482,14 +500,17 @@ async function removeForeignFrames(
       chrome.scripting.executeScript({
         target: { tabId: tab, allFrames: true },
         func: (own: string) => {
+          let removed = 0;
           const remove = (root: Document | ShadowRoot): void => {
             for (const frame of root.querySelectorAll("iframe")) {
               const source = frame.src || frame.getAttribute("src") || "";
               if (
                 source.startsWith("chrome-extension://") &&
                 !source.startsWith(`chrome-extension://${own}/`)
-              )
+              ) {
                 frame.remove();
+                removed++;
+              }
             }
             for (const element of root.querySelectorAll("*")) {
               const shadow =
@@ -498,10 +519,15 @@ async function removeForeignFrames(
             }
           };
           remove(document);
+          return removed;
         },
         args: [chrome.runtime.id],
       }),
     )
+    .then((results) => {
+      const removed = results.reduce((sum, frame) => sum + (Number(frame.result) || 0), 0);
+      if (removed > 0) report("browser.target.foreign_frames_removed");
+    })
     .catch(() => undefined);
 }
 
@@ -722,6 +748,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       // session. It is detached on the session that reported it, which also lets it run on.
       const child = String(fields.sessionId);
       ignored.add(child);
+      report("browser.target.restricted");
       void chrome.debugger
         .sendCommand(source, "Target.detachFromTarget", { sessionId: child })
         .catch(() => undefined);
@@ -739,16 +766,13 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (tab === undefined || !attachment) return;
   // Chrome detached a live agent tab on its own, most often because another extension's frame
   // navigated in it. The tab is attached again and restored, a few times in a row at most.
-  if (
-    reason === "target_closed" &&
-    usable(tab) &&
-    !reattaching.has(tab) &&
-    restore.mayReattach(tab, Date.now())
-  ) {
+  const live = reason === "target_closed" && usable(tab) && !reattaching.has(tab);
+  if (live && restore.mayReattach(tab, Date.now())) {
     const attempt = admitted(attachment.life, reattach(tab, attachment))
-      .then((restored) => {
-        if (!restored) lose(tab, attachment, reason);
-        return restored;
+      .then((failure) => {
+        report("browser.target.reattached", failure);
+        if (failure) lose(tab, attachment, reason);
+        return failure === undefined;
       })
       .finally(() => {
         if (reattaching.get(tab) === attempt) reattaching.delete(tab);
@@ -756,6 +780,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     reattaching.set(tab, attempt);
     return;
   }
+  if (live) report("browser.target.reattached", "reattach_limit");
   lose(tab, attachment, reason);
 });
 
@@ -768,7 +793,10 @@ function lose(tab: number, attachment: Attachment, reason: string): void {
 // session's contexts and child sessions are reported gone, frames that vanished meanwhile are
 // detached, and Playwright's setup is replayed. A tab whose target changed, or that left its
 // agent group meanwhile, is not restored.
-async function reattach(tab: number, attachment: Attachment): Promise<boolean> {
+async function reattach(
+  tab: number,
+  attachment: Attachment,
+): Promise<"attach_failed" | "target_changed" | undefined> {
   send({ type: "event", tab, method: "Runtime.executionContextsCleared", params: {} });
   for (const child of restore.takeChildren(tab))
     send({ type: "event", tab, method: "Target.detachedFromTarget", params: { sessionId: child } });
@@ -776,14 +804,18 @@ async function reattach(tab: number, attachment: Attachment): Promise<boolean> {
     await removeForeignFrames(tab, attachment.life, attachment);
     await chrome.debugger.attach({ tabId: tab }, PROTOCOL);
   } catch {
-    return false;
+    return "attach_failed";
   }
+  let failure: "attach_failed" | "target_changed" = "attach_failed";
   try {
     if (attached.get(tab) !== attachment || !usable(tab)) throw new Refusal("target_closed");
     const info = (await command({ tabId: tab }, "Target.getTargetInfo")) as {
       targetInfo: { targetId?: string };
     };
-    if (info.targetInfo.targetId !== attachment.target) throw new Refusal("target_closed");
+    if (info.targetInfo.targetId !== attachment.target) {
+      failure = "target_changed";
+      throw new Refusal("target_closed");
+    }
     const { frameTree } = (await command({ tabId: tab }, "Page.getFrameTree")) as {
       frameTree: FrameTree;
     };
@@ -796,10 +828,10 @@ async function reattach(tab: number, attachment: Attachment): Promise<boolean> {
       });
     await restore.replay(tab, (method, params) => command({ tabId: tab }, method, params));
     await remember(tab);
-    return true;
+    return undefined;
   } catch {
     await chrome.debugger.detach({ tabId: tab }).catch(() => undefined);
-    return false;
+    return failure;
   }
 }
 
