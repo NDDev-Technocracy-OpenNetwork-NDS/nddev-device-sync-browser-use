@@ -14,7 +14,7 @@ use crate::{
         self, Document, FRAME_LIMIT, Header, MAX_SESSIONS, MAX_TABS, PAYLOAD_LIMIT, Refusal, Reply,
         Request,
     },
-    runtime, view,
+    runtime, socket, view,
 };
 use serde_json::{Value, json};
 use std::{
@@ -28,7 +28,6 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
     sync::{Semaphore, mpsc, oneshot},
 };
 
@@ -115,6 +114,15 @@ struct Tab {
     document: Option<String>,
 }
 
+/// Ends a session: its executor exits before its artifact area is removed, because Windows keeps
+/// the working directory of a live process.
+async fn discard(session: Session) {
+    if let Some(executor) = session.executor {
+        executor.stop().await;
+    }
+    let _ = std::fs::remove_dir_all(&session.artifacts);
+}
+
 /// Whether Chrome started this host for one of the pinned NDS extension builds.
 pub fn admitted(origin: &str) -> bool {
     EXTENSION_IDS
@@ -184,8 +192,8 @@ pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
     Ok(())
 }
 
-fn bind(path: &Path) -> Result<UnixListener, HostError> {
-    if std::os::unix::net::UnixStream::connect(path).is_ok() {
+fn bind(path: &Path) -> Result<socket::Listener, HostError> {
+    if socket::answers(path) {
         return Err(HostError::Busy);
     }
     match std::fs::remove_file(path) {
@@ -193,7 +201,7 @@ fn bind(path: &Path) -> Result<UnixListener, HostError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(IoError::Unavailable.into()),
     }
-    let listener = UnixListener::bind(path).map_err(|_| IoError::Unavailable)?;
+    let listener = socket::bind(path).map_err(|_| IoError::Unavailable)?;
     runtime::owner_only(path)?;
     Ok(listener)
 }
@@ -355,6 +363,16 @@ impl Host {
                 self.update();
             }
             Some("control") => self.on_control(message["enabled"].as_bool() == Some(true)),
+            // The extension gave up adopting a new agent tab after its retries.
+            Some("adoption") => {
+                let class = match message["failure"].as_str() {
+                    Some("tab") => "tab_missing",
+                    Some("group") => "group_failed",
+                    Some("attach") => "attach_failed",
+                    _ => "invalid_frame",
+                };
+                tracing::warn!(event.name = "browser.target.attached", outcome = "error", error.type = class);
+            }
             _ => {
                 tracing::warn!(event.name = "browser.extension.message", outcome = "rejected", error.type = "invalid_frame")
             }
@@ -571,7 +589,7 @@ impl Host {
             state.tabs.clear();
             state.children.clear();
             for (_, session) in state.sessions.drain() {
-                let _ = std::fs::remove_dir_all(&session.artifacts);
+                tokio::spawn(discard(session));
             }
         }
         let name = if enabled {
@@ -593,9 +611,9 @@ impl Host {
         let _ = std::fs::remove_dir_all(self.config.runtime.join("sessions"));
     }
 
-    async fn serve_control(self: Arc<Self>, listener: UnixListener) {
+    async fn serve_control(self: Arc<Self>, listener: socket::Listener) {
         let permits = Arc::new(Semaphore::new(CONTROL_CONNECTIONS));
-        while let Ok((stream, _)) = listener.accept().await {
+        while let Ok(stream) = socket::accept(&listener).await {
             let Ok(permit) = permits.clone().try_acquire_owned() else {
                 tracing::warn!(
                     event.name = "browser.control.rejected",
@@ -613,8 +631,8 @@ impl Host {
         }
     }
 
-    async fn control(&self, stream: UnixStream) {
-        let (read, mut write) = stream.into_split();
+    async fn control(&self, stream: socket::Stream) {
+        let (read, mut write) = tokio::io::split(stream);
         let mut reader = BufReader::new(read);
         let mut line = Vec::new();
         let request = match tokio::time::timeout(
@@ -643,7 +661,16 @@ impl Host {
                 let mut probe = [0u8; 1];
                 tokio::select! {
                     reply = self.execute(&project, &code, timeout_ms, expect) => reply,
-                    _ = reader.read(&mut probe) => return,
+                    read = reader.read(&mut probe) => {
+                        // The run is abandoned without a reply; the class shows which side ended it.
+                        let class = match read {
+                            Ok(0) => "client_closed",
+                            Ok(_) => "client_data",
+                            Err(_) => "client_error",
+                        };
+                        tracing::info!(event.name = "browser.execute.cancelled", outcome = "stopped", error.type = class);
+                        return;
+                    }
                 }
             }
             Some(request) => self.handle(request).await,
@@ -675,7 +702,12 @@ impl Host {
         };
         if let Some(class) = failure {
             tracing::warn!(event.name = "browser.control.reply", outcome = "error", error.type = class);
+            return;
         }
+        // The client closes once it has read the reply. Closing first would race it: on macOS
+        // the agent client cannot read buffered reply bytes after its peer has closed.
+        let mut rest = [0u8; 1];
+        let _ = tokio::time::timeout(CONTROL_IO, reader.read(&mut rest)).await;
     }
 
     async fn handle(&self, request: Request) -> Reply {
@@ -701,11 +733,11 @@ impl Host {
             }
             Request::Open { project } => self.open(&project).await.map(Reply::Session),
             Request::Sessions => {
-                let state = self.state();
-                let sessions = state
-                    .sessions
-                    .keys()
-                    .map(|project| view_session(&state, project))
+                let mut state = self.state();
+                let projects: Vec<String> = state.sessions.keys().cloned().collect();
+                let sessions = projects
+                    .iter()
+                    .map(|project| view_session(&mut state, project))
                     .collect();
                 Ok(Reply::Sessions { sessions })
             }
@@ -740,7 +772,7 @@ impl Host {
             let mut state = self.state();
             Self::ready(&state)?;
             if state.sessions.contains_key(project) {
-                return Ok(view_session(&state, project));
+                return Ok(view_session(&mut state, project));
             }
             if state.sessions.len() >= MAX_SESSIONS {
                 tracing::warn!(event.name = "browser.session.opened", outcome = "rejected", error.type = Refusal::Capacity.code());
@@ -763,18 +795,34 @@ impl Host {
             .await
         {
             Ok(claimed) => {
-                let mut state = self.state();
-                for entry in claimed["tabs"].as_array().into_iter().flatten() {
-                    if let Some(tab) = entry["tab"].as_i64() {
-                        self.register(&mut state, project, tab, entry["target"].clone());
+                let session = {
+                    let mut state = self.state();
+                    for entry in claimed["tabs"].as_array().into_iter().flatten() {
+                        if let Some(tab) = entry["tab"].as_i64() {
+                            self.register(&mut state, project, tab, entry["target"].clone());
+                        }
+                    }
+                    let session = state.sessions.get(project);
+                    session.map(|session| (session.token.clone(), session.artifacts.clone()))
+                };
+                // The executor starts with its session and gets ready while the agent prepares
+                // its first execution; a failed start is retried by that execution.
+                if let Some((token, artifacts)) = session {
+                    let endpoint =
+                        runtime::socket_url(&self.cdp_socket, &format!("/session/{token}"));
+                    if let Ok(executor) =
+                        executor::Executor::start(&self.config, &endpoint, &artifacts)
+                    {
+                        self.keep(project, &token, executor);
                     }
                 }
                 tracing::info!(event.name = "browser.session.opened", outcome = "ok");
-                Ok(view_session(&state, project))
+                Ok(view_session(&mut self.state(), project))
             }
             Err(refusal) => {
-                if let Some(session) = self.state().sessions.remove(project) {
-                    let _ = std::fs::remove_dir_all(session.artifacts);
+                let removed = self.state().sessions.remove(project);
+                if let Some(session) = removed {
+                    discard(session).await;
                 }
                 tracing::warn!(event.name = "browser.session.opened", outcome = "rejected", error.type = refusal.code());
                 Err(refusal)
@@ -801,8 +849,7 @@ impl Host {
             }
             session
         };
-        let _ = std::fs::remove_dir_all(&session.artifacts);
-        drop(session);
+        discard(session).await;
         let released = self
             .refusable(json!({ "type": "release", "group": project, "close": close_tabs }))
             .await;
@@ -886,10 +933,17 @@ impl Host {
         let mut executor = match current {
             Some(executor) => executor,
             None => {
-                let endpoint = format!("ws+unix://{}:/session/{token}", self.cdp_socket.display());
-                executor::Executor::spawn(&self.config, &endpoint, &artifacts, deadline).await?
+                let endpoint = runtime::socket_url(&self.cdp_socket, &format!("/session/{token}"));
+                executor::Executor::start(&self.config, &endpoint, &artifacts)?
             }
         };
+        // No code has run yet, so a start that outlasts this deadline is kept for the next one.
+        if let Err(refusal) = executor.ready(deadline).await {
+            if refusal == Refusal::Timeout {
+                self.keep(project, &token, executor);
+            }
+            return Err(refusal);
+        }
         // A timeout drops the executor here, which kills it: no action continues.
         let (failure, output, truncated) = match executor.run(code, deadline).await {
             Ok(completed) => completed,
@@ -900,20 +954,25 @@ impl Host {
             Err(refusal) => return Err(refusal),
         };
         let tabs = self.tabs(project).await;
-        if let Some(session) = self
-            .state()
-            .sessions
-            .get_mut(project)
-            .filter(|session| session.token == token)
-        {
-            session.executor = Some(executor);
-        }
+        self.keep(project, &token, executor);
         Ok(view::Outcome {
             failure,
             output,
             truncated,
             tabs,
         })
+    }
+
+    /// Returns an executor to its session, unless that session has ended or holds another one.
+    fn keep(&self, project: &str, token: &str, executor: executor::Executor) {
+        if let Some(session) = self
+            .state()
+            .sessions
+            .get_mut(project)
+            .filter(|session| session.token == token && session.executor.is_none())
+        {
+            session.executor = Some(executor);
+        }
     }
 
     /// Current agent tabs; Chrome's live answer also refreshes each document.
@@ -978,7 +1037,7 @@ impl Drop for Running<'_> {
     }
 }
 
-fn view_session(state: &State, project: &str) -> view::Session {
+fn view_session(state: &mut State, project: &str) -> view::Session {
     view::Session {
         project: project.to_owned(),
         tabs: state
@@ -988,8 +1047,9 @@ fn view_session(state: &State, project: &str) -> view::Session {
             .count(),
         executor: state
             .sessions
-            .get(project)
-            .is_some_and(|session| session.executor.is_some()),
+            .get_mut(project)
+            .and_then(|session| session.executor.as_mut())
+            .is_some_and(executor::Executor::is_ready),
     }
 }
 

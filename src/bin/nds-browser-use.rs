@@ -1,13 +1,13 @@
 //! `nds-browser-use`: the agent CLI and, when Chrome starts it, the native host.
-#![cfg_attr(not(unix), allow(unused))]
+#![cfg_attr(not(any(unix, windows)), allow(unused))]
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use nddev_device_sync_browser_use::{
     BrowserUse, BrowserUseClient, CancellationToken, Error, NativeIo, host, install,
     protocol::Document,
 };
 use std::process::ExitCode;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::{path::PathBuf, time::Duration};
 
 const USAGE: &str = "usage:
@@ -21,13 +21,13 @@ const USAGE: &str = "usage:
 const ARGUMENT_LIMIT: usize = 16;
 const CODE_LIMIT: usize = 60_000;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn main() -> ExitCode {
     eprintln!("nds-browser-use is not supported on this platform");
     ExitCode::from(2)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::main]
 async fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -67,7 +67,7 @@ async fn main() -> ExitCode {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn host_error(error: &host::HostError) -> &'static str {
     match error {
         host::HostError::Origin => "origin_rejected",
@@ -76,7 +76,7 @@ fn host_error(error: &host::HostError) -> &'static str {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn client(words: &[&str]) -> ExitCode {
     let client = match BrowserUseClient::for_current_user(
         NativeIo::new(1).expect("one slot is valid").local_handle(),
@@ -143,14 +143,14 @@ async fn client(words: &[&str]) -> ExitCode {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct Execution {
     code: String,
     timeout: Duration,
     expect: Option<Document>,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl Execution {
     fn parse(mut words: &[&str]) -> Option<Self> {
         let (mut code, mut timeout, mut expect) = (None, Duration::from_secs(10), None);
@@ -179,7 +179,7 @@ impl Execution {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn read_code(path: &str) -> Option<String> {
     let metadata = std::fs::metadata(path).ok()?;
     (metadata.len() <= CODE_LIMIT as u64)
@@ -187,17 +187,26 @@ fn read_code(path: &str) -> Option<String> {
         .flatten()
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn install_host(words: &[&str]) -> ExitCode {
     let (mut bun, mut executor, mut directory) = (None, None, None);
+    #[cfg(windows)]
+    let mut browser = None;
     let mut rest = words;
     while let [flag, value, tail @ ..] = rest {
         match *flag {
             "--bun" => bun = Some(PathBuf::from(value)),
             "--executor" => executor = Some(PathBuf::from(value)),
-            "--host-dir" => directory = Some(Ok(PathBuf::from(value))),
+            // Windows browsers find hosts only through the registry key of a named browser.
+            "--host-dir" if cfg!(unix) => directory = Some(Ok(PathBuf::from(value))),
             "--browser" => match install::Browser::parse(value) {
-                Some(browser) => directory = Some(install::host_directory(browser)),
+                Some(chosen) => {
+                    #[cfg(windows)]
+                    {
+                        browser = Some(chosen);
+                    }
+                    directory = Some(install::host_directory(chosen));
+                }
                 None => return usage(),
             },
             _ => return usage(),
@@ -210,7 +219,13 @@ fn install_host(words: &[&str]) -> ExitCode {
     let installed = directory.and_then(|directory| {
         let host = std::env::current_exe()
             .map_err(|_| nddev_device_sync_browser_use::IoError::Unavailable)?;
-        install::install(&host, &directory, &bun, &executor)
+        let installation = install::install(&host, &directory, &bun, &executor)?;
+        #[cfg(windows)]
+        install::register(
+            browser.ok_or(nddev_device_sync_browser_use::IoError::InvalidConfiguration)?,
+            &installation.manifest,
+        )?;
+        Ok(installation)
     });
     match installed {
         Ok(installation) => {
@@ -225,14 +240,14 @@ fn install_host(words: &[&str]) -> ExitCode {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn print<T: serde::Serialize>(value: &T) {
     if let Ok(text) = serde_json::to_string(value) {
         println!("{text}");
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn failed(error: &Error) -> ExitCode {
     let code = match error {
         Error::Io(error) => error.code(),
@@ -250,13 +265,13 @@ fn usage() -> ExitCode {
 }
 
 /// Schema-validated local events. Export follows agent composition (ADR 0015).
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct Telemetry {
     logger: Option<nddev_device_sync_telemetry::Logger>,
     provider: opentelemetry_sdk::trace::SdkTracerProvider,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl Telemetry {
     fn install(host_mode: bool) -> Self {
         use opentelemetry::trace::TracerProvider;
@@ -286,7 +301,7 @@ impl Telemetry {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl Drop for Telemetry {
     fn drop(&mut self) {
         if let Some(logger) = self.logger.as_mut() {

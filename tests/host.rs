@@ -1,9 +1,10 @@
 //! The native host as Chrome starts it: caller identity and the lifetime of its sockets.
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     io::Read,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant},
@@ -18,11 +19,15 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Socket paths must fit `sun_path`, so the fixture lives under a short base directory.
+    /// Socket paths must fit `sun_path`, so the fixture lives under a short base directory. On
+    /// Windows that is the temporary directory inside the user's local application data.
     fn new() -> Self {
+        #[cfg(unix)]
         let base = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/tmp"));
+        #[cfg(windows)]
+        let base = std::env::temp_dir();
         Self {
             root: tempfile::Builder::new()
                 .prefix("nds-bu-host-")
@@ -40,6 +45,7 @@ impl Fixture {
         command
             .args(arguments)
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
+            .env("LOCALAPPDATA", self.root.path())
             .env("NDS_BROWSER_USE_RUNTIME_DIR", self.runtime())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -48,6 +54,7 @@ impl Fixture {
     }
 
     /// Registers the host the way `just install` does, without a browser.
+    #[cfg(unix)]
     fn install(&self) {
         let executor = self.root.path().join("executor.ts");
         std::fs::write(&executor, b"").unwrap();
@@ -66,6 +73,23 @@ impl Fixture {
             .unwrap();
         assert!(output.status.success());
     }
+
+    /// Writes the host configuration that installing leaves behind, without the registry value
+    /// that would redirect the user's browsers to this fixture.
+    #[cfg(windows)]
+    fn install(&self) {
+        let executor = self.root.path().join("executor.ts");
+        std::fs::write(&executor, b"").unwrap();
+        let config = self.root.path().join("nds-browser-use");
+        std::fs::create_dir_all(&config).unwrap();
+        let host = serde_json::json!({ "bun": HOST, "executor": executor });
+        std::fs::write(config.join("host.json"), host.to_string()).unwrap();
+    }
+}
+
+/// Whether a path exists without following it; Windows socket files are reparse points.
+fn present(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
 }
 
 fn wait(child: &mut Child, limit: Duration) -> ExitStatus {
@@ -92,7 +116,7 @@ fn stderr(child: &mut Child) -> String {
 
 fn appears(path: &Path) {
     let started = Instant::now();
-    while !path.exists() {
+    while !present(path) {
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "{path:?} did not appear"
@@ -128,6 +152,7 @@ fn an_admitted_host_serves_owner_only_sockets_until_its_port_closes() {
     // A host that died without its shutdown left a session area behind.
     let leftover = runtime.join("sessions").join("acceptance");
     std::fs::create_dir_all(&leftover).unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(leftover.join("form.png"), b"earlier screenshot").unwrap();
     let mut host = fixture.command(&[UNPACKED]).spawn().unwrap();
@@ -143,9 +168,12 @@ fn an_admitted_host_serves_owner_only_sockets_until_its_port_closes() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&runtime), 0o700);
-    assert_eq!((mode(&control), mode(&cdp)), (0o600, 0o600));
+    #[cfg(unix)]
+    {
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&runtime), 0o700);
+        assert_eq!((mode(&control), mode(&cdp)), (0o600, 0o600));
+    }
 
     // Without the extension's hello the host answers but grants nothing.
     let status = fixture.command(&["status"]).output().unwrap();
@@ -164,5 +192,41 @@ fn an_admitted_host_serves_owner_only_sockets_until_its_port_closes() {
     let status = wait(&mut host, Duration::from_secs(5));
     assert!(status.success());
     assert!(stderr(&mut host).contains(r#""error.type":"extension_closed""#));
-    assert!(!control.exists() && !cdp.exists());
+    assert!(!present(&control) && !present(&cdp));
+}
+
+/// Many short control exchanges in a row. The host must not end a connection in a way that
+/// makes the agent client fail to read a reply it already sent.
+#[test]
+fn repeated_control_exchanges_all_reach_their_client() {
+    use nddev_device_sync_browser_use::{
+        BrowserUse, BrowserUseClient, CancellationToken, NativeIo,
+    };
+    let fixture = Fixture::new();
+    fixture.install();
+    let mut host = fixture.command(&[UNPACKED]).spawn().unwrap();
+    let control = fixture.runtime().join("control.sock");
+    appears(&control);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let client = BrowserUseClient::new(NativeIo::new(1).unwrap().local_handle(), control).unwrap();
+    let failures = runtime.block_on(async {
+        let mut failures = Vec::new();
+        for _ in 0..500 {
+            if let Err(error) = client.status(CancellationToken::new()).await {
+                failures.push(error.to_string());
+            }
+        }
+        failures
+    });
+    drop(host.stdin.take());
+    wait(&mut host, Duration::from_secs(5));
+    assert!(
+        failures.is_empty(),
+        "{} of 500 exchanges failed: {:?}",
+        failures.len(),
+        failures.first()
+    );
 }

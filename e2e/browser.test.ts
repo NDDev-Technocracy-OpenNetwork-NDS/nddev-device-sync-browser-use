@@ -7,6 +7,7 @@ import {
   chmodSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -14,19 +15,32 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { type BrowserContext, chromium, type Page } from "playwright-core";
 
+const windows = process.platform === "win32";
 const repository = resolve(import.meta.dir, "..");
 const chrome = required("NDS_TEST_CHROME");
 const binary = required("NDS_TEST_HOST");
 const root = mkdtempSync(join(tmpdir(), "nds-browser-use-acceptance-"));
-// Socket paths must fit sun_path; the run's own directory keeps it isolated.
-const runtime = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "nds-bu-"));
+// Socket paths must fit sun_path; the run's own directory keeps it isolated. On Windows the
+// temporary directory lies in the user's local application data, as the host requires.
+const runtime = mkdtempSync(
+  join(windows ? tmpdir() : (process.env.XDG_RUNTIME_DIR ?? "/tmp"), "nds-bu-"),
+);
+// Executors name the CDP socket in their endpoint; on Windows the host hands them the
+// drive-less path.
+const cdpEndpoint = windows
+  ? join(runtime, "cdp.sock")
+      .replace(/^[A-Za-z]:/, "")
+      .replaceAll("\\", "/")
+  : `${runtime}/cdp.sock`;
+
 const profile = join(root, "profile");
 // The same layout `just install` creates: the host finds its extension files
 // next to `bin/`, so an update can reload the unpacked build.
 const prefix = join(root, "prefix");
+const hostBinary = join(prefix, "bin", windows ? "nds-browser-use.exe" : "nds-browser-use");
 const installed = join(prefix, "extension");
 const hostLog = join(root, "host.log");
 const extensionId = "lcdkocghcaakekcaeopjanfbohpfacbk";
@@ -43,8 +57,18 @@ let requests = 0;
 
 function required(name: string): string {
   const value = process.env[name];
-  if (!value?.startsWith("/")) throw new Error(`${name} must be an absolute path`);
+  if (!value || !isAbsolute(value)) throw new Error(`${name} must be an absolute path`);
   return value;
+}
+
+// Windows socket files are reparse points that `stat` cannot follow.
+function present(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 type Result = { code: number; body: Record<string, unknown> };
@@ -60,6 +84,26 @@ async function cli(...args: string[]): Promise<Result> {
   return result;
 }
 
+// A session's executor starts with it; like an agent that waits, scenarios run once the session
+// reports its executor ready, so a slow start never spends a run's deadline.
+async function opened(project: string): Promise<Result> {
+  const result = await cli("session", "new", project);
+  const ready = Date.now() + 45_000;
+  for (;;) {
+    const listed: unknown = (await cli("session", "list")).body;
+    const sessions = Array.isArray(listed) ? (listed as Record<string, unknown>[]) : [];
+    if (sessions.some((session) => session.project === project && session.executor === true)) {
+      return result;
+    }
+    if (result.code !== 0 || Date.now() > ready) {
+      throw new Error(
+        `the executor of ${project} did not report ready: ${JSON.stringify(result.body)}`,
+      );
+    }
+    await Bun.sleep(100);
+  }
+}
+
 async function run(project: string, code: string, ...flags: string[]): Promise<Result> {
   return cli("-s", project, "-e", code, ...flags);
 }
@@ -68,10 +112,23 @@ function tabs(result: Result): { target: string; document: string; url: string }
   return result.body.tabs as { target: string; document: string; url: string }[];
 }
 
-// Process IDs whose command line contains `pattern`; this run's paths make it unique.
+// Process IDs whose command line contains `pattern`; this run's paths make it unique. On
+// Windows the pattern reaches the query through its environment, so the query never matches
+// its own command line.
 function processes(pattern: string): number[] {
-  const found = Bun.spawnSync(["pgrep", "-f", pattern]);
-  return found.stdout.toString().trim().split("\n").filter(Boolean).map(Number);
+  const found = windows
+    ? Bun.spawnSync(
+        [
+          "powershell",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.Contains($env:NDS_E2E_PATTERN) } | ForEach-Object { $_.ProcessId }",
+        ],
+        { env: { ...process.env, NDS_E2E_PATTERN: pattern } },
+      )
+    : Bun.spawnSync(["pgrep", "-f", pattern]);
+  return found.stdout.toString().trim().split(/\r?\n/).filter(Boolean).map(Number);
 }
 
 async function observed(path: string): Promise<Page | undefined> {
@@ -121,29 +178,33 @@ beforeAll(async () => {
     },
   });
   origin = `http://127.0.0.1:${fixture.port}`;
-  // The host's stderr carries its local telemetry; keep it as evidence.
-  const wrapper = join(root, "host.sh");
+  // The host's stderr carries its local telemetry; keep it as evidence. Chrome starts a Windows
+  // host through cmd, so the wrapper there is a command script.
+  const wrapper = join(root, windows ? "host.cmd" : "host.sh");
   mkdirSync(join(prefix, "bin"), { recursive: true });
-  cpSync(binary, join(prefix, "bin", "nds-browser-use"));
-  chmodSync(join(prefix, "bin", "nds-browser-use"), 0o755);
+  cpSync(binary, hostBinary);
   cpSync(join(repository, "packages/extension"), installed, { recursive: true });
-  writeFileSync(
-    wrapper,
-    `#!/bin/sh\nexec '${join(prefix, "bin", "nds-browser-use")}' "$@" 2>>'${hostLog}'\n`,
-  );
-  chmodSync(wrapper, 0o700);
-  const hosts = join(profile, "NativeMessagingHosts");
+  if (windows) {
+    writeFileSync(wrapper, `@"${hostBinary}" %* 2>>"${hostLog}"\r\n`);
+  } else {
+    chmodSync(hostBinary, 0o755);
+    writeFileSync(wrapper, `#!/bin/sh\nexec '${hostBinary}' "$@" 2>>'${hostLog}'\n`);
+    chmodSync(wrapper, 0o700);
+  }
+  // Windows browsers find hosts through the registry value of the named browser; the others
+  // read the profile's own host directory.
   const registration = await cli(
     "install",
     "--bun",
     process.execPath,
     "--executor",
     join(repository, "packages/executor/executor.ts"),
-    "--host-dir",
-    hosts,
+    ...(windows
+      ? ["--browser", "chrome-for-testing"]
+      : ["--host-dir", join(profile, "NativeMessagingHosts")]),
   );
   expect(registration.code).toBe(0);
-  const manifest = join(hosts, "ai.nddev.nds.browser_use.json");
+  const manifest = String(registration.body.manifest);
   const registered = JSON.parse(readFileSync(manifest, "utf8"));
   expect(registered.allowed_origins).toEqual([
     `chrome-extension://${extensionId}/`,
@@ -165,14 +226,16 @@ beforeAll(async () => {
   for (const page of observer.pages()) page.on("dialog", () => undefined);
   observer.on("page", (page) => page.on("dialog", () => undefined));
   // The host binds its sockets before the extension's hello arrives; scenarios start once the
-  // host reports the connected extension, which takes longer on slower runners.
-  for (let attempt = 0; attempt < 200; attempt++) {
-    if (existsSync(join(runtime, "control.sock")) && (await cli("status")).body.enabled === true) {
-      break;
-    }
+  // host reports the connected extension, which takes longer on slower or loaded runners.
+  // The host's own answer decides: a presence check never saw the control socket on Windows.
+  // On a hosted macOS runner with every core loaded, Chrome took over 45 s to start the host.
+  const connected = Date.now() + 120_000;
+  while ((await cli("status")).body.enabled !== true) {
+    if (Date.now() > connected)
+      throw new Error("the extension did not connect to its host in 120 s");
     await Bun.sleep(100);
   }
-});
+}, 180_000);
 
 afterAll(async () => {
   await observer?.close().catch(() => undefined);
@@ -193,7 +256,7 @@ test("the connected extension reports enabled control", async () => {
 });
 
 test("agent code acts in its own tab and the browser shows the result", async () => {
-  expect((await cli("session", "new", "acceptance")).body).toMatchObject({ project: "acceptance" });
+  expect((await opened("acceptance")).body).toMatchObject({ project: "acceptance" });
   const before = requests;
   const result = await run(
     "acceptance",
@@ -266,7 +329,7 @@ test("keyboard input and file uploads reach the page", async () => {
   writeFileSync(upload, "nds");
   const result = await run(
     "acceptance",
-    `const page = await context.newPage(); await page.goto("${origin}/form"); await page.locator("#text").pressSequentially("typed"); await page.setInputFiles("#file", "${upload}"); return [await page.locator("#echo").textContent(), await page.locator("#picked").textContent()].join(" ")`,
+    `const page = await context.newPage(); await page.goto("${origin}/form"); await page.locator("#text").pressSequentially("typed"); await page.setInputFiles("#file", ${JSON.stringify(upload)}); return [await page.locator("#echo").textContent(), await page.locator("#picked").textContent()].join(" ")`,
     "--timeout",
     "20000",
   );
@@ -319,7 +382,8 @@ test("screenshots are written inside the session area", async () => {
     "--timeout",
     "20000",
   );
-  const path = String(result.body.output);
+  // Agent code joins with "/", which Windows accepts beside its own separator.
+  const path = resolve(String(result.body.output));
   expect(path).toBe(join(runtime, "sessions", "acceptance", "form.png"));
   expect([...readFileSync(path).subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
 });
@@ -370,10 +434,10 @@ test("a client that disconnects mid-run cancels it and frees the session", async
   client.kill("SIGKILL");
   await client.exited;
   // The host drops the run with its client, which kills the session's executor.
-  let executors = processes(`${runtime}/cdp.sock`);
+  let executors = processes(cdpEndpoint);
   for (let attempt = 0; attempt < 50 && executors.length > 0; attempt++) {
     await Bun.sleep(100);
-    executors = processes(`${runtime}/cdp.sock`);
+    executors = processes(cdpEndpoint);
   }
   expect(executors).toEqual([]);
   expect((await run("acceptance", "state.value === undefined")).body.output).toBe("true");
@@ -404,7 +468,7 @@ test("the owner's switch revokes sessions until control is enabled again", async
   expect((await run("acceptance", "1")).body.error).toBe("permission_required");
   expect((await cli("session", "new", "other")).body.error).toBe("permission_required");
   await ownerSwitch(true);
-  const reopened = await cli("session", "new", "acceptance");
+  const reopened = await opened("acceptance");
   expect(reopened.body).toMatchObject({ project: "acceptance" });
   expect(Number(reopened.body.tabs)).toBeGreaterThan(0);
   const result = await run("acceptance", "context.pages().map((page) => page.url()).sort()");
@@ -423,7 +487,8 @@ test("a lost host is replaced and the agent group is reclaimed without owner tab
   );
   expect(written.body.output).toBe("written");
   expect(existsSync(leftover)).toBe(true);
-  const hostCommand = `${join(prefix, "bin", "nds-browser-use")} chrome-extension://`;
+  // Only the host runs from the installed prefix; cmd starts a Windows host by its wrapper.
+  const hostCommand = windows ? hostBinary : `${hostBinary} chrome-extension://`;
   const [lost, ...others] = processes(hostCommand);
   expect(lost).toBeNumber();
   expect(others).toEqual([]);
@@ -440,9 +505,9 @@ test("a lost host is replaced and the agent group is reclaimed without owner tab
   expect(replacement).not.toBe(lost);
   expect(extra).toEqual([]);
   // No executor outlives its host, and the dead host's artifacts are gone.
-  expect(processes(`${runtime}/cdp.sock`)).toEqual([]);
+  expect(processes(cdpEndpoint)).toEqual([]);
   expect(existsSync(leftover)).toBe(false);
-  const reopened = await cli("session", "new", "acceptance");
+  const reopened = await opened("acceptance");
   expect(Number(reopened.body.tabs)).toBeGreaterThan(0);
   const reclaimed = await run(
     "acceptance",
@@ -488,8 +553,8 @@ test("browser exit leaves no host or sockets", async () => {
   await Bun.sleep(500);
   const status = await cli("status");
   expect(status).toEqual({ code: 2, body: expect.objectContaining({ error: "unavailable" }) });
-  expect(existsSync(join(runtime, "control.sock"))).toBe(false);
-  expect(existsSync(join(runtime, "cdp.sock"))).toBe(false);
+  expect(present(join(runtime, "control.sock"))).toBe(false);
+  expect(present(join(runtime, "cdp.sock"))).toBe(false);
 });
 
 test("host telemetry is schema-valid and carries no page data", () => {
@@ -504,6 +569,7 @@ test("host telemetry is schema-valid and carries no page data", () => {
     "browser.control.disabled",
     "browser.session.closed",
     "browser.extension.reload",
+    "browser.execute.cancelled",
     "browser.host.stopped",
   ]) {
     expect(names).toContain(name);

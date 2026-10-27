@@ -12,14 +12,14 @@ no TCP listener, debugging port, tunnel or vendor telemetry.
 
 Agent CLI: `nds-browser-use session new <project>`, then
 `nds-browser-use -s <project> -e '<playwright code>'`; `status`,
-`session list` and `session close` complete the surface. `install` registers
+`session list` and `session close` complete the surface. A session's executor
+starts with the session, and `session list` reports `executor: true` once it is
+ready; an execution that times out while the executor is still starting
+leaves the start running for the next one. `install` registers
 the host for one Chrome profile root; loading the unpacked extension stays the
-owner's action. Status: alpha work in progress. Linux is accepted in CI with a
-real browser. macOS passes its module and host tests in CI; its real-browser
-acceptance runs in `macos-acceptance` and is not yet stable, so the module does
-not claim macOS. Windows only builds and tests the platform-neutral code,
-because its host is not implemented. Not qualified and not a replacement for
-Playwriter in current NDS acceptance.
+owner's action. Status: alpha work in progress. Linux, macOS and Windows are
+each accepted in CI with a real browser; none has been qualified on an owner
+device. Not a replacement for Playwriter in current NDS acceptance.
 
 Agent code runs as an async function body with `context`, `browser`, a
 persistent `state` object, `artifacts` (the session's private directory for
@@ -52,5 +52,13 @@ reloads a connected unpacked extension from the new files; `just package`
 builds the Chrome Web Store zip.
 The host admits the pinned unpacked build and the published store item
 `lpnfnhkdjamhnoknoohhmjfhhjkeofio`.
+
+On Windows the host's sockets and configuration live in the user's
+`%LOCALAPPDATA%\nds-browser-use`. `just install` is a Unix recipe; run
+`nds-browser-use install --bun <bun.exe> --executor <executor.ts> --browser <name>`
+from the installed prefix instead. It registers the host in the user's registry
+under the key of the browser's branding: the Google Chrome key for Chrome and
+Chrome Beta, and the Chromium key for Chromium and Chrome for Testing. CI
+exercises only the Chrome for Testing registration.
 
 Release journals live in [GitHub Releases](https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-browser-use/releases).
