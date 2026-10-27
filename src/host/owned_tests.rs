@@ -929,3 +929,54 @@ async fn an_extension_of_another_contract_admits_nothing_and_confirms_no_close()
     assert!(host.state().sessions.contains_key("legacy"));
     assert!(life.stop.is_cancelled());
 }
+
+#[tokio::test]
+async fn any_other_contract_seals_open_lives_and_a_later_supported_hello_revives_none() {
+    for contract in [json!(1), json!(null), json!(3), json!("2"), json!(true)] {
+        let (host, mut queue, _root) = fixture();
+        let handle = host.create_owned("project").unwrap();
+        let life = host
+            .session_life("project", Some(&handle.generation))
+            .unwrap();
+        let _client = opened_client(&host, &handle, 1);
+        let mut hello = json!({ "type": "hello", "enabled": true, "version": "0.0.5" });
+        if !contract.is_null() {
+            hello["contract"] = contract.clone();
+        }
+        host.on_extension(hello);
+        // The bound client's target creation is refused before anything reaches the extension.
+        let opened = host
+            .session_request(
+                "project",
+                1,
+                json!({ "type": "open", "group": "project", "url": "about:blank" }),
+            )
+            .await;
+        assert!(opened.is_err(), "contract {contract}");
+        assert!(queue.try_recv().is_err(), "contract {contract}");
+        assert!(life.stop.is_cancelled(), "contract {contract}");
+        // The supported extension connects later; the sealed life stays closing and drains.
+        host.on_extension(
+            json!({ "type": "hello", "enabled": true, "version": "0.0.5", "contract": 2 }),
+        );
+        assert!(host.state().sessions["project"].closing);
+        assert!(
+            host.session_request(
+                "project",
+                1,
+                json!({ "type": "open", "group": "project", "url": "about:blank" })
+            )
+            .await
+            .is_err()
+        );
+        let drained = {
+            let host = host.clone();
+            tokio::spawn(async move { host.drain_closing().await })
+        };
+        let release = message(&mut queue).await;
+        assert_eq!(release["type"], "release");
+        answer(&host, &release);
+        drained.await.unwrap();
+        assert!(!host.state().sessions.contains_key("project"));
+    }
+}

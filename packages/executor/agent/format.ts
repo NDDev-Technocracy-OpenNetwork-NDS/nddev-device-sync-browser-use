@@ -66,28 +66,48 @@ function opaque(text: string): object {
   return { [inspect.custom]: () => text };
 }
 
-// Built-in values whose printing walks no object graph of the agent's.
-function inert(value: object): boolean {
-  return (
-    value instanceof Date ||
-    value instanceof RegExp ||
-    value instanceof URL ||
-    ArrayBuffer.isView(value) ||
-    value instanceof ArrayBuffer
-  );
+// Binary data up to this size prints its content; larger data prints as its type and size, so a
+// print never copies much.
+const COPY_BYTES = 1 << 20;
+
+// A fresh copy of a built-in value, so inspect prints its content but never fields the agent's
+// code added to the original; undefined for any other value.
+function fresh(value: object): object | undefined {
+  if (value instanceof Date) return new Date(value.getTime());
+  if (value instanceof RegExp) return new RegExp(value.source, value.flags);
+  if (value instanceof URL) return new URL(value.href);
+  if (value instanceof ArrayBuffer) {
+    return value.byteLength <= COPY_BYTES
+      ? value.slice(0)
+      : opaque(`ArrayBuffer { byteLength: ${value.byteLength} }`);
+  }
+  if (value instanceof DataView) return opaque(`DataView(${value.byteLength})`);
+  if (ArrayBuffer.isView(value)) {
+    const view = value as unknown as { length: number; slice(): object };
+    const name = Object.prototype.toString.call(value).slice(8, -1);
+    return value.byteLength <= COPY_BYTES ? view.slice() : opaque(`${name}(${view.length})`);
+  }
+  return undefined;
 }
 
 // A copy of a value that inspect may walk: Playwright objects become tags, and every edge of the
 // graph (array items, Map keys and values, Set members, own data fields) is copied the same way.
 // Getters are never called, other class instances keep only their own data fields under their
-// class name, errors and promises print as tags, and a cycle prints as such. inspect never
-// reaches an original object, so no connection internals or environment can show.
+// class name, built-ins are fresh copies, functions, errors and promises print as tags, and a
+// cycle prints as such. inspect never reaches an original object, so no connection internals or
+// environment can show.
 function shield(value: unknown, depth: number, ancestors: Set<object>): unknown {
   const tagged = tag(value);
   if (tagged !== undefined) return opaque(tagged);
+  // A function prints as its name only; fields attached to it are never walked.
+  if (typeof value === "function") {
+    const name = typeof value.name === "string" && value.name ? value.name : "anonymous";
+    return opaque(`[Function: ${name}]`);
+  }
   if (typeof value !== "object" || value === null) return value;
   if (ancestors.has(value)) return opaque("[Circular]");
-  if (inert(value)) return value;
+  const copy = fresh(value);
+  if (copy !== undefined) return copy;
   if (value instanceof Error) return opaque(`[${value.name}: ${value.message}]`);
   if (value instanceof Promise) return opaque("Promise");
   if (depth > INSPECT.depth) return opaque(Array.isArray(value) ? "[Array]" : "[Object]");
@@ -127,6 +147,23 @@ export function shown(value: unknown): boolean {
 export type Console = { method: string; values: unknown[] };
 
 /** The text of one execution, in a fixed order: notices, console output, then the value. */
+// Terminal escape sequences and the other control characters but tab and newline. Playwright colors
+// its call logs where it detects a color terminal, and pages can log them; an agent reads neither.
+const CONTROL = new RegExp(
+  [
+    "\\u001b\\][^\\u0007\\u001b]*(?:\\u0007|\\u001b\\\\)",
+    "\\u001b\\[[0-?]*[ -/]*[@-~]",
+    "\\u001b[@-Z\\\\-_]",
+    "[\\u0000-\\u0008\\u000b-\\u001f\\u007f]",
+  ].join("|"),
+  "g",
+);
+
+/** Text without terminal escape sequences or control characters other than tab and newline. */
+export function plain(text: string): string {
+  return text.replace(CONTROL, "");
+}
+
 export function compose(parts: {
   notices: string[];
   console: Console[];
@@ -145,7 +182,9 @@ export function compose(parts: {
   }
   if (parts.error !== undefined) sections.push(`Error: ${parts.error}`);
   else if (shown(parts.value)) sections.push(`[return value] ${render(parts.value)}`);
-  return sections.length > 0 ? sections.join("\n\n") : "Code executed successfully (no output)";
+  return sections.length > 0
+    ? plain(sections.join("\n\n"))
+    : "Code executed successfully (no output)";
 }
 
 /** How long Playwright's own waits may take within an execution's remaining budget: a second less,
@@ -179,15 +218,16 @@ const REASONS = [
  * log is cut to its last distinct lines, and internal stacks are dropped. */
 export function describeError(error: unknown): string {
   if (!(error instanceof Error)) return render(error);
-  const [head = "", ...rest] = error.message.split("\n");
+  const message = plain(error.message);
+  const [head = "", ...rest] = message.split("\n");
   const log = rest
     .map((line) => line.trim())
     .filter((line) => line.startsWith("- "))
     .map((line) => line.slice(2));
   if (error.name !== "TimeoutError" || log.length === 0) {
     return error.name === "Error" || error.name === "TimeoutError"
-      ? error.message
-      : `${error.name}: ${error.message}`;
+      ? message
+      : `${error.name}: ${message}`;
   }
   const reason = [...log].reverse().find((line) => REASONS.some((pattern) => pattern.test(line)));
   const waited = log.some((line) => /locator resolved to/.test(line));
