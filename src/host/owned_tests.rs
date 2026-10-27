@@ -793,3 +793,38 @@ async fn control_disconnect_reaps_its_executor_and_retains_the_owned_handle_for_
     );
     host.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn an_idle_cli_session_closes_with_its_tabs_while_owned_and_recent_ones_stay() {
+    let (host, mut queue, _root) = fixture();
+    host.reserve("idle", false).unwrap();
+    host.reserve("recent", false).unwrap();
+    host.create_owned("owned").unwrap();
+    let long_ago = Instant::now()
+        .checked_sub(IDLE_CLOSE + Duration::from_secs(1))
+        .unwrap();
+    {
+        let mut state = host.state();
+        for project in ["idle", "recent", "owned"] {
+            let session = state.sessions.get_mut(project).unwrap();
+            runtime::private_directory(&session.artifacts).unwrap();
+            session.opened = true;
+            if project != "recent" {
+                session.used = long_ago;
+            }
+        }
+    }
+    let sweep = {
+        let host = host.clone();
+        tokio::spawn(async move { host.close_idle(Instant::now()).await })
+    };
+    let release = message(&mut queue).await;
+    assert_eq!(release["type"], "release");
+    assert_eq!(release["group"], "idle");
+    assert_eq!(release["close"], true);
+    answer(&host, &release);
+    sweep.await.unwrap();
+    let state = host.state();
+    assert!(!state.sessions.contains_key("idle"));
+    assert!(state.sessions.contains_key("recent") && state.sessions.contains_key("owned"));
+}
