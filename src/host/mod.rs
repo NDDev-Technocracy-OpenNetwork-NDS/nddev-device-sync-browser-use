@@ -503,6 +503,9 @@ impl Host {
         kind: WorkKind,
     ) -> Result<PendingWork, Failure> {
         let state = self.state();
+        // Every client action, target creation and close included, needs the connected,
+        // enabled extension of the supported contract.
+        Self::ready(&state).map_err(Failure::Refused)?;
         let session = state
             .sessions
             .get(project)
@@ -597,7 +600,9 @@ impl Host {
                 if state.contract == Some(CONTRACT) {
                     tracing::info!(event.name = "browser.extension.connected", outcome = "ok");
                 } else {
-                    // An extension of another contract may still answer cleanup, but admits nothing.
+                    // An extension of another contract may still answer cleanup, but admits nothing,
+                    // and the lives it met end here, so a later supported hello revives none.
+                    Self::seal(&mut state);
                     tracing::warn!(event.name = "browser.extension.connected", outcome = "rejected", error.type = "contract");
                 }
                 drop(state);
@@ -887,13 +892,7 @@ impl Host {
         let mut state = self.state();
         state.enabled = enabled;
         if !enabled {
-            state.tabs.clear();
-            state.children.clear();
-            for session in state.sessions.values_mut() {
-                session.closing = true;
-                session.life.stop.cancel();
-                session.client = None;
-            }
+            Self::seal(&mut state);
         }
         let name = if enabled {
             "browser.control.enabled"
@@ -901,6 +900,18 @@ impl Host {
             "browser.control.disabled"
         };
         tracing::info!(event.name = name, outcome = "ok");
+    }
+
+    /// Ends every current life: none acts again, and each is drained by its own strict release.
+    /// A later switch or hello never revives one.
+    fn seal(state: &mut State) {
+        state.tabs.clear();
+        state.children.clear();
+        for session in state.sessions.values_mut() {
+            session.closing = true;
+            session.life.stop.cancel();
+            session.client = None;
+        }
     }
 
     async fn shutdown(&self) -> Result<(), Refusal> {
