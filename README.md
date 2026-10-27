@@ -47,12 +47,19 @@ start one. Reservations share the existing finite session limit. Existing
 project-only CLI operations retain their local, project-oriented meaning.
 
 Successful owned close means the executor has stopped and been reaped,
-outstanding browser actions have answered, and that generation's release has
-completed. Transport loss or an unacknowledged action is not a drain receipt:
-retain the handle and closed admission instead of adopting or closing another
-session. Older hosts refuse the new private operations; clients never fall
-back to project-only operations. Extension messages and the Chrome tab-group
-boundary are unchanged. Installation and extension control remain explicit.
+lifecycle mutations have answered, and an opened generation's release has
+been confirmed by the extension with exactly `{"released":true}`. An unopened
+reservation needs no browser action. An older `{}` release answer is refused.
+A lost or unknown lifecycle mutation still keeps admission
+closed: retain the handle instead of adopting or closing another session.
+
+A strict release may end that exact generation's outstanding CDP transport
+authority without a command reply. This does not report command success or
+undo website actions already issued. CDP admission and bounded enqueue share
+the close fence, so an old sender cannot queue work into a replacement.
+Older hosts refuse the new private operations; clients never fall back to
+project-only operations. The Chrome tab-group boundary remains in force;
+installation and extension control remain explicit.
 
 ## Privacy
 

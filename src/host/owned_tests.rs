@@ -40,7 +40,318 @@ async fn message(queue: &mut mpsc::Receiver<Vec<u8>>) -> Value {
 }
 
 fn answer(host: &Host, request: &Value) {
-    host.on_extension(json!({ "type": "result", "id": request["id"], "result": { "tabs": [] } }));
+    let result = if request["type"] == "release" {
+        json!({ "released": true })
+    } else {
+        json!({ "tabs": [] })
+    };
+    host.on_extension(json!({ "type": "result", "id": request["id"], "result": result }));
+}
+
+fn opened_client(host: &Host, handle: &OwnedSession, id: u64) -> mpsc::Receiver<String> {
+    let (send, receive) = mpsc::channel(16);
+    let mut state = host.state();
+    let session = state.sessions.get_mut(&handle.project).unwrap();
+    runtime::private_directory(&session.artifacts).unwrap();
+    session.opened = true;
+    session.client = Some(relay::Client::new(id, send, CancellationToken::new()));
+    receive
+}
+
+fn forwarded(host: &Host, project: &str, client: u64, expired: bool) -> relay::Forward {
+    let work = host
+        .session_cdp_work(project, client)
+        .unwrap_or_else(|_| panic!("synthetic current client was not admitted"));
+    let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+    let mut forward = relay::Forward::new(
+        work,
+        project.into(),
+        client,
+        json!(1),
+        tab_session(1),
+        permit,
+    );
+    if expired {
+        forward.deadline = Instant::now();
+    }
+    forward
+}
+
+fn command() -> Value {
+    json!({ "type": "cdp", "tab": 1, "method": "Runtime.evaluate", "params": {} })
+}
+
+#[tokio::test]
+async fn expired_cdp_is_released_only_by_strict_ack_for_its_exact_life() {
+    let (host, mut queue, _root) = fixture();
+    let old = host.create_owned("project").unwrap();
+    let life = host
+        .session_life(&old.project, Some(&old.generation))
+        .unwrap();
+    let mut client = opened_client(&host, &old, 1);
+    let expired = host
+        .submit_cdp(command(), forwarded(&host, "project", 1, true))
+        .unwrap_or_else(|_| panic!("current CDP enqueue failed"));
+    let _ = message(&mut queue).await;
+    host.expire_pending(Instant::now());
+    assert_eq!(life.cdp_state.load(Ordering::Acquire), CDP_UNCERTAIN);
+    assert!(!life.uncertain.load(Ordering::Acquire));
+    assert_eq!(*life.pending.borrow(), 0);
+    assert!(client.try_recv().unwrap().contains("error"));
+
+    // An unanswered command still in the map is retired by release too. Its
+    // retirement is not delivered as a fabricated successful command result.
+    let pending = host
+        .submit_cdp(command(), forwarded(&host, "project", 1, false))
+        .unwrap_or_else(|_| panic!("current CDP enqueue failed"));
+    let _ = message(&mut queue).await;
+    let other = host.create_owned("other").unwrap();
+    let other_life = host
+        .session_life(&other.project, Some(&other.generation))
+        .unwrap();
+    let _other_client = opened_client(&host, &other, 2);
+    let other_id = host
+        .submit_cdp(command(), forwarded(&host, "other", 2, false))
+        .unwrap_or_else(|_| panic!("other CDP enqueue failed"));
+    let _ = message(&mut queue).await;
+    let closed = {
+        let host = host.clone();
+        let old = old.clone();
+        tokio::spawn(async move {
+            host.handle(Request::CloseOwned {
+                session: old,
+                close_tabs: false,
+            })
+            .await
+        })
+    };
+    let release = message(&mut queue).await;
+    assert_eq!(release["type"], "release");
+    assert_eq!(life.cdp_state.load(Ordering::Acquire), CDP_UNCERTAIN);
+    assert!(matches!(host.create_owned("project"), Err(Refusal::Busy)));
+    answer(&host, &release);
+    assert!(matches!(closed.await.unwrap(), Reply::Closed));
+    assert_eq!(life.cdp_state.load(Ordering::Acquire), CDP_RELEASED);
+    assert_eq!(*life.cdp_pending.borrow(), 0);
+    assert!(!host.pending().contains_key(&expired));
+    assert!(!host.pending().contains_key(&pending));
+    assert!(host.pending().contains_key(&other_id));
+    assert_eq!(*other_life.cdp_pending.borrow(), 1);
+    assert_ne!(other_life.cdp_state.load(Ordering::Acquire), CDP_RELEASED);
+    assert!(client.try_recv().is_err());
+    let replacement = host.create_owned("project").unwrap();
+    assert_ne!(replacement, old);
+    host.on_extension(json!({ "type": "result", "id": pending, "result": { "late": true } }));
+    assert_eq!(
+        host.session_life("project", None).unwrap().generation,
+        replacement.generation
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn older_empty_release_ack_preserves_closed_admission_and_cdp_uncertainty() {
+    let (host, mut queue, _root) = fixture();
+    let handle = host.create_owned("project").unwrap();
+    let life = host.session_life("project", None).unwrap();
+    let _client = opened_client(&host, &handle, 1);
+    host.submit_cdp(command(), forwarded(&host, "project", 1, true))
+        .unwrap_or_else(|_| panic!("current CDP enqueue failed"));
+    let _ = message(&mut queue).await;
+    host.expire_pending(Instant::now());
+    let closed = {
+        let host = host.clone();
+        tokio::spawn(async move {
+            host.handle(Request::CloseOwned {
+                session: handle,
+                close_tabs: false,
+            })
+            .await
+        })
+    };
+    let release = message(&mut queue).await;
+    host.on_extension(json!({ "type": "result", "id": release["id"], "result": {} }));
+    assert!(matches!(
+        closed.await.unwrap(),
+        Reply::Refused {
+            refusal: Refusal::ExtensionUnavailable
+        }
+    ));
+    assert_eq!(life.cdp_state.load(Ordering::Acquire), CDP_UNCERTAIN);
+    assert!(host.state().sessions["project"].closing);
+    assert!(host.state().sessions["project"].artifacts.is_dir());
+    assert!(matches!(host.create_owned("project"), Err(Refusal::Busy)));
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn unknown_lifecycle_mutation_cannot_be_discharged_as_cdp() {
+    let (host, mut queue, _root) = fixture();
+    let handle = host.create_owned("project").unwrap();
+    let life = host.session_life("project", None).unwrap();
+    let _client = opened_client(&host, &handle, 1);
+    host.submit_cdp(command(), forwarded(&host, "project", 1, true))
+        .unwrap_or_else(|_| panic!("current CDP enqueue failed"));
+    let _ = message(&mut queue).await;
+    host.expire_pending(Instant::now());
+    drop(PendingWork::new(life.clone()));
+    assert!(matches!(
+        host.handle(Request::CloseOwned {
+            session: handle,
+            close_tabs: false
+        })
+        .await,
+        Reply::Refused {
+            refusal: Refusal::Timeout
+        }
+    ));
+    assert!(
+        queue.try_recv().is_err(),
+        "unresolved mutation reached release"
+    );
+    assert!(life.uncertain.load(Ordering::Acquire));
+    assert_eq!(life.cdp_state.load(Ordering::Acquire), CDP_UNCERTAIN);
+    assert!(matches!(host.create_owned("project"), Err(Refusal::Busy)));
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn lost_release_waiter_retains_lifecycle_uncertainty_after_expiry_and_late_result() {
+    let (host, mut queue, _root) = fixture();
+    let handle = host.create_owned("project").unwrap();
+    let life = host.session_life("project", None).unwrap();
+    let _client = opened_client(&host, &handle, 1);
+    host.submit_cdp(command(), forwarded(&host, "project", 1, true))
+        .unwrap_or_else(|_| panic!("current CDP enqueue failed"));
+    let _ = message(&mut queue).await;
+    host.expire_pending(Instant::now());
+    let closed = {
+        let host = host.clone();
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            host.handle(Request::CloseOwned {
+                session: handle,
+                close_tabs: false,
+            })
+            .await
+        })
+    };
+    let release = message(&mut queue).await;
+    closed.abort();
+    let _ = closed.await;
+    assert_eq!(*life.pending.borrow(), 1);
+    {
+        let mut pending = host.pending();
+        let Waiter::Reply { deadline, .. } =
+            pending.get_mut(&release["id"].as_u64().unwrap()).unwrap()
+        else {
+            panic!("release was not lifecycle-owned");
+        };
+        *deadline = Instant::now();
+    }
+    host.expire_pending(Instant::now());
+    assert_eq!(*life.pending.borrow(), 0);
+    assert!(life.uncertain.load(Ordering::Acquire));
+    answer(&host, &release); // This late, already-untracked reply cannot grant cleanup.
+    assert!(matches!(
+        host.handle(Request::CloseOwned {
+            session: handle,
+            close_tabs: false
+        })
+        .await,
+        Reply::Refused {
+            refusal: Refusal::Timeout
+        }
+    ));
+    assert!(queue.try_recv().is_err());
+    assert_eq!(life.cdp_state.load(Ordering::Acquire), CDP_UNCERTAIN);
+    assert!(matches!(host.create_owned("project"), Err(Refusal::Busy)));
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn cdp_enqueue_refuses_full_queue_without_pending_or_uncertain_work() {
+    let (host, mut queue, _root) = fixture();
+    let handle = host.create_owned("project").unwrap();
+    let life = host.session_life("project", None).unwrap();
+    let _client = opened_client(&host, &handle, 1);
+    while host.outbound.try_send(Vec::new()).is_ok() {}
+    assert!(matches!(
+        host.submit_cdp(command(), forwarded(&host, "project", 1, false)),
+        Err(Failure::Refused(Refusal::Busy))
+    ));
+    assert!(host.pending().is_empty());
+    assert_eq!(*life.cdp_pending.borrow(), 0);
+    assert_eq!(life.cdp_state.load(Ordering::Acquire), 0);
+    while queue.try_recv().is_ok() {}
+    let delayed = forwarded(&host, "project", 1, false);
+    host.on_control(false);
+    assert!(matches!(
+        host.submit_cdp(command(), delayed),
+        Err(Failure::Refused(Refusal::SessionNotFound))
+    ));
+    assert!(queue.try_recv().is_err());
+    assert_eq!(*life.cdp_pending.borrow(), 0);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn delayed_old_cdp_cannot_enqueue_into_a_replacement_even_with_the_same_client_id() {
+    let (host, mut queue, _root) = fixture();
+    let handle = host.create_owned("project").unwrap();
+    let life = host.session_life("project", None).unwrap();
+    let _client = opened_client(&host, &handle, 1);
+    let delayed = forwarded(&host, "project", 1, false);
+    let closed = {
+        let host = host.clone();
+        tokio::spawn(async move {
+            host.handle(Request::CloseOwned {
+                session: handle,
+                close_tabs: false,
+            })
+            .await
+        })
+    };
+    let release = message(&mut queue).await;
+    answer(&host, &release);
+    assert!(matches!(closed.await.unwrap(), Reply::Closed));
+    let replacement = host.create_owned("project").unwrap();
+    let _replacement_client = opened_client(&host, &replacement, 1);
+    assert!(matches!(
+        host.submit_cdp(command(), delayed),
+        Err(Failure::Refused(Refusal::SessionNotFound))
+    ));
+    assert!(queue.try_recv().is_err());
+    assert_eq!(life.cdp_state.load(Ordering::Acquire), CDP_RELEASED);
+    assert_eq!(*life.cdp_pending.borrow(), 0);
+    assert_eq!(
+        host.session_life("project", None).unwrap().generation,
+        replacement.generation
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reenabled_opened_generation_still_waits_for_its_strict_release_ack() {
+    let (host, mut queue, _root) = fixture();
+    let handle = host.create_owned("project").unwrap();
+    let life = host.session_life("project", None).unwrap();
+    let _client = opened_client(&host, &handle, 1);
+    host.on_control(false);
+    host.on_control(true);
+    let drained = {
+        let host = host.clone();
+        tokio::spawn(async move { host.drain_closing().await })
+    };
+    let release = message(&mut queue).await;
+    assert_eq!(release["type"], "release");
+    assert!(life.stop.is_cancelled());
+    assert!(matches!(host.create_owned("project"), Err(Refusal::Busy)));
+    answer(&host, &release);
+    drained.await.unwrap();
+    let replacement = host.create_owned("project").unwrap();
+    assert_ne!(replacement, handle);
+    host.shutdown().await.unwrap();
 }
 
 #[tokio::test]

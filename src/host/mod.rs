@@ -22,7 +22,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -40,6 +40,8 @@ const CONTROL_CONNECTIONS: usize = 16;
 const CONTROL_IO: Duration = Duration::from_secs(5);
 const URL_LIMIT: usize = 2048;
 const TITLE_LIMIT: usize = 256;
+const CDP_UNCERTAIN: u8 = 1;
+const CDP_RELEASED: u8 = 2;
 
 /// Local installation paths; never operator credentials.
 pub struct Config {
@@ -130,6 +132,8 @@ struct SessionLife {
     close: tokio::sync::Mutex<()>,
     uncertain: std::sync::atomic::AtomicBool,
     pending: watch::Sender<usize>,
+    cdp_state: AtomicU8,
+    cdp_pending: watch::Sender<usize>,
 }
 
 impl SessionLife {
@@ -141,6 +145,8 @@ impl SessionLife {
             close: tokio::sync::Mutex::new(()),
             uncertain: std::sync::atomic::AtomicBool::new(false),
             pending: watch::channel(0).0,
+            cdp_state: AtomicU8::new(0),
+            cdp_pending: watch::channel(0).0,
         })
     }
 }
@@ -149,26 +155,65 @@ impl SessionLife {
 /// Canceling its waiter cannot remove a late action from the drain barrier.
 pub(crate) struct PendingWork {
     life: Arc<SessionLife>,
+    kind: WorkKind,
     settled: bool,
 }
+
+#[derive(Clone, Copy)]
+enum WorkKind {
+    Mutation,
+    Cdp,
+}
+
 impl PendingWork {
     fn new(life: Arc<SessionLife>) -> Self {
-        life.pending.send_modify(|count| *count += 1);
-        Self {
+        Self::with_kind(life, WorkKind::Mutation)
+    }
+    fn with_kind(life: Arc<SessionLife>, kind: WorkKind) -> Self {
+        let work = Self {
             life,
+            kind,
             settled: false,
+        };
+        work.counter().send_modify(|count| *count += 1);
+        work
+    }
+    fn counter(&self) -> &watch::Sender<usize> {
+        match self.kind {
+            WorkKind::Mutation => &self.life.pending,
+            WorkKind::Cdp => &self.life.cdp_pending,
+        }
+    }
+    fn mark_uncertain(&self) {
+        match self.kind {
+            WorkKind::Mutation => self.life.uncertain.store(true, Ordering::Release),
+            WorkKind::Cdp => {
+                // A late dropped waiter cannot revive authority that an exact
+                // strict release already ended. It never changes mutation state.
+                let _ = self.life.cdp_state.compare_exchange(
+                    0,
+                    CDP_UNCERTAIN,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
         }
     }
     pub(crate) fn settle(&mut self) {
+        self.settled = true;
+    }
+    fn released(&mut self) {
+        debug_assert!(matches!(self.kind, WorkKind::Cdp));
+        // Transport authority ended, not a successful CDP command/website undo.
         self.settled = true;
     }
 }
 impl Drop for PendingWork {
     fn drop(&mut self) {
         if !self.settled {
-            self.life.uncertain.store(true, Ordering::Release);
+            self.mark_uncertain();
         }
-        self.life.pending.send_modify(|count| *count -= 1);
+        self.counter().send_modify(|count| *count -= 1);
     }
 }
 
@@ -367,8 +412,81 @@ impl Host {
         Ok(id)
     }
 
+    /// The exact current generation/client must still admit this CDP command
+    /// when it enters the bounded queue. No await separates that check, pending
+    /// registration and enqueue; close fences all later submissions with State.
+    pub(crate) fn submit_cdp(
+        &self,
+        mut message: Value,
+        mut forward: relay::Forward,
+    ) -> Result<u64, Failure> {
+        if !matches!(forward.work.kind, WorkKind::Cdp) || message["type"] != "cdp" {
+            forward.work.settle();
+            return Err(Failure::Refused(Refusal::InvalidRequest));
+        }
+        let id = self.next_request.fetch_add(1, Ordering::Relaxed);
+        message["id"] = id.into();
+        let framed = serde_json::to_vec(&message)
+            .map_err(|_| Failure::Refused(Refusal::InvalidRequest))
+            .and_then(|body| frame(&body).ok_or(Failure::Refused(Refusal::PayloadLimit)));
+        let framed = match framed {
+            Ok(framed) => framed,
+            Err(error) => {
+                forward.work.settle(); // Known not submitted.
+                return Err(error);
+            }
+        };
+        let state = self.state();
+        let admitted = state.connected
+            && state.enabled
+            && state.sessions.get(&forward.project).is_some_and(|session| {
+                !session.closing
+                    && !session.life.stop.is_cancelled()
+                    && Arc::ptr_eq(&session.life, &forward.work.life)
+                    && session
+                        .client
+                        .as_ref()
+                        .is_some_and(|client| client.id == forward.client)
+            });
+        if !admitted {
+            forward.work.settle();
+            return Err(Failure::Refused(Refusal::SessionNotFound));
+        }
+        let permit = match self.outbound.try_reserve() {
+            Ok(permit) => permit,
+            Err(error) => {
+                forward.work.settle();
+                return Err(Failure::Refused(match error {
+                    mpsc::error::TrySendError::Full(_) => Refusal::Busy,
+                    mpsc::error::TrySendError::Closed(_) => Refusal::ExtensionUnavailable,
+                }));
+            }
+        };
+        self.pending().insert(id, Waiter::Forward(forward));
+        permit.send(framed);
+        drop(state);
+        Ok(id)
+    }
+
     /// One bounded request to the extension with a correlated reply.
     pub(crate) fn session_work(&self, project: &str, client: u64) -> Result<PendingWork, Failure> {
+        self.session_work_kind(project, client, WorkKind::Mutation)
+    }
+
+    pub(crate) fn session_cdp_work(
+        &self,
+        project: &str,
+        client: u64,
+    ) -> Result<PendingWork, Failure> {
+        self.session_work_kind(project, client, WorkKind::Cdp)
+    }
+
+    fn session_work_kind(
+        &self,
+        project: &str,
+        client: u64,
+        kind: WorkKind,
+    ) -> Result<PendingWork, Failure> {
         let state = self.state();
         let session = state
             .sessions
@@ -382,7 +500,7 @@ impl Host {
                         .is_some_and(|current| current.id == client)
             })
             .ok_or(Failure::Refused(Refusal::SessionNotFound))?;
-        Ok(PendingWork::new(session.life.clone()))
+        Ok(PendingWork::with_kind(session.life.clone(), kind))
     }
 
     pub(crate) async fn session_request(
@@ -548,35 +666,56 @@ impl Host {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             interval.tick().await;
-            let now = Instant::now();
-            let expired: Vec<Waiter> = {
-                let mut pending = self.pending();
-                let ids: Vec<u64> = pending
-                    .iter()
-                    .filter(|(_, waiter)| match waiter {
-                        Waiter::Forward(forward) => forward.deadline <= now,
-                        Waiter::Reply { deadline, .. } => *deadline <= now,
-                    })
-                    .map(|(id, _)| *id)
-                    .collect();
-                ids.into_iter()
-                    .filter_map(|id| pending.remove(&id))
-                    .collect()
-            };
-            for waiter in expired {
-                match waiter {
-                    Waiter::Forward(forward) => {
-                        forward.work.life.uncertain.store(true, Ordering::Release);
-                        self.answer(forward, Err(Failure::Refused(Refusal::Timeout)));
-                    }
-                    Waiter::Reply { send, .. } => {
-                        let _ = send.send(Err(Failure::Refused(Refusal::Timeout)));
-                    }
-                }
-            }
+            self.expire_pending(Instant::now());
             // Reuse this owned host task for switch/overflow cleanup. No detached cleanup.
             self.drain_closing().await;
         }
+    }
+
+    fn expire_pending(&self, now: Instant) {
+        let expired: Vec<Waiter> = {
+            let mut pending = self.pending();
+            let ids: Vec<u64> = pending
+                .iter()
+                .filter(|(_, waiter)| match waiter {
+                    Waiter::Forward(forward) => forward.deadline <= now,
+                    Waiter::Reply { deadline, .. } => *deadline <= now,
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| pending.remove(&id))
+                .collect()
+        };
+        for waiter in expired {
+            match waiter {
+                Waiter::Forward(forward) => {
+                    forward.work.mark_uncertain();
+                    self.answer(forward, Err(Failure::Refused(Refusal::Timeout)));
+                }
+                Waiter::Reply { send, .. } => {
+                    let _ = send.send(Err(Failure::Refused(Refusal::Timeout)));
+                }
+            }
+        }
+    }
+
+    fn release_cdp(&self, life: &Arc<SessionLife>) {
+        // State already fenced submissions for this exact generation before
+        // Chrome's strict release. Retire only its transport waiters; do not
+        // manufacture a command result or touch a lifecycle mutation/other life.
+        life.cdp_state.store(CDP_RELEASED, Ordering::Release);
+        self.pending().retain(|_, waiter| {
+            if let Waiter::Forward(forward) = waiter
+                && matches!(forward.work.kind, WorkKind::Cdp)
+                && Arc::ptr_eq(&forward.work.life, life)
+            {
+                forward.work.released();
+                false
+            } else {
+                true
+            }
+        });
     }
 
     fn on_event(&self, message: Value) {
@@ -1229,12 +1368,25 @@ impl Host {
         if self.state().connected && life.uncertain.load(Ordering::Acquire) {
             return Err(Refusal::Timeout);
         }
+        if self.state().connected
+            && (!release || !opened)
+            && (life.cdp_state.load(Ordering::Acquire) == CDP_UNCERTAIN
+                || *life.cdp_pending.borrow() != 0)
+        {
+            return Err(Refusal::Timeout);
+        }
         if release && opened {
-            self.refusable_work(
-                json!({ "type": "release", "group": project, "close": close_tabs }),
-                Some(PendingWork::new(life.clone())),
-            )
-            .await?;
+            let released = self
+                .refusable_work(
+                    json!({ "type": "release", "group": project, "close": close_tabs }),
+                    Some(PendingWork::new(life.clone())),
+                )
+                .await?;
+            if released != json!({ "released": true }) {
+                // Older {} ACKs and unverified/malformed releases prove nothing.
+                return Err(Refusal::ExtensionUnavailable);
+            }
+            self.release_cdp(life);
         }
         // Keep the closing generation registered until its artifact area is gone.
         if opened {

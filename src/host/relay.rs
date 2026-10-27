@@ -98,6 +98,15 @@ pub(crate) struct Client {
 }
 
 impl Client {
+    pub(super) fn new(id: u64, outbound: mpsc::Sender<String>, closed: CancellationToken) -> Self {
+        Self {
+            id,
+            auto_attach: false,
+            outbound,
+            closed,
+        }
+    }
+
     pub fn send(&self, message: &Value) -> bool {
         self.outbound.try_send(message.to_string()).is_ok()
     }
@@ -112,6 +121,27 @@ pub(crate) struct Forward {
     pub session: String,
     pub deadline: Instant,
     _permit: OwnedSemaphorePermit,
+}
+
+impl Forward {
+    pub(super) fn new(
+        work: super::PendingWork,
+        project: String,
+        client: u64,
+        id: Value,
+        session: String,
+        permit: OwnedSemaphorePermit,
+    ) -> Self {
+        Self {
+            work,
+            project,
+            client,
+            id,
+            session,
+            deadline: Instant::now() + EXTENSION_REPLY,
+            _permit: permit,
+        }
+    }
 }
 
 impl Drop for Client {
@@ -165,15 +195,7 @@ async fn connection(host: Arc<Host>, stream: socket::Stream) {
     let (outbound, mut queue) = mpsc::channel::<String>(QUEUE);
     let closed = CancellationToken::new();
     let id = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
-    let Some(project) = host.bind(
-        &token,
-        Client {
-            id,
-            auto_attach: false,
-            outbound: outbound.clone(),
-            closed: closed.clone(),
-        },
-    ) else {
+    let Some(project) = host.bind(&token, Client::new(id, outbound.clone(), closed.clone())) else {
         return;
     };
     let (mut sink, mut source) = socket.split();
@@ -206,7 +228,7 @@ async fn connection(host: Arc<Host>, stream: socket::Stream) {
             .is_some_and(|via| !host.browser_alias(&project, via))
         {
             // Target commands are queued here, in arrival order.
-            host.forward(&project, id, command, permit).await;
+            host.forward(&project, id, command, permit);
             continue;
         }
         let (host, project, outbound) = (host.clone(), project.clone(), outbound.clone());
@@ -303,15 +325,9 @@ impl Host {
 
     /// Routes a target command to its agent tab; the reply arrives through
     /// [`Host::answer`] in the extension's order.
-    async fn forward(
-        &self,
-        project: &str,
-        client: u64,
-        command: Value,
-        permit: OwnedSemaphorePermit,
-    ) {
+    fn forward(&self, project: &str, client: u64, command: Value, permit: OwnedSemaphorePermit) {
         let session = command["sessionId"].as_str().unwrap_or_default().to_owned();
-        let work = match self.session_work(project, client) {
+        let work = match self.session_cdp_work(project, client) {
             Ok(work) => work,
             Err(error) => {
                 return self.reply_to(
@@ -321,15 +337,14 @@ impl Host {
                 );
             }
         };
-        let forward = Forward {
+        let forward = Forward::new(
             work,
-            project: project.to_owned(),
+            project.to_owned(),
             client,
-            id: command["id"].clone(),
-            session: session.clone(),
-            deadline: Instant::now() + EXTENSION_REPLY,
-            _permit: permit,
-        };
+            command["id"].clone(),
+            session.clone(),
+            permit,
+        );
         let method = command["method"].as_str().unwrap_or_default();
         let params = command.get("params").cloned().unwrap_or_else(|| json!({}));
         let message = match self.route(project, &session, method, params) {
@@ -337,7 +352,7 @@ impl Host {
             Err(failure) => return self.answer(forward, Err(failure)),
         };
         let (id, session) = (forward.id.clone(), forward.session.clone());
-        if let Err(failure) = self.submit(message, Waiter::Forward(forward)).await {
+        if let Err(failure) = self.submit_cdp(message, forward) {
             // A failed submission drops its waiter; answer the client directly.
             self.reply_to(project, client, reply(id, Some(session), Err(failure)));
         }
