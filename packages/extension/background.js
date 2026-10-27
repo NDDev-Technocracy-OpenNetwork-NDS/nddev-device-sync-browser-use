@@ -112,6 +112,8 @@ function connect() {
         type: "hello",
         protocol: PROTOCOL,
         version: chrome.runtime.getManifest().version,
+        // The host admits only this contract: every cdp and close request names its group.
+        contract: 2,
         userAgent: navigator.userAgent,
         enabled,
     });
@@ -176,7 +178,8 @@ async function dispatch(message) {
             // every command or record, that attachment must still hold the tab. A later life's
             // attachment of the same tab never receives an earlier command, nor its recorded setup.
             const held = usable(message.tab);
-            if (!held)
+            // A request of another group, or one without its group, never acts on this attachment.
+            if (!held || held.life.group !== message.group)
                 throw new Refusal("target_closed");
             const still = () => {
                 if (usable(message.tab) !== held)
@@ -222,7 +225,8 @@ async function dispatch(message) {
             return admitted(life, opened(life, message.url));
         }
         case "close": {
-            if (!usable(message.tab))
+            const held = usable(message.tab);
+            if (!held || held.life.group !== message.group)
                 throw new Refusal("target_closed");
             await chrome.tabs.remove(message.tab);
             return {};
@@ -414,6 +418,15 @@ function attach(tab, life) {
             throw new Refusal("target_closed");
         }
         const info = (await command({ tabId: tab }, "Target.getTargetInfo"));
+        // A claim or an adoption reports only the attachment it holds now: the same record, of the
+        // group's current open life, neither moved out nor still unconfirmed.
+        if (attached.get(tab) !== attachment ||
+            attachment.life !== life ||
+            !life.open ||
+            lives.get(life.group) !== life ||
+            attachment.revoked ||
+            attachment.pending)
+            throw new Refusal("target_closed");
         attachment.target = info.targetInfo.targetId;
         return info.targetInfo;
     })()).finally(() => {
@@ -588,7 +601,7 @@ async function adopt(tab, life) {
         const target = await retried(tab, life, () => attach(tab, life));
         if (!life.open)
             return;
-        if (target)
+        if (target && usable(tab)?.life === life)
             send({ type: "attached", tab, group: life.group, target: target.value });
         else
             await adopted(tab, life, "attach");

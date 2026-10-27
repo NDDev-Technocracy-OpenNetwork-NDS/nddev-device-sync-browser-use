@@ -92,10 +92,16 @@ pub(crate) struct Host {
     state: Mutex<State>,
 }
 
+/// The one extension contract this host speaks: every cdp and close request names its group,
+/// and the worker admits it only for that group's current attachment of the tab.
+const CONTRACT: u64 = 2;
+
 #[derive(Default)]
 struct State {
     connected: bool,
     enabled: bool,
+    /// The contract the connected extension announced; only [`CONTRACT`] is admitted.
+    contract: Option<u64>,
     extension: String,
     browser: String,
     user_agent: String,
@@ -447,6 +453,7 @@ impl Host {
         let state = self.state();
         let admitted = state.connected
             && state.enabled
+            && state.contract == Some(CONTRACT)
             && state.sessions.get(&forward.project).is_some_and(|session| {
                 !session.closing
                     && !session.life.stop.is_cancelled()
@@ -574,6 +581,7 @@ impl Host {
                 let mut state = self.state();
                 state.connected = true;
                 state.enabled = message["enabled"].as_bool() == Some(true);
+                state.contract = message["contract"].as_u64();
                 state.user_agent = bounded(message["userAgent"].as_str().unwrap_or_default(), 512);
                 state.extension = bounded(message["version"].as_str().unwrap_or_default(), 32);
                 state.browser = state
@@ -586,7 +594,12 @@ impl Host {
                     })
                     .unwrap_or("Chrome")
                     .to_owned();
-                tracing::info!(event.name = "browser.extension.connected", outcome = "ok");
+                if state.contract == Some(CONTRACT) {
+                    tracing::info!(event.name = "browser.extension.connected", outcome = "ok");
+                } else {
+                    // An extension of another contract may still answer cleanup, but admits nothing.
+                    tracing::warn!(event.name = "browser.extension.connected", outcome = "rejected", error.type = "contract");
+                }
                 drop(state);
                 self.update();
             }
@@ -1165,7 +1178,7 @@ impl Host {
     }
 
     fn ready(state: &State) -> Result<(), Refusal> {
-        if !state.connected {
+        if !state.connected || state.contract != Some(CONTRACT) {
             return Err(Refusal::ExtensionUnavailable);
         }
         if !state.enabled {
@@ -1362,7 +1375,7 @@ impl Host {
                 Some(PendingWork::new(life.clone())),
             )
             .await?;
-        if released != json!({ "released": true }) {
+        if released != json!({ "released": true }) || self.state().contract != Some(CONTRACT) {
             return Err(Refusal::ExtensionUnavailable);
         }
         {
@@ -1515,8 +1528,9 @@ impl Host {
                     Some(PendingWork::new(life.clone())),
                 )
                 .await?;
-            if released != json!({ "released": true }) {
-                // Older {} ACKs and unverified/malformed releases prove nothing.
+            // Older {} ACKs, unverified or malformed releases, and an extension of another contract
+            // prove nothing: the release was attempted, but the close is not confirmed.
+            if released != json!({ "released": true }) || self.state().contract != Some(CONTRACT) {
                 return Err(Refusal::ExtensionUnavailable);
             }
             self.release_cdp(life);
