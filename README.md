@@ -73,6 +73,16 @@ refuse running against a replaced document.
   on its next load, since Chrome no longer edits a running script),
   `getStylesForLocator({ locator, cdp })` with `formatStylesAsText(...)`, and
   `getReactComponentInfo`/`getReactSource({ locator })` for React builds.
+- `recorder.start()` records what a person does in the session's tabs, for
+  turning a workflow into a skill: clicks, fills, choices, key presses and
+  submissions with locators, navigations, API and failed requests without
+  their bodies, console and page errors, dialogs, toasts, and a frame of each
+  visual change, at most two a second, for 20 minutes or 500 MB. Password and
+  payment values are recorded as `[redacted]`. `recorder.stop()` ends it,
+  `recorder.events({ type, errors, full, ids })` prints its timeline, and
+  `recorder.frame({ eventId, offset })` names the frame closest to an event.
+  Recordings live in `artifacts`, removed with the session, unless
+  `recorder.start({ outputDir })` names another directory.
 
 A result also carries `[PAGE ERROR]` lines for uncaught errors and
 `[WARNING] New page opened` lines for new tabs of the pages an agent keeps in
