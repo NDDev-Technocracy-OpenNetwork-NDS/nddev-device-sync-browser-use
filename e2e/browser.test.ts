@@ -43,6 +43,8 @@ const profile = join(root, "profile");
 const prefix = join(root, "prefix");
 const hostBinary = join(prefix, "bin", windows ? "nds-browser-use.exe" : "nds-browser-use");
 const installed = join(prefix, "extension");
+// Another extension that injects its own page as a frame, as password managers do.
+const foreign = join(repository, "e2e/foreign-extension");
 const hostLog = join(root, "host.log");
 const extensionId = "lcdkocghcaakekcaeopjanfbohpfacbk";
 const env: Record<string, string> = {
@@ -162,6 +164,7 @@ beforeAll(async () => {
         "/linked": "<title>Linked</title><p>linked</p>",
         "/target": "<title>Popup target</title><p>popup</p>",
         "/owner": "<title>Owner</title><p>owner work</p>",
+        "/foreign": "<title>Foreign host</title><p>a page another extension adds its frame to</p>",
         "/owned": "<title>Owned</title><p>owned work</p>",
         "/dialog": `<button id="ask" onclick="answer.textContent = confirm('Proceed?') ? 'accepted' : 'dismissed'">Ask</button><span id="answer"></span>`,
         "/form": `<input id="text" oninput="echo.textContent = this.value"><span id="echo"></span><input id="file" type="file" onchange="picked.textContent = this.files[0].name + ':' + this.files[0].size"><span id="picked"></span>`,
@@ -235,8 +238,8 @@ beforeAll(async () => {
     headless: true,
     env,
     args: [
-      `--disable-extensions-except=${installed}`,
-      `--load-extension=${installed}`,
+      `--disable-extensions-except=${installed},${foreign}`,
+      `--load-extension=${installed},${foreign}`,
       ...(process.env.NDS_E2E_DIAGNOSTICS === "1" ? ["--enable-logging=stderr"] : []),
     ],
   });
@@ -702,6 +705,27 @@ test("raw CDP sessions reach agent tabs, including a virtual authenticator", asy
   expect(result.body.output).toBe("NotAllowedError signed-in 1 event");
 });
 
+test("a raw CDP session that enables Runtime learns the page's contexts", async () => {
+  // Playwright enabled Runtime on the tab first; a later session must still be told the contexts.
+  await opened("runtime");
+  const result = await run(
+    "runtime",
+    `const page = await context.newPage(); await page.goto("${origin}/");
+     const cdp = await getCDPSession({ page });
+     const contexts = [];
+     cdp.on("Runtime.executionContextCreated", ({ context }) => contexts.push(context.auxData?.isDefault));
+     await cdp.send("Runtime.enable");
+     const { result } = await cdp.send("Runtime.evaluate", { expression: "document.title" });
+     await page.evaluate(() => document.title);
+     await page.close();
+     return [contexts.includes(true), result.value].join(" ")`,
+    "--timeout",
+    "10000",
+  );
+  expect(result.body.output).toBe("true Fixture");
+  expect((await cli("session", "close", "runtime", "--close-tabs")).code).toBe(0);
+});
+
 test("screenshots are written inside the session area", async () => {
   const result = await run(
     "acceptance",
@@ -739,6 +763,47 @@ test("a timeout stops the run before its later action and resets state", async (
   await Bun.sleep(3500);
   expect(await page?.locator("#c").textContent()).toBe(before ?? "");
   expect((await run("acceptance", "state.value === undefined")).body.output).toBe("true");
+});
+
+test("a replacement executor sees its page and none of the old executor's interception", async () => {
+  await opened("replaced");
+  // The first executor opens a page, holds every later request of it unanswered, and then
+  // outlives its deadline.
+  const first = await run(
+    "replaced",
+    `state.page = await context.newPage(); await state.page.goto("${origin}/"); await state.page.route("**/*", () => {}); await new Promise((done) => setTimeout(done, 3000))`,
+    "--timeout",
+    "1500",
+  );
+  expect(first.body.error).toBe("timeout");
+  // Its replacement evaluates in the same tab and loads it again.
+  const replaced = await run(
+    "replaced",
+    "const page = context.pages()[0]; await page.reload(); return await page.evaluate(() => document.title)",
+    "--timeout",
+    "8000",
+  );
+  expect(replaced.body.output).toBe("Fixture");
+  expect((await cli("session", "close", "replaced", "--close-tabs")).code).toBe(0);
+});
+
+test("another extension's frame neither ends an agent tab nor reaches agents", async () => {
+  await opened("foreign");
+  // The fixture extension injects its own page as a frame half a second after load. Chrome then
+  // detaches the debugger from the whole tab; the tab is attached again, and its frame removed.
+  const result = await run(
+    "foreign",
+    `state.page = await context.newPage(); await state.page.goto("${origin}/foreign");
+     await state.page.waitForTimeout(2500);
+     return [context.pages().length, await state.page.evaluate(() => document.querySelectorAll("iframe").length), await state.page.title()].join(" ")`,
+    "--timeout",
+    "15000",
+  );
+  expect(result.body.output).toBe("1 0 Foreign host");
+  expect(
+    (await run("foreign", "await state.page.reload(); return state.page.url()")).body.output,
+  ).toBe(`${origin}/foreign`);
+  expect((await cli("session", "close", "foreign", "--close-tabs")).code).toBe(0);
 });
 
 test("a client that disconnects mid-run cancels it and frees the session", async () => {

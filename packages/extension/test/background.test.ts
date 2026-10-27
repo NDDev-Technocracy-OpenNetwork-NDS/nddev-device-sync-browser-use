@@ -5,7 +5,7 @@ import { expect, test } from "bun:test";
 type Message = Record<string, unknown>;
 type Listener = (...args: unknown[]) => unknown;
 type Tab = { id: number; groupId: number; windowId: number; url: string };
-type Session = { tabId: number };
+type Session = { tabId: number; sessionId?: string };
 
 class Event {
   readonly listeners: Listener[] = [];
@@ -34,6 +34,10 @@ class Browser {
   readonly actions: string[] = [];
   readonly notifications: { id: string; message: string }[] = [];
   readonly evaluated: string[] = [];
+  // Every command sent to Chrome, as "method tab" or "method tab/session".
+  readonly commands: string[] = [];
+  // Tabs whose frames the worker removed foreign iframes from.
+  readonly scripted: number[] = [];
   readonly menu = new Event();
   readonly posted: Message[] = [];
   readonly port = { onMessage: new Event(), onDisconnect: new Event() };
@@ -42,6 +46,7 @@ class Browser {
     tabsUpdated: new Event(),
     tabsRemoved: new Event(),
     detached: new Event(),
+    cdp: new Event(),
   };
   private next = 100;
 
@@ -136,19 +141,27 @@ class Browser {
           this.actions.push(`detach ${tabId}`);
         },
         sendCommand: async (
-          { tabId }: Session,
+          { tabId, sessionId }: Session,
           method: string,
           params?: { expression?: string },
         ) => {
           if (!this.sessions.has(tabId)) throw new Error("Debugger is not attached.");
+          this.commands.push(`${method} ${tabId}${sessionId ? `/${sessionId}` : ""}`);
+          if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
           if (method === "Runtime.evaluate" && params?.expression) {
             this.evaluated.push(params.expression);
             if (params.expression.includes("ndsPinnedElem")) return { result: { value: 1 } };
           }
           return method === "Target.getTargetInfo" ? { targetInfo: { targetId: `t${tabId}` } } : {};
         },
-        onEvent: event(),
+        onEvent: this.events.cdp,
         onDetach: this.events.detached,
+      },
+      scripting: {
+        executeScript: async ({ target }: { target: { tabId: number } }) => {
+          this.scripted.push(target.tabId);
+          return [];
+        },
       },
       webNavigation: { onCreatedNavigationTarget: event() },
       notifications: {
@@ -314,4 +327,93 @@ test("the owner pins an element only in an agent tab", async () => {
   expect(
     browser.evaluated.filter((expression) => expression.includes("ndsPinnedElem")),
   ).toHaveLength(1);
+});
+
+test("Runtime.enable makes Chrome report the page's execution contexts again", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  const runtime = () => browser.commands.filter((sent) => /^Runtime\.(en|dis)able/.test(sent));
+  await send({ type: "cdp", tab: 1, method: "Runtime.enable" })();
+  expect(runtime()).toEqual(["Runtime.disable 1", "Runtime.enable 1"]);
+  // A child session gets the same on that session.
+  await send({ type: "cdp", tab: 1, session: "frame", method: "Runtime.enable" })();
+  expect(runtime().slice(2)).toEqual(["Runtime.disable 1/frame", "Runtime.enable 1/frame"]);
+});
+
+test("another extension's frame is detached and never reaches the host", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  const before = browser.posted.length;
+  const foreign = { url: "chrome-extension://abcdefghijklmnop/menu.html" };
+  browser.events.cdp.fire({ tabId: 1 }, "Target.attachedToTarget", {
+    sessionId: "foreign",
+    targetInfo: foreign,
+  });
+  browser.events.cdp.fire({ tabId: 1, sessionId: "foreign" }, "Runtime.consoleAPICalled", {});
+  browser.events.cdp.fire({ tabId: 1 }, "Target.detachedFromTarget", { sessionId: "foreign" });
+  browser.events.cdp.fire({ tabId: 1 }, "Network.dataReceived", {});
+  browser.events.cdp.fire({ tabId: 1 }, "Target.attachedToTarget", {
+    sessionId: "frame",
+    targetInfo: { url: "https://example.test/frame" },
+  });
+  await until(() => browser.commands.includes("Target.detachFromTarget 1"));
+  const events = browser.posted.slice(before).filter((posted) => posted.type === "event");
+  expect(events.map((posted) => posted.method)).toEqual(["Target.attachedToTarget"]);
+  expect(events[0]?.params).toMatchObject({ sessionId: "frame" });
+});
+
+test("a tab Chrome detaches on its own is attached again with its setup", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  for (const method of ["Page.enable", "Network.enable", "Network.disable", "Runtime.enable"])
+    await send({ type: "cdp", tab: 1, method })();
+  browser.events.cdp.fire({ tabId: 1 }, "Target.attachedToTarget", {
+    sessionId: "frame",
+    targetInfo: { url: "https://example.test/frame" },
+  });
+  browser.commands.length = 0;
+  browser.scripted.length = 0;
+  const before = browser.posted.length;
+  browser.end(1);
+  await until(() => browser.sessions.has(1) && browser.commands.includes("Runtime.evaluate 1"));
+  const posted = browser.posted.slice(before);
+  expect(posted.some((message) => message.type === "detached")).toBe(false);
+  expect(posted.filter((message) => message.type === "event").map((event) => event.method)).toEqual(
+    ["Runtime.executionContextsCleared", "Target.detachedFromTarget"],
+  );
+  // The replay keeps Playwright's order and drops what it disabled.
+  expect(browser.commands.filter((sent) => sent.endsWith("able 1"))).toEqual([
+    "Page.enable 1",
+    "Runtime.enable 1",
+  ]);
+  expect(browser.scripted).toEqual([1]);
+  expect(await send({ type: "cdp", tab: 1, method: "Runtime.evaluate" })()).toMatchObject({
+    result: {},
+  });
+});
+
+test("a tab Chrome keeps detaching is given up after a few reattaches", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  const restored = () => browser.commands.filter((sent) => sent === "Runtime.evaluate 1").length;
+  for (let round = 1; round <= 5; round++) {
+    browser.end(1);
+    await until(() => browser.sessions.has(1) && restored() === round + 1);
+  }
+  browser.end(1);
+  expect(
+    await until(() => browser.posted.find((posted) => posted.type === "detached")),
+  ).toMatchObject({ tab: 1, reason: "target_closed" });
+  expect(await send({ type: "cdp", tab: 1, method: "Runtime.evaluate" })()).toMatchObject({
+    error: { code: "target_closed" },
+  });
+});
+
+test("foreign frames are removed only from tabs in the agent group", async () => {
+  const { browser, send } = await worker({ p: P, q: Q }, [
+    [1, P],
+    [2, Q],
+  ]);
+  await send({ type: "claim", group: "p" })();
+  expect(browser.scripted).toEqual([1]);
 });

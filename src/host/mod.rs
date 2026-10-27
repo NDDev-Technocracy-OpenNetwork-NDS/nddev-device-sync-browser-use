@@ -139,6 +139,8 @@ struct SessionLife {
     pending: watch::Sender<usize>,
     cdp_state: AtomicU8,
     cdp_pending: watch::Sender<usize>,
+    /// An executor of this life has started, so the next one to start is a replacement.
+    started: std::sync::atomic::AtomicBool,
 }
 
 impl SessionLife {
@@ -152,6 +154,7 @@ impl SessionLife {
             pending: watch::channel(0).0,
             cdp_state: AtomicU8::new(0),
             cdp_pending: watch::channel(0).0,
+            started: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -1323,9 +1326,77 @@ impl Host {
         }
         if let Ok(started) = executor::Executor::start(&self.config, &endpoint, &artifacts) {
             *executor = Some(started);
+            life.started.store(true, Ordering::Release);
         }
         tracing::info!(event.name = "browser.session.opened", outcome = "ok");
         Ok(view_session(&mut self.state(), project))
+    }
+
+    /// Gives a replacement executor fresh debugger sessions on the same tabs. The executor it
+    /// replaces may have left domains enabled, requests intercepted, breakpoints set or bindings
+    /// exposed, and Chrome reports a page's execution contexts only to a session that enables
+    /// Runtime anew; only a new chrome.debugger session clears all of that. The group's tabs stay
+    /// open and grouped: the extension detaches them and attaches them again.
+    async fn refresh(&self, project: &str, life: &Arc<SessionLife>) -> Result<(), Refusal> {
+        let started = Instant::now();
+        let refreshed = self.reattach_group(project, life).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match &refreshed {
+            Ok(()) => tracing::info!(
+                event.name = "browser.session.refreshed",
+                outcome = "ok",
+                duration_ms
+            ),
+            Err(refusal) => {
+                tracing::warn!(event.name = "browser.session.refreshed", outcome = "rejected", error.type = refusal.code(), duration_ms)
+            }
+        }
+        refreshed
+    }
+
+    async fn reattach_group(&self, project: &str, life: &Arc<SessionLife>) -> Result<(), Refusal> {
+        let released = self
+            .refusable_work(
+                json!({ "type": "release", "group": project, "close": false }),
+                Some(PendingWork::new(life.clone())),
+            )
+            .await?;
+        if released != json!({ "released": true }) {
+            return Err(Refusal::ExtensionUnavailable);
+        }
+        {
+            let mut state = self.state();
+            let tabs: Vec<i64> = state
+                .tabs
+                .iter()
+                .filter(|(_, tab)| tab.project == project)
+                .map(|(id, _)| *id)
+                .collect();
+            for tab in &tabs {
+                state.tabs.remove(tab);
+            }
+            state.children.retain(|_, tab| !tabs.contains(tab));
+            if let Some(session) = state
+                .sessions
+                .get_mut(project)
+                .filter(|s| Arc::ptr_eq(&s.life, life))
+            {
+                session.aliases.clear();
+            }
+        }
+        let claimed = self
+            .refusable_work(
+                json!({ "type": "claim", "group": project }),
+                Some(PendingWork::new(life.clone())),
+            )
+            .await?;
+        let mut state = self.state();
+        for entry in claimed["tabs"].as_array().into_iter().flatten() {
+            if let Some(tab) = entry["tab"].as_i64() {
+                self.register(&mut state, project, tab, entry["target"].clone());
+            }
+        }
+        Ok(())
     }
 
     async fn stop_executor(executor: &mut Option<executor::Executor>) -> Result<(), Refusal> {
@@ -1545,11 +1616,15 @@ impl Host {
             finished: false,
         };
         if executor.is_none() {
+            if life.started.load(Ordering::Acquire) {
+                self.refresh(project, life).await?;
+            }
             *executor = Some(executor::Executor::start(
                 &self.config,
                 &endpoint,
                 &artifacts,
             )?);
+            life.started.store(true, Ordering::Release);
         }
         let current = executor.as_mut().unwrap();
         let ready = tokio::select! {
