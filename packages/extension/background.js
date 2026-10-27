@@ -829,6 +829,10 @@ async function reattach(tab, attachment) {
         return { outcome: "restored" };
     }
     catch {
+        // The cleanup acts only for this attachment: once Chrome reported its session ended, or the
+        // tab belongs to another attachment, the session is not this worker's to detach.
+        if (attachment.ended || attached.get(tab) !== attachment)
+            return { outcome: "gone", error };
         const outcome = await chrome.debugger.detach({ tabId: tab }).then(() => "gone", () => "held");
         return { outcome, error };
     }

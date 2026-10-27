@@ -583,3 +583,25 @@ test("a reattach that loses its tab between the pin script's two commands sends 
   await Bun.sleep(10);
   expect(browser.commands).not.toContain("Runtime.evaluate 1");
 });
+
+test("a failed reattach never detaches the session another life took on its tab meanwhile", async () => {
+  const { browser, send } = await worker({ p: P, q: Q }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  await send({ type: "claim", group: "q" })();
+  const tree = deferred();
+  browser.heldCommands.set("Page.getFrameTree", tree);
+  browser.end(1);
+  await until(() => browser.commands.includes("Page.getFrameTree 1"));
+  // Chrome ends the new session too, and life q takes the tab.
+  browser.end(1);
+  browser.move(1, Q);
+  await until(() => browser.sessions.has(1));
+  const attempts = browser.detachAttempts.length;
+  tree.resolve();
+  await Bun.sleep(20);
+  expect(browser.detachAttempts.length).toBe(attempts);
+  expect(browser.sessions.has(1)).toBe(true);
+  expect(await send({ type: "cdp", tab: 1, method: "Runtime.evaluate" })()).toMatchObject({
+    result: {},
+  });
+});
