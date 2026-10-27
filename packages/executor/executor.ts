@@ -7,10 +7,20 @@ import vm from "node:vm";
 import { chromium, type Page } from "playwright-core";
 import { checks, owner } from "./agent/checks";
 import { getCleanHTML, getPageMarkdown } from "./agent/content";
+import {
+  createDebugger,
+  createEditor,
+  formatStylesAsText,
+  getCDPSession,
+  getReactComponentInfo,
+  getReactSource,
+  getStylesForLocator,
+} from "./agent/devtools";
 import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
 import { getLocatorStringForElement } from "./agent/locators";
 import { getLatestLogs, notified, attach as watchLogs } from "./agent/logs";
+import { createDemoVideo, executing, ghostCursor, recording } from "./agent/recording";
 import { resizeImageForAgent, screenshotWithAccessibilityLabels } from "./agent/screens";
 import { ref, refToLocator, snapshot, attach as watchSnapshots } from "./agent/snapshot";
 
@@ -77,6 +87,16 @@ const sandbox = vm.createContext({
     screenshotWithAccessibilityLabels(options, artifacts),
   resizeImageForAgent,
   resizeImage: resizeImageForAgent,
+  recording,
+  ghostCursor,
+  createDemoVideo,
+  getCDPSession,
+  createDebugger,
+  createEditor,
+  getStylesForLocator,
+  formatStylesAsText,
+  getReactComponentInfo,
+  getReactSource,
   checks,
   notifyOwner: (page: Page, reason: string) => owner(page, "NDS.notifyOwner", { reason }),
   clearOwner: (page: Page) => owner(page, "NDS.clearOwner", {}),
@@ -116,6 +136,7 @@ function bounded(text: string): { output: string; truncated: boolean } {
 
 async function run(request: Request): Promise<void> {
   logs = [];
+  executing(true);
   try {
     const value = await compile(request.code).runInContext(sandbox);
     const result = value === undefined ? [] : [render(value)];
@@ -129,6 +150,8 @@ async function run(request: Request): Promise<void> {
       error: classify(error),
       ...bounded([...logs, detail, ...notified()].join("\n")),
     });
+  } finally {
+    executing(false);
   }
 }
 

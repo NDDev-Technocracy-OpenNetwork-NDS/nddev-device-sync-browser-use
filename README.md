@@ -57,6 +57,18 @@ refuse running against a replaced document.
   ffmpeg, which must be on PATH.
 - `getLocatorStringForElement(locator)` returns a stable locator string for a
   script: a test id, a unique role and name, an id, or a tag path.
+- `recording.start({ page, outputPath })` records a tab as video through
+  ffmpeg, across navigations, with a ghost cursor that follows agent mouse
+  actions; `recording.stop({ page })` returns the file, its duration and the
+  execution times, which `createDemoVideo(...)` uses to speed up the waits
+  between executions. A cut that outlasts one execution is kept in `state` and
+  awaited in a later one. `ghostCursor.show/hide({ page })` controls the cursor.
+- `getCDPSession({ page })`, `createDebugger({ cdp })` (breakpoints, stepping,
+  local variables, evaluation in a paused frame), `createEditor({ cdp, page })`
+  (search scripts and style sheets, edit style sheets live, override a script
+  on its next load, since Chrome no longer edits a running script),
+  `getStylesForLocator({ locator, cdp })` with `formatStylesAsText(...)`, and
+  `getReactComponentInfo`/`getReactSource({ locator })` for React builds.
 
 A result also carries `[PAGE ERROR]` lines for uncaught errors and
 `[WARNING] New page opened` lines for new tabs of the pages an agent keeps in

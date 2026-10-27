@@ -170,6 +170,18 @@ beforeAll(async () => {
         "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
         "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
         "/article": `<title>Fixture article</title><style>p { color: black }</style><script>window.unused = 1</script><nav><a href="/">Home</a></nav><article><h1>Fixture heading</h1><p>First. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><p>Second. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><ul><li>One point</li><li>Two points</li></ul><button id="go">Go</button></article>`,
+        "/devtools": [
+          "<title>Devtools</title><style>.card { color: rgb(1, 2, 3); padding: 4px }</style>",
+          '<div class="card" id="card">Card</div>',
+          "<script>",
+          "function compute(x) {",
+          "  const doubled = x * 2;",
+          "  return doubled;",
+          "}",
+          "function answer() { return 1; }",
+          "window.compute = compute; window.answer = answer;",
+          "</script>",
+        ].join("\n"),
         "/helpers": `<title>Helpers</title><script>console.log("loaded helpers")</script><main><button id="save" onclick="this.textContent = 'Saved'">Save</button><button id="fail" onclick="setTimeout(() => { throw new Error('boom') })">Fail</button><a id="pop" href="/linked" target="_blank">Pop</a><div id="box" style="overflow-y: auto; height: 50px"><p style="height: 200px">tall</p></div><input id="name" value="x" aria-label="Name"></main>`,
         // A Turnstile widget with its response field, and reCAPTCHA's invisible badge, which is no
         // check a person passes; the test routes both vendors' frames.
@@ -483,6 +495,121 @@ async function content(): Promise<void> {
   }
   expect(seen.go).toBe('getByRole("button", { name: "Go", exact: true })');
 }
+
+// Recordings: screencast frames to video through ffmpeg with a ghost cursor, and a demo cut that
+// speeds up the time between executions. Skipped without ffmpeg.
+test.skipIf(Bun.which("ffmpeg") === null)(
+  "recordings capture agent work as video and a demo cut",
+  async () => {
+    await opened("recording");
+    try {
+      await recorded();
+    } finally {
+      await cli("session", "close", "recording", "--close-tabs");
+    }
+  },
+  60_000,
+);
+
+async function recorded(): Promise<void> {
+  const started = await run(
+    "recording",
+    `const page = await context.newPage(); state.page = page; await page.goto("${origin}/");
+     state.path = artifacts + "/work.mp4";
+     await recording.start({ page, outputPath: state.path });
+     await page.mouse.move(120, 80); await page.click("#inc"); await page.waitForTimeout(1200);
+     return recording.isRecording({ page })`,
+  );
+  expect(started.body.output).toBe("true");
+  expect(await (await observed("/"))?.locator("#nds-ghost-cursor").count()).toBe(1);
+  const stopped = await run(
+    "recording",
+    `await state.page.click("#inc"); await state.page.waitForTimeout(600);
+     state.result = await recording.stop({ page: state.page });
+     return JSON.stringify(state.result)`,
+  );
+  const result = JSON.parse(String(stopped.body.output)) as {
+    path: string;
+    duration: number;
+    size: number;
+    executionTimestamps: { start: number; end: number }[];
+  };
+  expect(result.size).toBeGreaterThan(0);
+  expect(result.executionTimestamps.length).toBeGreaterThanOrEqual(1);
+  const seconds = (path: string) =>
+    Number(
+      Bun.spawnSync([
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "csv=p=0",
+        path,
+      ]).stdout.toString(),
+    );
+  expect(seconds(result.path)).toBeGreaterThan(1);
+  // The cut can outlast one execution, so it is kept in state and awaited.
+  await run(
+    "recording",
+    `state.demo = createDemoVideo({ recordingPath: state.result.path, durationMs: state.result.duration, executionTimestamps: state.result.executionTimestamps, speed: 8 }); return 1`,
+  );
+  const demo = String(
+    (await run("recording", "await state.demo", "--timeout", "20000")).body.output,
+  );
+  expect(existsSync(demo)).toBe(true);
+  expect(seconds(demo)).toBeLessThan(seconds(result.path));
+}
+
+// DevTools helpers over raw CDP: matched CSS rules, a live script edit, and a breakpoint with its
+// local variables and an expression evaluated in the paused frame.
+test("devtools helpers style, edit and debug an agent page", async () => {
+  await opened("devtools");
+  try {
+    const result = await run(
+      "devtools",
+      `const page = await context.newPage(); await page.goto("${origin}/devtools");
+       const cdp = await getCDPSession({ page });
+       const styles = formatStylesAsText(await getStylesForLocator({ locator: page.locator("#card"), cdp }));
+       const editor = createEditor({ cdp, page }); await editor.enable();
+       const [rule] = await editor.grep({ regex: /color: rgb\\(1, 2, 3\\)/ });
+       await editor.edit({ url: rule.url, oldString: "rgb(1, 2, 3)", newString: "rgb(9, 9, 9)" });
+       const restyled = await page.evaluate(() => getComputedStyle(document.getElementById("card")).color);
+       const [hit] = await editor.grep({ regex: /return 1;/ });
+       const refused = await editor.edit({ url: hit.url, oldString: "return 1;", newString: "return 2;" }).then(() => "", (error) => error.message);
+       await editor.override({ url: page.url(), oldString: "return 1;", newString: "return 2;" });
+       await page.reload();
+       const edited = await page.evaluate(() => answer());
+       const dbg = createDebugger({ cdp: await getCDPSession({ page }) }); await dbg.enable();
+       await dbg.setBreakpoint({ file: page.url(), line: 5 });
+       const pending = page.evaluate(() => compute(21));
+       for (let i = 0; i < 50 && !dbg.isPaused(); i++) await new Promise((done) => setTimeout(done, 50));
+       const location = dbg.getLocation();
+       const locals = await dbg.inspectLocalVariables();
+       const tripled = await dbg.evaluate({ expression: "x * 3" });
+       await dbg.resume();
+       const computed = await pending;
+       const react = await getReactComponentInfo({ locator: page.locator("#card") });
+       return JSON.stringify({ styles, restyled, refused, edited, location, locals, tripled, computed, react })`,
+      "--timeout",
+      "20000",
+    );
+    const seen = JSON.parse(String(result.body.output)) as Record<string, unknown>;
+    expect(seen.styles).toContain(".card");
+    expect(seen.styles).toContain("color: rgb(1, 2, 3)");
+    expect(seen.restyled).toBe("rgb(9, 9, 9)");
+    expect(seen.refused).toContain("override()");
+    expect(seen.edited).toBe(2);
+    expect(seen.location).toMatchObject({ functionName: "compute", line: 5 });
+    expect(seen.locals).toMatchObject({ x: "21" });
+    expect(seen.tripled).toBe(63);
+    expect(seen.computed).toBe(42);
+    expect(seen.react).toBeNull();
+  } finally {
+    await cli("session", "close", "devtools", "--close-tabs");
+  }
+});
 
 // Chrome serves WebAuthn only to a focused page: a background agent tab is
 // refused, and the agent must bring its tab to the front for a passkey step.
