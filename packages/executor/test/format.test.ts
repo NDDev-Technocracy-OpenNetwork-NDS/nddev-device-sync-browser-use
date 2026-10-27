@@ -4,9 +4,11 @@ import {
   bounded,
   compose,
   describeError,
+  errorParts,
   OUTPUT_LIMIT,
   render,
   shortUrl,
+  shown,
   tag,
   waitBudget,
 } from "../agent/format.js";
@@ -266,6 +268,79 @@ test("subclasses of built-ins never construct what inspect walks", () => {
     "[ [detached], [detached], [URL] ]",
   );
   expect(render(Array.from({ length: 150 }, (_, index) => index))).toContain("... 50 more items");
+});
+
+test("reading a value for its text runs none of the agent's code", () => {
+  let runs = 0;
+  // Every trap counts and throws, as hostile code would.
+  const trapping = (target: object) =>
+    new Proxy(target, {
+      has() {
+        runs += 1;
+        throw new Error("has trap");
+      },
+      get() {
+        runs += 1;
+        throw new Error("get trap");
+      },
+      getPrototypeOf() {
+        runs += 1;
+        throw new Error("getPrototypeOf trap");
+      },
+      getOwnPropertyDescriptor() {
+        runs += 1;
+        throw new Error("getOwnPropertyDescriptor trap");
+      },
+      ownKeys() {
+        runs += 1;
+        throw new Error("ownKeys trap");
+      },
+      apply() {
+        runs += 1;
+        throw new Error("apply trap");
+      },
+    });
+  const root = trapping({});
+  expect(compose({ notices: [], console: [], value: root })).toBe("[return value] [Proxy]");
+  expect(compose({ notices: [], console: [{ method: "log", values: [root] }] })).toBe(
+    "Console output:\n[log] [Proxy]",
+  );
+  expect(shown(root)).toBe(true);
+  expect(tag(root)).toBeUndefined();
+  expect(render(root)).toBe("[Proxy]");
+  expect(describeError(root)).toBe("[Proxy]");
+  expect(errorParts(root)).toBeUndefined();
+  expect(render(trapping(() => 1))).toBe("[Proxy]");
+  // A proxy prototype ends every walk up the chain before it.
+  const inheriting = Object.create(trapping(Object.create(null)));
+  expect(render(inheriting)).toBe("Object {}");
+  expect(tag(inheriting)).toBeUndefined();
+  expect(describeError(inheriting)).toBe("Object {}");
+  const error = Object.setPrototypeOf(new Error("boom"), trapping(Object.create(null)));
+  expect(describeError(error)).toBe("boom");
+  // A Playwright object's method that is itself a proxy is not called.
+  expect(tag({ _type: "Page", _guid: "page@1", url: trapping(() => "x") })).toBe("<Page>");
+  expect(runs).toBe(0);
+  // Accessors are never markers, names or messages, and are never called.
+  let reads = 0;
+  const read = () => {
+    reads += 1;
+    return "Page";
+  };
+  const marker = Object.create(null);
+  Object.defineProperty(marker, "_type", { enumerable: true, get: read });
+  Object.defineProperty(marker, "_guid", { enumerable: true, value: "page@1" });
+  expect(tag(marker)).toBeUndefined();
+  expect(render(marker)).toBe("{ _type: [Getter], _guid: 'page@1' }");
+  const located = { _selector: "#a", _frame: {} };
+  Object.defineProperty(located, "toString", { get: read });
+  expect(tag(located)).toBe("<Locator #a>");
+  const failed = new Error("kept");
+  Object.defineProperty(failed, "message", { get: read });
+  Object.defineProperty(failed, "name", { get: read });
+  expect(describeError(failed)).toBe("");
+  expect(errorParts(failed)).toEqual({ name: "Error", message: "" });
+  expect(reads).toBe(0);
 });
 
 test("Playwright waits always end inside the execution's remaining budget", () => {
