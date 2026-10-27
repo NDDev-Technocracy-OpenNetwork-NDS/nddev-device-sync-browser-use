@@ -384,6 +384,15 @@ test("network interception and cross-origin frames work in agent tabs", async ()
     ?.frames()
     .find((candidate) => candidate.url().endsWith("/inner"));
   expect(await frame?.locator("#inner").textContent()).toBe("inside");
+  // A frame's snapshot works whether the frame shares the page's process or not.
+  const snapped = await run(
+    "acceptance",
+    `const page = context.pages().find((candidate) => candidate.url().endsWith("/frame")); const frame = page.frames().find((candidate) => candidate.url().endsWith("/inner")); return await snapshot({ frame })`,
+    "--timeout",
+    "15000",
+  );
+  expect(snapped.body.value).toContain("inside");
+  expect(snapped.body.value).not.toContain("[cursor=pointer]");
 });
 
 // Only a person passes a bot check: agent code finds it, hands it to the owner through a Chrome
@@ -431,15 +440,16 @@ async function helpers(): Promise<void> {
      const first = await snapshot({ page });
      const again = await snapshot({ page });
      const found = await snapshot({ page, search: /button/ });
-     const save = first.match(/button "Save" \\[ref=(e\\d+)\\]/)[1];
-     await page.locator(refToLocator({ ref: save })).click();
+     const save = first.match(/- button "Save" (\\[id="save"\\])/)[1];
+     const ref = refToLocator({ ref: "e1", page });
+     await page.locator(save).click();
      const changed = await snapshot({ page });
      const logs = getLatestLogs({ page, sinceLastCall: true });
      const none = getLatestLogs({ page, sinceLastCall: true });
      const box = await inspect({ locator: page.locator("#box") });
      const input = await inspect({ locator: page.locator("#name") });
      await page.click("#fail"); await page.click("#pop"); await page.waitForTimeout(500);
-     return JSON.stringify({ loaded: loaded.success, first, again, found, changed, logs, none, box, input })`,
+     return JSON.stringify({ loaded: loaded.success, first, again, found, changed, logs, none, box, input, save, ref })`,
     "--timeout",
     "20000",
   );
@@ -448,8 +458,10 @@ async function helpers(): Promise<void> {
   expect(seen.loaded).toBe(true);
   expect(seen.first).toStartWith(`URL: ${origin}/helpers\n\n`);
   expect(seen.again).toBe(`URL: ${origin}/helpers\n\nNo changes since last call`);
-  expect(seen.found).toContain('button "Save"');
-  expect(seen.found).not.toContain("link");
+  // Interactive lines carry a Playwright locator; short refs name the same elements.
+  expect(seen.found).toContain('button "Save" [id="save"]');
+  expect(seen.save).toBe('[id="save"]');
+  expect(seen.ref).toBe('[id="save"]');
   expect(seen.changed).toContain("+ ");
   expect(seen.changed).toContain('"Saved"');
   expect(seen.logs).toContain("[log] loaded helpers");
