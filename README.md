@@ -10,11 +10,14 @@ on a private Unix socket and runs each session's Playwright code in a Bun
 executor (`packages/executor`) connected to a session-scoped CDP endpoint. There is
 no TCP listener, debugging port, tunnel or vendor telemetry.
 
-Agent CLI: `nds-browser-use session new <project>`, then
+Agent CLI: `nds-browser-use skill` prints the [agent guide](docs/agent-guide.md),
+which an agent reads once per task. `nds-browser-use session new <project>`, then
 `nds-browser-use -s <project> -e '<playwright code>'`; `status`,
 `session list` and `session close` complete the surface. An agent closes its
 session when its task is done; that closes the session's tabs too, unless
-`--keep-tabs` leaves them for the owner. A session's executor
+`--keep-tabs` leaves them for the owner. A session that runs nothing for 30
+minutes closes by itself with its tabs; owned sessions stay with the NDS
+component that composes them. A session's executor
 starts with the session, and `session list` reports `executor: true` once it is
 ready; an execution that times out while the executor is still starting
 leaves the start running for the next one. `install` registers
@@ -59,6 +62,34 @@ refuse running against a replaced document.
   ffmpeg, which must be on PATH.
 - `getLocatorStringForElement(locator)` returns a stable locator string for a
   script: a test id, a unique role and name, an id, or a tag path.
+- `recording.start({ page, outputPath })` records a tab as video through
+  ffmpeg, across navigations, with a ghost cursor that follows agent mouse
+  actions; `recording.stop({ page })` returns the file, its duration and the
+  execution times, which `createDemoVideo(...)` uses to speed up the waits
+  between executions. A cut that outlasts one execution is kept in `state` and
+  awaited in a later one. `ghostCursor.show/hide({ page })` controls the cursor.
+- `getCDPSession({ page })`, `createDebugger({ cdp })` (breakpoints, stepping,
+  local variables, evaluation in a paused frame), `createEditor({ cdp, page })`
+  (search scripts and style sheets, edit style sheets live, override a script
+  on its next load, since Chrome no longer edits a running script),
+  `getStylesForLocator({ locator, cdp })` with `formatStylesAsText(...)`, and
+  `getReactComponentInfo`/`getReactSource({ locator })` for React builds.
+- `recorder.start()` records what a person does in the session's tabs, for
+  turning a workflow into a skill: clicks, fills, choices, key presses and
+  submissions with locators, navigations, API and failed requests without
+  their bodies, console and page errors, dialogs, toasts, and a frame of each
+  visual change, at most two a second, for 20 minutes or 500 MB. Password and
+  payment values are recorded as `[redacted]`. `recorder.stop()` ends it,
+  `recorder.events({ type, errors, full, ids })` prints its timeline, and
+  `recorder.frame({ eventId, offset })` names the frame closest to an event.
+  Recordings live in `artifacts`, removed with the session, unless
+  `recorder.start({ outputDir })` names another directory.
+- `require` and `import()` load Node.js built-ins, packages and local modules;
+  relative paths resolve in `artifacts`, the executor's working directory.
+- `pinnedElements({ page })` lists the elements the owner pinned in an agent
+  tab with right-click, "Pin this element for the NDS agent": each is
+  `globalThis.ndsPinnedElemN` in the page and `[data-nds-pin="N"]` for a
+  locator. Tabs outside the agent groups cannot be pinned.
 
 A result also carries `[PAGE ERROR]` lines for uncaught errors and
 `[WARNING] New page opened` lines for new tabs of the pages an agent keeps in

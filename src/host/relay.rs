@@ -617,6 +617,7 @@ mod tests {
                 opened: true,
                 closing: false,
                 running: false,
+                used: Instant::now(),
                 aliases,
             },
         );

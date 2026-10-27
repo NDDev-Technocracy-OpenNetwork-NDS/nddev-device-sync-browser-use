@@ -36,6 +36,9 @@ const TO_EXTENSION_LIMIT: usize = 1_048_576;
 /// Chrome sends at most 64 MiB; large CDP results (screenshots) stay well below this.
 const FROM_EXTENSION_LIMIT: usize = 32 * 1_048_576;
 const EXTENSION_REPLY: Duration = Duration::from_secs(30);
+/// A CLI session that runs nothing for this long closes with its tabs, so the tabs of agents that
+/// forgot to close their session do not pile up in the owner's browser.
+const IDLE_CLOSE: Duration = Duration::from_secs(30 * 60);
 const CONTROL_CONNECTIONS: usize = 16;
 const CONTROL_IO: Duration = Duration::from_secs(5);
 const URL_LIMIT: usize = 2048;
@@ -111,6 +114,8 @@ struct Session {
     opened: bool,
     closing: bool,
     running: bool,
+    /// When the session was reserved or last started or finished an execution.
+    used: Instant,
     /// Raw CDP sessions the current client opened (`newCDPSession`); they end
     /// with the client, the session or their tab.
     aliases: HashMap<String, relay::Alias>,
@@ -669,6 +674,30 @@ impl Host {
             self.expire_pending(Instant::now());
             // Reuse this owned host task for switch/overflow cleanup. No detached cleanup.
             self.drain_closing().await;
+            self.close_idle(Instant::now()).await;
+        }
+    }
+
+    /// Closes, with their tabs, the opened CLI sessions that ran nothing for `IDLE_CLOSE`. Owned
+    /// sessions belong to the NDS component that composes them, which closes them itself.
+    async fn close_idle(&self, now: Instant) {
+        let idle: Vec<(String, Arc<SessionLife>)> = self
+            .state()
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                !session.owned
+                    && session.opened
+                    && !session.closing
+                    && !session.running
+                    && now.duration_since(session.used) >= IDLE_CLOSE
+            })
+            .map(|(project, session)| (project.clone(), session.life.clone()))
+            .collect();
+        for (project, life) in idle {
+            let closed = self.close_generation(&project, &life, true, true).await;
+            let outcome = if closed.is_ok() { "stopped" } else { "error" };
+            tracing::info!(event.name = "browser.session.idle", outcome);
         }
     }
 
@@ -974,7 +1003,7 @@ impl Host {
         };
         let mut probe = [0u8; 1];
         let reply = if let Some((project, generation, code, timeout_ms, expect)) = execution {
-            match self.session_life(&project, generation.as_deref()) {
+            match self.execution_life(&project, generation.as_deref()) {
                 Err(refusal) => Reply::Refused { refusal },
                 Ok(life) => {
                     let completed = {
@@ -1119,6 +1148,18 @@ impl Host {
         result.unwrap_or_else(|refusal| Reply::Refused { refusal })
     }
 
+    /// The session an execution runs in. The owner's switch and the extension come first: once
+    /// control is off, the sweep may already have drained the session, and the agent learns why
+    /// rather than that the session is gone.
+    fn execution_life(
+        &self,
+        project: &str,
+        generation: Option<&str>,
+    ) -> Result<Arc<SessionLife>, Refusal> {
+        Self::ready(&self.state())?;
+        self.session_life(project, generation)
+    }
+
     fn ready(state: &State) -> Result<(), Refusal> {
         if !state.connected {
             return Err(Refusal::ExtensionUnavailable);
@@ -1170,6 +1211,7 @@ impl Host {
                 opened: false,
                 closing: false,
                 running: false,
+                used: Instant::now(),
                 aliases: HashMap::new(),
             },
         );
@@ -1490,6 +1532,7 @@ impl Host {
                 return Err(Refusal::Busy);
             }
             session.running = true;
+            session.used = Instant::now();
             (
                 runtime::socket_url(&self.cdp_socket, &format!("/session/{}", session.token)),
                 session.artifacts.clone(),
@@ -1617,6 +1660,7 @@ impl Drop for Running<'_> {
             .filter(|s| Arc::ptr_eq(&s.life, self.life))
         {
             session.running = false;
+            session.used = Instant::now();
             if !self.finished {
                 session.closing = true;
             }
