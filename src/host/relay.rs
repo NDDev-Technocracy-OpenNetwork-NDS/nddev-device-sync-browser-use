@@ -253,7 +253,7 @@ impl Host {
     /// Attaches the executor connection to the session that owns `token`.
     fn bind(&self, token: &str, client: Client) -> Option<String> {
         let mut state = self.state();
-        if !state.enabled {
+        if Host::ready(&state).is_err() {
             return None;
         }
         let (project, session) = state
