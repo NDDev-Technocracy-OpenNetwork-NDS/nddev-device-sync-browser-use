@@ -68,9 +68,9 @@ function listen(): void {
     const labelled = target as HTMLInputElement;
     const name = (
       target.getAttribute("aria-label") ||
-      labelled.labels?.[0]?.innerText ||
+      labelled.labels?.[0]?.textContent ||
       (target instanceof HTMLInputElement ? target.placeholder : "") ||
-      (target as HTMLElement).innerText ||
+      target.textContent ||
       ""
     )
       .replace(/\s+/g, " ")
@@ -88,7 +88,10 @@ function listen(): void {
     "click",
     (event) => {
       const target = control(event.target);
-      const text = target instanceof HTMLElement ? target.innerText.trim().slice(0, 80) : "";
+      const text =
+        target instanceof Element
+          ? (target.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 80)
+          : "";
       send({ type: "action", action: "click", locator: locate(target), text });
     },
     true,
@@ -148,7 +151,7 @@ function listen(): void {
         '[role="alert"],[role="status"],[aria-live]:not([aria-live="off"])',
       );
       if (!(region instanceof HTMLElement)) continue;
-      const text = region.innerText.trim().slice(0, 200);
+      const text = (region.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
       if (text && said.get(region) !== text) {
         said.set(region, text);
         send({ type: "toast", text });
