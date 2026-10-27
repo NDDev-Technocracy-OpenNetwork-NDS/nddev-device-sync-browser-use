@@ -324,6 +324,70 @@ async fn close_during_execute_reaps_actual_owned_child_before_release_and_ack() 
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+async fn shutdown_attempts_later_reaps_after_the_first_artifact_failure() {
+    let (host, _queue, root) = fixture();
+    host.create_owned("one").unwrap();
+    host.create_owned("two").unwrap();
+    // Select the actual captured iteration order, never assume HashMap key order.
+    // No keys are inserted/removed before shutdown takes that same snapshot.
+    let captured: Vec<(String, Arc<SessionLife>)> = host
+        .state()
+        .sessions
+        .iter()
+        .map(|(project, session)| (project.clone(), session.life.clone()))
+        .collect();
+    assert_eq!(captured.len(), 2);
+    let first = captured[0].0.clone();
+    let later = captured[1].0.clone();
+    let first_artifact = {
+        let mut state = host.state();
+        let session = state.sessions.get_mut(&first).unwrap();
+        session.opened = true;
+        session.artifacts.clone()
+    };
+    let owned_bytes = b"inert owned regular file at the expected artifact directory";
+    std::fs::write(&first_artifact, owned_bytes).unwrap();
+    {
+        let mut state = host.state();
+        let session = state.sessions.get_mut(&later).unwrap();
+        runtime::private_directory(&session.artifacts).unwrap();
+        session.opened = true;
+    }
+    let foreign = root.path().join("foreign-sentinel");
+    std::fs::write(&foreign, b"preserve unrelated synthetic bytes").unwrap();
+    let (child, pid) = executor::owned_test_child().await;
+    *captured[1].1.executor.lock().await = Some(child);
+    assert!(PathBuf::from(format!("/proc/{pid}")).exists());
+    assert_eq!(
+        host.state().sessions.keys().cloned().collect::<Vec<_>>(),
+        captured
+            .iter()
+            .map(|(project, _)| project.clone())
+            .collect::<Vec<_>>()
+    );
+
+    assert!(matches!(
+        host.shutdown().await,
+        Err(Refusal::ExecutorUnavailable)
+    ));
+    assert!(
+        !PathBuf::from(format!("/proc/{pid}")).exists(),
+        "later executor was skipped instead of reaped"
+    );
+    let state = host.state();
+    assert!(!state.sessions.contains_key(&later));
+    assert!(state.sessions[&first].closing);
+    assert!(Arc::ptr_eq(&state.sessions[&first].life, &captured[0].1));
+    assert_eq!(std::fs::read(first_artifact).unwrap(), owned_bytes);
+    assert!(host.config.runtime.join("sessions").is_dir());
+    assert_eq!(
+        std::fs::read(foreign).unwrap(),
+        b"preserve unrelated synthetic bytes"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
 async fn shutdown_drains_actual_running_executor_without_a_detached_cleanup_task() {
     let (host, _queue, _root, _handle, pid, task) = executing_fixture().await;
     host.shutdown().await.unwrap();

@@ -736,8 +736,16 @@ impl Host {
             .iter()
             .map(|(project, session)| (project.clone(), session.life.clone()))
             .collect();
+        let mut failure = None;
         for (project, life) in sessions {
-            self.close_generation(&project, &life, false, false).await?;
+            if let Err(error) = self.close_generation(&project, &life, false, false).await {
+                failure.get_or_insert(error);
+            }
+        }
+        if let Some(error) = failure {
+            // Failed generations remain closed and owned. Do not remove their
+            // shared artifact root, but still attempt every captured lifetime.
+            return Err(error);
         }
         let _ = runtime::control_socket(&self.config.runtime).map(std::fs::remove_file);
         let _ = std::fs::remove_file(&self.cdp_socket);
