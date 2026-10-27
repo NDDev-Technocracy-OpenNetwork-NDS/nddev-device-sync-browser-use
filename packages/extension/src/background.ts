@@ -35,7 +35,10 @@ type Life = { group: string; open: boolean; close: boolean; work: Set<Promise<un
 type Attachment = {
   life: Life;
   ended: boolean;
+  // The tab left its agent group; no agent command or release closes it from then on.
   revoked: boolean;
+  // Attached, but not yet confirmed in its group; agents cannot use it until it is.
+  pending: boolean;
   ending?: Promise<void> | undefined;
 };
 
@@ -43,8 +46,10 @@ type Attachment = {
 const lives = new Map<string, Life>();
 // Attached agent tab -> its attachment.
 const attached = new Map<number, Attachment>();
-// One attach attempt per tab, shared by concurrent callers.
-const attaching = new Map<number, Promise<unknown>>();
+// One attach attempt per tab, bound to the life it attaches for; a tab moved out of that life's
+// group meanwhile is marked, because no attachment exists yet that a revoke could mark.
+type Attaching = { life: Life; moved: boolean; done: Promise<unknown> };
+const attaching = new Map<number, Attaching>();
 // Tabs this worker is grouping itself; their announcement belongs to that path,
 // not to the owner-sharing handler.
 const grouping = new Set<number>();
@@ -123,7 +128,9 @@ async function handle(message: HostRequest): Promise<void> {
 // The attachment through which an agent may still act on a tab.
 function usable(tab: number): Attachment | undefined {
   const attachment = attached.get(tab);
-  return attachment && !attachment.revoked && attachment.life.open ? attachment : undefined;
+  return attachment && !attachment.revoked && !attachment.pending && attachment.life.open
+    ? attachment
+    : undefined;
 }
 
 // Counts work for a life until it settles. Callers check that the life is open in the same
@@ -197,7 +204,12 @@ async function dispatch(message: HostRequest): Promise<unknown> {
       const result = [];
       for (const tab of tabs) {
         if (tab.id === undefined) continue;
-        result.push({ tab: tab.id, target: await attach(tab.id, life) });
+        // A tab that closed or left the group during the claim is not part of it.
+        const target = await attach(tab.id, life).catch((error) => {
+          if (life.open && error instanceof Refusal && error.message === "target_closed") return;
+          throw error;
+        });
+        if (target !== undefined) result.push({ tab: tab.id, target });
       }
       return { tabs: result };
     }
@@ -299,27 +311,43 @@ async function opened(life: Life, url: string): Promise<unknown> {
 function attach(tab: number, life: Life): Promise<unknown> {
   if (!life.open) return Promise.reject(new Refusal("target_closed"));
   const current = attaching.get(tab);
-  if (current) return current;
-  const next = admitted(
+  if (current) return current.life === life ? current.done : Promise.reject(new Refusal("busy"));
+  const attempt: Attaching = { life, moved: false, done: Promise.resolve() };
+  attempt.done = admitted(
     life,
     (async () => {
-      const attachment = attached.get(tab);
+      let attachment = attached.get(tab);
       // A tab another life still holds stays with that life until its release ends it.
       if (attachment && attachment.life !== life) throw new Refusal("busy");
       if (!attachment) {
         await chrome.debugger.attach({ tabId: tab }, PROTOCOL);
-        // Recorded even when the life closed meanwhile: its release waits for this work and then
-        // detaches the tab.
-        attached.set(tab, { life, ended: false, revoked: false });
+        // The session exists from here on, so it is recorded before anything else is awaited:
+        // Chrome's report of its end then finds it, and a release of this life waits for this
+        // work and detaches it.
+        attachment = { life, ended: false, revoked: attempt.moved, pending: true };
+        attached.set(tab, attachment);
+        const now = await chrome.tabs.get(tab).catch(() => undefined);
+        if (attachment.ended) throw new Refusal("target_closed");
+        if (attempt.moved || !now || groupKey(now.groupId) !== life.group) {
+          // The owner moved the tab during the attach: it was never usable, and the session ends.
+          attachment.revoked = true;
+          void relinquish(tab, attachment, false).catch(() => undefined);
+          throw new Refusal("target_closed");
+        }
+        attachment.pending = false;
+      } else if (attachment.revoked || attachment.pending) {
+        throw new Refusal("target_closed");
       }
       const info = (await chrome.debugger.sendCommand({ tabId: tab }, "Target.getTargetInfo")) as {
         targetInfo: unknown;
       };
       return info.targetInfo;
     })(),
-  ).finally(() => attaching.delete(tab));
-  attaching.set(tab, next);
-  return next;
+  ).finally(() => {
+    if (attaching.get(tab) === attempt) attaching.delete(tab);
+  });
+  attaching.set(tab, attempt);
+  return attempt.done;
 }
 
 // Ends this worker's control of one attachment by closing its tab or detaching from it. Only a
@@ -549,7 +577,10 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => {
 
 // Moving a tab into an agent group shares it; moving it out revokes control.
 chrome.tabs.onUpdated.addListener((tabId, change) => {
-  if (change.groupId === undefined || grouping.has(tabId)) return;
+  if (change.groupId === undefined) return;
+  const pending = attaching.get(tabId);
+  if (pending && pending.life.group !== groupKey(change.groupId)) pending.moved = true;
+  if (grouping.has(tabId)) return;
   const attachment = attached.get(tabId);
   if (attachment && attachment.life.group !== groupKey(change.groupId)) {
     // Out of its agent group, whether the owner took it back or Chrome is closing it: from now on

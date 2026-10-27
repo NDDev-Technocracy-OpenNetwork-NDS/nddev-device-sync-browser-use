@@ -3,6 +3,7 @@
   "files": {
     "includes": [
       "packages/extension/src/**/*.ts",
+      "packages/extension/test/**/*.ts",
       "packages/executor/**/*.ts",
       "e2e/**/*.ts"
     ]
