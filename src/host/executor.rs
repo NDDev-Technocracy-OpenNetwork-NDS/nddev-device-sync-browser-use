@@ -1,8 +1,9 @@
 //! One Bun process per session running agent Playwright code.
 //!
 //! The process has the invoking user's authority (ADR 0015); it is reached
-//! only through this host. Dropping an executor kills it, so a timeout,
-//! disconnect or revocation cannot leave agent code running. It starts with
+//! only through this host. Request cancellation leaves it in the session's
+//! operation lock; an acknowledged close awaits stop and reap. Drop remains
+//! a kill fallback, never proof of completed cleanup. It starts with
 //! its session and runs no code until it reports ready; a start that outlasts
 //! one execution's deadline goes on for the next, within its own limit.
 
@@ -135,8 +136,35 @@ impl Executor {
     }
 
     /// Kills the process and waits until it has exited.
-    pub async fn stop(mut self) {
-        let _ = self.child.kill().await;
+    pub async fn stop(&mut self) -> Result<(), Refusal> {
+        if self
+            .child
+            .try_wait()
+            .map_err(|_| Refusal::ExecutorUnavailable)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        // A failed or timed-out reap is never a successful close acknowledgement.
+        let result = within(Instant::now() + super::CONTROL_IO, async {
+            self.child
+                .kill()
+                .await
+                .map_err(|_| Refusal::ExecutorUnavailable)
+        })
+        .await;
+        // The child may have exited between try_wait and kill. Only an actual
+        // reap can turn that error into success.
+        if result.is_err()
+            && self
+                .child
+                .try_wait()
+                .map_err(|_| Refusal::ExecutorUnavailable)?
+                .is_some()
+        {
+            return Ok(());
+        }
+        result
     }
 
     pub async fn run(
@@ -179,6 +207,53 @@ impl Executor {
             return Ok((failure, completed.output, completed.truncated));
         }
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(super) async fn owned_test_child() -> (Executor, u32) {
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "host::executor::tests::owned_child_waits_for_stdin",
+            "--nocapture",
+        ])
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let pid = child.id().unwrap();
+    let input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    within(Instant::now() + super::CONTROL_IO, async {
+        let mut bytes = 0;
+        loop {
+            let line = read_line(&mut output).await?;
+            bytes += line.len();
+            if bytes > 4096 {
+                return Err(Refusal::PayloadLimit);
+            }
+            if line.ends_with(b"H45_CHILD_READY") {
+                return Ok(());
+            }
+        }
+    })
+    .await
+    .unwrap();
+    (
+        Executor {
+            child,
+            input,
+            output,
+            next: 0,
+            start: Start::Ready,
+            line: Vec::new(),
+        },
+        pid,
+    )
 }
 
 async fn within<T>(
@@ -242,6 +317,18 @@ async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An inert owned child, invoked only by the parent fixture with piped stdin.
+    #[test]
+    #[ignore]
+    fn owned_child_waits_for_stdin() {
+        use std::io::{Read, Write};
+        println!("H45_CHILD_READY");
+        std::io::stdout().flush().unwrap();
+        let mut input = std::io::stdin().lock();
+        let mut bytes = [0u8; 256];
+        while input.read(&mut bytes).unwrap() != 0 {}
+    }
 
     #[tokio::test]
     async fn lines_are_bounded_and_eof_is_not_success() {

@@ -162,6 +162,7 @@ beforeAll(async () => {
         "/linked": "<title>Linked</title><p>linked</p>",
         "/target": "<title>Popup target</title><p>popup</p>",
         "/owner": "<title>Owner</title><p>owner work</p>",
+        "/owned": "<title>Owned</title><p>owned work</p>",
         "/dialog": `<button id="ask" onclick="answer.textContent = confirm('Proceed?') ? 'accepted' : 'dismissed'">Ask</button><span id="answer"></span>`,
         "/form": `<input id="text" oninput="echo.textContent = this.value"><span id="echo"></span><input id="file" type="file" onchange="picked.textContent = this.files[0].name + ':' + this.files[0].size"><span id="picked"></span>`,
         "/fetch": `<button id="load" onclick="fetch('/api').then((r) => r.text()).then((t) => (out.textContent = t))">Load</button><span id="out"></span>`,
@@ -723,6 +724,117 @@ test("a closed tab is reported, not acted on", async () => {
   expect(failed).toEqual({ code: 1, body: expect.objectContaining({ failure: "target_closed" }) });
 });
 
+// The owned-session operations NDS composes, over the host's control socket: a request is one
+// JSON line, and a reply is a {"bytes":N} line followed by N bytes of JSON.
+async function control(request: object): Promise<Record<string, unknown>> {
+  const { promise, resolve, reject } = Promise.withResolvers<Record<string, unknown>>();
+  let buffer = Buffer.alloc(0);
+  const socket = await Bun.connect({
+    unix: join(runtime, "control.sock"),
+    socket: {
+      data(_, chunk) {
+        buffer = Buffer.concat([buffer, chunk]);
+        const line = buffer.indexOf(10);
+        if (line < 0) return;
+        const { bytes } = JSON.parse(buffer.subarray(0, line).toString()) as { bytes: number };
+        if (buffer.length >= line + 1 + bytes) {
+          resolve(JSON.parse(buffer.subarray(line + 1, line + 1 + bytes).toString()));
+        }
+      },
+      error(_, error) {
+        reject(error);
+      },
+      close() {
+        reject(new Error("the host closed the control connection before replying"));
+      },
+    },
+  });
+  socket.write(`${JSON.stringify(request)}\n`);
+  try {
+    return await promise;
+  } finally {
+    socket.end();
+  }
+}
+
+// Bun has no AF_UNIX client on Windows; there the host's own tests cover the owned operations.
+test.skipIf(windows)(
+  "owned sessions keep their generation and drain before close is acknowledged",
+  async () => {
+    const created = await control({ op: "create_owned", project: "owned" });
+    expect(created.result).toBe("owned_session");
+    // The handle stays in this test's memory and is passed back verbatim; it is never printed.
+    const handle = { project: created.project, generation: created.generation };
+    const foreign = { project: "owned", generation: "0".repeat(32) };
+    expect(await control({ op: "open_owned", session: foreign })).toEqual({
+      result: "refused",
+      refusal: "session_not_found",
+    });
+    // A project name alone does not adopt the reserved generation.
+    expect((await control({ op: "open", project: "owned" })).refusal).toBe("busy");
+    expect(await control({ op: "open_owned", session: handle })).toMatchObject({
+      result: "session",
+      project: "owned",
+    });
+    expect(
+      await control({
+        op: "execute_owned",
+        session: handle,
+        code: `const page = await context.newPage(); await page.goto("${origin}/owned"); return await page.title()`,
+        timeout_ms: 20000,
+        expect: null,
+      }),
+    ).toMatchObject({ result: "executed", failure: null, output: "Owned" });
+    expect(await observed("/owned")).toBeDefined();
+    // Close while an owned execution runs: the acknowledgement comes only after its executor ended.
+    const executor = join(runtime, "sessions", "owned");
+    expect(processes(executor)).toHaveLength(1);
+    const running = control({
+      op: "execute_owned",
+      session: handle,
+      code: "await new Promise((done) => setTimeout(done, 15000)); return 'late'",
+      timeout_ms: 20000,
+      expect: null,
+    }).catch(
+      (error: Error): Record<string, unknown> => ({ result: "lost", message: error.message }),
+    );
+    await Bun.sleep(1000);
+    expect(await control({ op: "close_owned", session: handle, close_tabs: true })).toEqual({
+      result: "closed",
+    });
+    expect(processes(executor)).toHaveLength(0);
+    expect((await running).output).not.toBe("late");
+    expect(await observed("/owned")).toBeUndefined();
+    // The closed generation is stale everywhere.
+    for (const request of [
+      { op: "open_owned", session: handle },
+      { op: "execute_owned", session: handle, code: "1", timeout_ms: 1000, expect: null },
+      { op: "close_owned", session: handle, close_tabs: false },
+    ]) {
+      expect(await control(request)).toEqual({ result: "refused", refusal: "session_not_found" });
+    }
+  },
+  60000,
+);
+
+// An execution that times out while its page waits on a long CDP call leaves that call to Chrome.
+// Once the extension's deadline for the call passed, the session still closes and opens again.
+test("a session whose execution timed out during a long wait closes and opens again", async () => {
+  await opened("waiting");
+  const waited = await run(
+    "waiting",
+    `const page = await context.newPage(); await page.goto("${origin}/"); await page.waitForFunction(() => false, null, { timeout: 0 })`,
+    "--timeout",
+    "3000",
+  );
+  expect(waited.body.error).toBe("timeout");
+  // The extension answers or drops the abandoned call within its 30 s reply deadline.
+  await Bun.sleep(32_000);
+  expect((await cli("session", "close", "waiting", "--close-tabs")).code).toBe(0);
+  expect((await cli("session", "new", "waiting")).code).toBe(0);
+  expect((await cli("session", "close", "waiting", "--close-tabs")).code).toBe(0);
+}, 60_000);
+
 test("the owner's switch revokes sessions until control is enabled again", async () => {
   await ownerSwitch(false);
   expect((await cli("status")).body.enabled).toBe(false);
@@ -781,7 +893,7 @@ test("a lost host is replaced and the agent group is reclaimed without owner tab
 });
 
 test("closing a session cleans only its own area", async () => {
-  expect((await cli("session", "close", "acceptance", "--close-tabs")).code).toBe(0);
+  expect((await cli("session", "close", "acceptance")).code).toBe(0);
   await Bun.sleep(500);
   expect(await observed("/")).toBeUndefined();
   expect(await observed("/owner")).toBeDefined();

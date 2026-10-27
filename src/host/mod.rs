@@ -9,7 +9,7 @@ mod executor;
 mod relay;
 
 use crate::{
-    EXTENSION_IDS, IoError, UNPACKED_EXTENSION_ID,
+    CancellationToken, EXTENSION_IDS, IoError, OwnedSession, UNPACKED_EXTENSION_ID,
     protocol::{
         self, Document, FRAME_LIMIT, Header, MAX_SESSIONS, MAX_TABS, PAYLOAD_LIMIT, Refusal, Reply,
         Request,
@@ -22,13 +22,13 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
-    sync::{Semaphore, mpsc, oneshot},
+    sync::{Semaphore, mpsc, oneshot, watch},
 };
 
 /// Chrome accepts at most 1 MiB per message from a host.
@@ -40,6 +40,8 @@ const CONTROL_CONNECTIONS: usize = 16;
 const CONTROL_IO: Duration = Duration::from_secs(5);
 const URL_LIMIT: usize = 2048;
 const TITLE_LIMIT: usize = 256;
+const CDP_UNCERTAIN: u8 = 1;
+const CDP_RELEASED: u8 = 2;
 
 /// Local installation paths; never operator credentials.
 pub struct Config {
@@ -66,7 +68,11 @@ pub(crate) enum Failure {
 
 /// Who receives the extension's answer to one request.
 pub(crate) enum Waiter {
-    Reply(oneshot::Sender<Result<Value, Failure>>),
+    Reply {
+        send: oneshot::Sender<Result<Value, Failure>>,
+        work: Option<PendingWork>,
+        deadline: Instant,
+    },
     /// A client's CDP command. Its reply is queued from the extension reader,
     /// so responses and events reach the client in the order Chrome sent them.
     Forward(relay::Forward),
@@ -100,7 +106,10 @@ struct Session {
     token: String,
     artifacts: PathBuf,
     client: Option<relay::Client>,
-    executor: Option<executor::Executor>,
+    life: Arc<SessionLife>,
+    owned: bool,
+    opened: bool,
+    closing: bool,
     running: bool,
     /// Raw CDP sessions the current client opened (`newCDPSession`); they end
     /// with the client, the session or their tab.
@@ -114,13 +123,98 @@ struct Tab {
     document: Option<String>,
 }
 
-/// Ends a session: its executor exits before its artifact area is removed, because Windows keeps
-/// the working directory of a live process.
-async fn discard(session: Session) {
-    if let Some(executor) = session.executor {
-        executor.stop().await;
+/// The executor stays owned here even when a request future is dropped.
+/// Closing cancels first, then acquires this same operation lock and reaps it.
+struct SessionLife {
+    generation: String,
+    stop: CancellationToken,
+    executor: tokio::sync::Mutex<Option<executor::Executor>>,
+    close: tokio::sync::Mutex<()>,
+    uncertain: std::sync::atomic::AtomicBool,
+    pending: watch::Sender<usize>,
+    cdp_state: AtomicU8,
+    cdp_pending: watch::Sender<usize>,
+}
+
+impl SessionLife {
+    fn new() -> Result<Self, Refusal> {
+        Ok(Self {
+            generation: token()?,
+            stop: CancellationToken::new(),
+            executor: tokio::sync::Mutex::new(None),
+            close: tokio::sync::Mutex::new(()),
+            uncertain: std::sync::atomic::AtomicBool::new(false),
+            pending: watch::channel(0).0,
+            cdp_state: AtomicU8::new(0),
+            cdp_pending: watch::channel(0).0,
+        })
     }
-    let _ = std::fs::remove_dir_all(&session.artifacts);
+}
+
+/// A submitted browser action stays owned through its actual reply (or loss).
+/// Canceling its waiter cannot remove a late action from the drain barrier.
+pub(crate) struct PendingWork {
+    life: Arc<SessionLife>,
+    kind: WorkKind,
+    settled: bool,
+}
+
+#[derive(Clone, Copy)]
+enum WorkKind {
+    Mutation,
+    Cdp,
+}
+
+impl PendingWork {
+    fn new(life: Arc<SessionLife>) -> Self {
+        Self::with_kind(life, WorkKind::Mutation)
+    }
+    fn with_kind(life: Arc<SessionLife>, kind: WorkKind) -> Self {
+        let work = Self {
+            life,
+            kind,
+            settled: false,
+        };
+        work.counter().send_modify(|count| *count += 1);
+        work
+    }
+    fn counter(&self) -> &watch::Sender<usize> {
+        match self.kind {
+            WorkKind::Mutation => &self.life.pending,
+            WorkKind::Cdp => &self.life.cdp_pending,
+        }
+    }
+    fn mark_uncertain(&self) {
+        match self.kind {
+            WorkKind::Mutation => self.life.uncertain.store(true, Ordering::Release),
+            WorkKind::Cdp => {
+                // A late dropped waiter cannot revive authority that an exact
+                // strict release already ended. It never changes mutation state.
+                let _ = self.life.cdp_state.compare_exchange(
+                    0,
+                    CDP_UNCERTAIN,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+        }
+    }
+    pub(crate) fn settle(&mut self) {
+        self.settled = true;
+    }
+    fn released(&mut self) {
+        debug_assert!(matches!(self.kind, WorkKind::Cdp));
+        // Transport authority ended, not a successful CDP command/website undo.
+        self.settled = true;
+    }
+}
+impl Drop for PendingWork {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.mark_uncertain();
+        }
+        self.counter().send_modify(|count| *count -= 1);
+    }
 }
 
 /// Whether Chrome started this host for one of the pinned NDS extension builds.
@@ -186,8 +280,13 @@ pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
     control_task.abort();
     relay_task.abort();
     sweep_task.abort();
-    host.shutdown();
+    let _ = control_task.await;
+    let _ = relay_task.await;
+    let _ = sweep_task.await;
+    let drained = host.shutdown().await;
     writer.abort();
+    let _ = writer.await;
+    drained.map_err(|_| HostError::Io(IoError::Unavailable))?;
     tracing::info!(event.name = "browser.host.stopped", outcome = "stopped", error.type = ended);
     Ok(())
 }
@@ -313,10 +412,123 @@ impl Host {
         Ok(id)
     }
 
+    /// The exact current generation/client must still admit this CDP command
+    /// when it enters the bounded queue. No await separates that check, pending
+    /// registration and enqueue; close fences all later submissions with State.
+    pub(crate) fn submit_cdp(
+        &self,
+        mut message: Value,
+        mut forward: relay::Forward,
+    ) -> Result<u64, Failure> {
+        if !matches!(forward.work.kind, WorkKind::Cdp) || message["type"] != "cdp" {
+            forward.work.settle();
+            return Err(Failure::Refused(Refusal::InvalidRequest));
+        }
+        let id = self.next_request.fetch_add(1, Ordering::Relaxed);
+        message["id"] = id.into();
+        let framed = serde_json::to_vec(&message)
+            .map_err(|_| Failure::Refused(Refusal::InvalidRequest))
+            .and_then(|body| frame(&body).ok_or(Failure::Refused(Refusal::PayloadLimit)));
+        let framed = match framed {
+            Ok(framed) => framed,
+            Err(error) => {
+                forward.work.settle(); // Known not submitted.
+                return Err(error);
+            }
+        };
+        let state = self.state();
+        let admitted = state.connected
+            && state.enabled
+            && state.sessions.get(&forward.project).is_some_and(|session| {
+                !session.closing
+                    && !session.life.stop.is_cancelled()
+                    && Arc::ptr_eq(&session.life, &forward.work.life)
+                    && session
+                        .client
+                        .as_ref()
+                        .is_some_and(|client| client.id == forward.client)
+            });
+        if !admitted {
+            forward.work.settle();
+            return Err(Failure::Refused(Refusal::SessionNotFound));
+        }
+        let permit = match self.outbound.try_reserve() {
+            Ok(permit) => permit,
+            Err(error) => {
+                forward.work.settle();
+                return Err(Failure::Refused(match error {
+                    mpsc::error::TrySendError::Full(_) => Refusal::Busy,
+                    mpsc::error::TrySendError::Closed(_) => Refusal::ExtensionUnavailable,
+                }));
+            }
+        };
+        self.pending().insert(id, Waiter::Forward(forward));
+        permit.send(framed);
+        drop(state);
+        Ok(id)
+    }
+
     /// One bounded request to the extension with a correlated reply.
-    pub(crate) async fn request(&self, message: Value) -> Result<Value, Failure> {
+    pub(crate) fn session_work(&self, project: &str, client: u64) -> Result<PendingWork, Failure> {
+        self.session_work_kind(project, client, WorkKind::Mutation)
+    }
+
+    pub(crate) fn session_cdp_work(
+        &self,
+        project: &str,
+        client: u64,
+    ) -> Result<PendingWork, Failure> {
+        self.session_work_kind(project, client, WorkKind::Cdp)
+    }
+
+    fn session_work_kind(
+        &self,
+        project: &str,
+        client: u64,
+        kind: WorkKind,
+    ) -> Result<PendingWork, Failure> {
+        let state = self.state();
+        let session = state
+            .sessions
+            .get(project)
+            .filter(|session| {
+                !session.closing
+                    && !session.life.stop.is_cancelled()
+                    && session
+                        .client
+                        .as_ref()
+                        .is_some_and(|current| current.id == client)
+            })
+            .ok_or(Failure::Refused(Refusal::SessionNotFound))?;
+        Ok(PendingWork::with_kind(session.life.clone(), kind))
+    }
+
+    pub(crate) async fn session_request(
+        &self,
+        project: &str,
+        client: u64,
+        message: Value,
+    ) -> Result<Value, Failure> {
+        let work = self.session_work(project, client)?;
+        self.request_with_work(message, Some(work)).await
+    }
+
+    async fn request_with_work(
+        &self,
+        message: Value,
+        work: Option<PendingWork>,
+    ) -> Result<Value, Failure> {
         let (reply, response) = oneshot::channel();
-        let id = self.submit(message, Waiter::Reply(reply)).await?;
+        let id = self
+            .submit(
+                message,
+                Waiter::Reply {
+                    send: reply,
+                    work,
+                    deadline: Instant::now() + EXTENSION_REPLY,
+                },
+            )
+            .await?;
         match tokio::time::timeout(EXTENSION_REPLY, response).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(Failure::Refused(Refusal::ExtensionUnavailable)),
@@ -328,7 +540,15 @@ impl Host {
     }
 
     async fn refusable(&self, message: Value) -> Result<Value, Refusal> {
-        self.request(message)
+        self.refusable_work(message, None).await
+    }
+
+    async fn refusable_work(
+        &self,
+        message: Value,
+        work: Option<PendingWork>,
+    ) -> Result<Value, Refusal> {
+        self.request_with_work(message, work)
             .await
             .map_err(|failure| match failure {
                 Failure::Refused(refusal) => refusal,
@@ -411,15 +631,19 @@ impl Host {
             }),
         };
         match waiter {
-            Waiter::Reply(reply) => {
-                let _ = reply.send(result);
+            Waiter::Reply { send, mut work, .. } => {
+                if let Some(work) = &mut work {
+                    work.settle();
+                }
+                let _ = send.send(result);
             }
             Waiter::Forward(forward) => self.answer(forward, result),
         }
     }
 
     /// Delivers a forwarded command's reply to the client that sent it.
-    pub(crate) fn answer(&self, forward: relay::Forward, result: Result<Value, Failure>) {
+    pub(crate) fn answer(&self, mut forward: relay::Forward, result: Result<Value, Failure>) {
+        forward.work.settle();
         let reply = relay::reply(forward.id.clone(), Some(forward.session.clone()), result);
         self.reply_to(&forward.project, forward.client, reply);
     }
@@ -442,25 +666,56 @@ impl Host {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             interval.tick().await;
-            let now = Instant::now();
-            let expired: Vec<relay::Forward> = {
-                let mut pending = self.pending();
-                let ids: Vec<u64> = pending
-                    .iter()
-                    .filter(|(_, waiter)| matches!(waiter, Waiter::Forward(forward) if forward.deadline <= now))
-                    .map(|(id, _)| *id)
-                    .collect();
-                ids.into_iter()
-                    .filter_map(|id| match pending.remove(&id) {
-                        Some(Waiter::Forward(forward)) => Some(forward),
-                        _ => None,
-                    })
-                    .collect()
-            };
-            for forward in expired {
-                self.answer(forward, Err(Failure::Refused(Refusal::Timeout)));
+            self.expire_pending(Instant::now());
+            // Reuse this owned host task for switch/overflow cleanup. No detached cleanup.
+            self.drain_closing().await;
+        }
+    }
+
+    fn expire_pending(&self, now: Instant) {
+        let expired: Vec<Waiter> = {
+            let mut pending = self.pending();
+            let ids: Vec<u64> = pending
+                .iter()
+                .filter(|(_, waiter)| match waiter {
+                    Waiter::Forward(forward) => forward.deadline <= now,
+                    Waiter::Reply { deadline, .. } => *deadline <= now,
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| pending.remove(&id))
+                .collect()
+        };
+        for waiter in expired {
+            match waiter {
+                Waiter::Forward(forward) => {
+                    forward.work.mark_uncertain();
+                    self.answer(forward, Err(Failure::Refused(Refusal::Timeout)));
+                }
+                Waiter::Reply { send, .. } => {
+                    let _ = send.send(Err(Failure::Refused(Refusal::Timeout)));
+                }
             }
         }
+    }
+
+    fn release_cdp(&self, life: &Arc<SessionLife>) {
+        // State already fenced submissions for this exact generation before
+        // Chrome's strict release. Retire only its transport waiters; do not
+        // manufacture a command result or touch a lifecycle mutation/other life.
+        life.cdp_state.store(CDP_RELEASED, Ordering::Release);
+        self.pending().retain(|_, waiter| {
+            if let Waiter::Forward(forward) = waiter
+                && matches!(forward.work.kind, WorkKind::Cdp)
+                && Arc::ptr_eq(&forward.work.life, life)
+            {
+                forward.work.released();
+                false
+            } else {
+                true
+            }
+        });
     }
 
     fn on_event(&self, message: Value) {
@@ -580,16 +835,18 @@ impl Host {
         tracing::info!(event.name = "browser.target.detached", outcome = "stopped", error.type = reason);
     }
 
-    /// The owner's switch. Disabling ends every session: clients disconnect,
-    /// executors stop and agents must open a new session after re-enabling.
+    /// The owner's switch immediately denies new work and cancels sessions.
+    /// The owned sweep awaits resource cleanup; this notification is no drain ACK.
     fn on_control(&self, enabled: bool) {
         let mut state = self.state();
         state.enabled = enabled;
         if !enabled {
             state.tabs.clear();
             state.children.clear();
-            for (_, session) in state.sessions.drain() {
-                tokio::spawn(discard(session));
+            for session in state.sessions.values_mut() {
+                session.closing = true;
+                session.life.stop.cancel();
+                session.client = None;
             }
         }
         let name = if enabled {
@@ -600,15 +857,57 @@ impl Host {
         tracing::info!(event.name = name, outcome = "ok");
     }
 
-    fn shutdown(&self) {
-        let mut state = self.state();
-        state.sessions.clear();
-        state.tabs.clear();
-        drop(state);
+    async fn shutdown(&self) -> Result<(), Refusal> {
+        {
+            let mut state = self.state();
+            state.connected = false;
+            state.enabled = false;
+            for session in state.sessions.values_mut() {
+                session.closing = true;
+                session.life.stop.cancel();
+                session.client = None;
+            }
+        }
         self.pending().clear();
+        let sessions: Vec<(String, Arc<SessionLife>)> = self
+            .state()
+            .sessions
+            .iter()
+            .map(|(project, session)| (project.clone(), session.life.clone()))
+            .collect();
+        let mut failure = None;
+        for (project, life) in sessions {
+            if let Err(error) = self.close_generation(&project, &life, false, false).await {
+                failure.get_or_insert(error);
+            }
+        }
+        if let Some(error) = failure {
+            // Failed generations remain closed and owned. Do not remove their
+            // shared artifact root, but still attempt every captured lifetime.
+            return Err(error);
+        }
         let _ = runtime::control_socket(&self.config.runtime).map(std::fs::remove_file);
         let _ = std::fs::remove_file(&self.cdp_socket);
         let _ = std::fs::remove_dir_all(self.config.runtime.join("sessions"));
+        Ok(())
+    }
+
+    async fn drain_closing(&self) {
+        let sessions: Vec<(String, Arc<SessionLife>)> = self
+            .state()
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.closing)
+            .map(|(project, session)| (project.clone(), session.life.clone()))
+            .collect();
+        for (project, life) in sessions {
+            if life.stop.is_cancelled() {
+                // Re-enabling the extension cannot revive this canceled lifetime.
+                let _ = self.close_generation(&project, &life, false, true).await;
+            } else {
+                let _ = self.stop_interrupted(&project, &life).await;
+            }
+        }
     }
 
     async fn serve_control(self: Arc<Self>, listener: socket::Listener) {
@@ -646,34 +945,70 @@ impl Host {
             Ok(Ok(_)) if line.pop() == Some(b'\n') => serde_json::from_slice::<Request>(&line).ok(),
             _ => None,
         };
-        let reply = match request {
-            None => Reply::Refused {
-                refusal: Refusal::InvalidRequest,
-            },
+        let execution = match &request {
             Some(Request::Execute {
                 project,
                 code,
                 timeout_ms,
                 expect,
-            }) => {
-                // A client that disconnects cancels the run; dropping the
-                // execution future kills its executor before any later action.
-                let mut probe = [0u8; 1];
-                tokio::select! {
-                    reply = self.execute(&project, &code, timeout_ms, expect) => reply,
-                    read = reader.read(&mut probe) => {
-                        // The run is abandoned without a reply; the class shows which side ended it.
-                        let class = match read {
-                            Ok(0) => "client_closed",
-                            Ok(_) => "client_data",
-                            Err(_) => "client_error",
-                        };
-                        tracing::info!(event.name = "browser.execute.cancelled", outcome = "stopped", error.type = class);
-                        return;
+            }) => Some((
+                project.clone(),
+                None,
+                code.clone(),
+                *timeout_ms,
+                expect.clone(),
+            )),
+            Some(Request::ExecuteOwned {
+                session,
+                code,
+                timeout_ms,
+                expect,
+            }) => Some((
+                session.project.clone(),
+                Some(session.generation.clone()),
+                code.clone(),
+                *timeout_ms,
+                expect.clone(),
+            )),
+            _ => None,
+        };
+        let mut probe = [0u8; 1];
+        let reply = if let Some((project, generation, code, timeout_ms, expect)) = execution {
+            match self.session_life(&project, generation.as_deref()) {
+                Err(refusal) => Reply::Refused { refusal },
+                Ok(life) => {
+                    let completed = {
+                        let execution = self.execute(&project, &life, &code, timeout_ms, expect);
+                        tokio::pin!(execution);
+                        tokio::select! {
+                            reply = &mut execution => Ok(reply),
+                            read = reader.read(&mut probe) => Err(read),
+                        }
+                    }; // Drop the request future before taking its operation lock.
+                    match completed {
+                        Ok(reply) => reply,
+                        Err(read) => {
+                            // Dropping the request releases the operation lock; the executor
+                            // remains in that lock, owned until this awaited stop/reap.
+                            let class = match read {
+                                Ok(0) => "client_closed",
+                                Ok(_) => "client_data",
+                                Err(_) => "client_error",
+                            };
+                            let stopped = self.stop_interrupted(&project, &life).await;
+                            tracing::info!(event.name = "browser.execute.cancelled", outcome = if stopped.is_ok() { "stopped" } else { "error" }, error.type = class);
+                            return;
+                        }
                     }
                 }
             }
-            Some(request) => self.handle(request).await,
+        } else {
+            match request {
+                Some(request) => self.handle(request).await,
+                None => Reply::Refused {
+                    refusal: Refusal::InvalidRequest,
+                },
+            }
         };
         let payload = serde_json::to_vec(&reply)
             .ok()
@@ -718,7 +1053,11 @@ impl Host {
                     enabled: state.enabled,
                     browser: state.browser.clone(),
                     extension: state.extension.clone(),
-                    sessions: state.sessions.len(),
+                    sessions: state
+                        .sessions
+                        .values()
+                        .filter(|session| !session.closing)
+                        .count(),
                 }))
             }
             Request::Update => {
@@ -732,9 +1071,36 @@ impl Host {
                 })
             }
             Request::Open { project } => self.open(&project).await.map(Reply::Session),
+            Request::CreateOwned { project } => {
+                self.create_owned(&project).map(Reply::OwnedSession)
+            }
+            Request::OpenOwned { session } => {
+                match self.session_life(&session.project, Some(&session.generation)) {
+                    Ok(life) => self
+                        .open_generation(&session.project, &life)
+                        .await
+                        .map(Reply::Session),
+                    Err(refusal) => Err(refusal),
+                }
+            }
+            Request::CloseOwned {
+                session,
+                close_tabs,
+            } => match self.session_life(&session.project, Some(&session.generation)) {
+                Ok(life) => self
+                    .close_generation(&session.project, &life, close_tabs, true)
+                    .await
+                    .map(|()| Reply::Closed),
+                Err(refusal) => Err(refusal),
+            },
             Request::Sessions => {
                 let mut state = self.state();
-                let projects: Vec<String> = state.sessions.keys().cloned().collect();
+                let projects: Vec<String> = state
+                    .sessions
+                    .iter()
+                    .filter(|(_, session)| !session.closing)
+                    .map(|(project, _)| project.clone())
+                    .collect();
                 let sessions = projects
                     .iter()
                     .map(|project| view_session(&mut state, project))
@@ -748,7 +1114,7 @@ impl Host {
                 .close(&project, close_tabs)
                 .await
                 .map(|()| Reply::Closed),
-            Request::Execute { .. } => Err(Refusal::InvalidRequest),
+            Request::Execute { .. } | Request::ExecuteOwned { .. } => Err(Refusal::InvalidRequest),
         };
         result.unwrap_or_else(|refusal| Reply::Refused { refusal })
     }
@@ -763,80 +1129,279 @@ impl Host {
         Ok(())
     }
 
-    async fn open(&self, project: &str) -> Result<view::Session, Refusal> {
+    fn session_life(
+        &self,
+        project: &str,
+        generation: Option<&str>,
+    ) -> Result<Arc<SessionLife>, Refusal> {
+        let state = self.state();
+        let session = state
+            .sessions
+            .get(project)
+            .ok_or(Refusal::SessionNotFound)?;
+        if generation.is_some_and(|value| !session.owned || value != session.life.generation) {
+            return Err(Refusal::SessionNotFound);
+        }
+        Ok(session.life.clone())
+    }
+
+    fn reserve(&self, project: &str, owned: bool) -> Result<Arc<SessionLife>, Refusal> {
         if !protocol::valid_project(project) {
             return Err(Refusal::InvalidProject);
         }
-        let artifacts = self.config.runtime.join("sessions").join(project);
-        {
-            let mut state = self.state();
-            Self::ready(&state)?;
-            if state.sessions.contains_key(project) {
-                return Ok(view_session(&mut state, project));
-            }
-            if state.sessions.len() >= MAX_SESSIONS {
-                tracing::warn!(event.name = "browser.session.opened", outcome = "rejected", error.type = Refusal::Capacity.code());
-                return Err(Refusal::Capacity);
-            }
-            runtime::private_directory(&artifacts).map_err(|_| Refusal::ExecutorUnavailable)?;
-            let session = Session {
+        let mut state = self.state();
+        Self::ready(&state)?;
+        if state.sessions.contains_key(project) {
+            return Err(Refusal::Busy);
+        }
+        if state.sessions.len() >= MAX_SESSIONS {
+            tracing::warn!(event.name = "browser.session.opened", outcome = "rejected", error.type = Refusal::Capacity.code());
+            return Err(Refusal::Capacity);
+        }
+        let life = Arc::new(SessionLife::new()?);
+        state.sessions.insert(
+            project.to_owned(),
+            Session {
                 token: token()?,
-                artifacts,
+                artifacts: self.config.runtime.join("sessions").join(project),
                 client: None,
-                executor: None,
+                life: life.clone(),
+                owned,
+                opened: false,
+                closing: false,
                 running: false,
                 aliases: HashMap::new(),
-            };
-            state.sessions.insert(project.to_owned(), session);
+            },
+        );
+        Ok(life)
+    }
+
+    fn create_owned(&self, project: &str) -> Result<OwnedSession, Refusal> {
+        let life = self.reserve(project, true)?;
+        Ok(OwnedSession {
+            project: project.into(),
+            generation: life.generation.clone(),
+        })
+    }
+
+    async fn open(&self, project: &str) -> Result<view::Session, Refusal> {
+        let closing = {
+            let mut state = self.state();
+            Self::ready(&state)?;
+            if let Some(session) = state.sessions.get(project) {
+                if session.owned && (session.closing || !session.opened) {
+                    return Err(Refusal::Busy);
+                }
+                if session.closing {
+                    Some(session.life.clone())
+                } else {
+                    return Ok(view_session(&mut state, project));
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(life) = closing {
+            // Drain only the captured legacy generation. A replacement is never adopted.
+            self.close_generation(project, &life, false, true).await?;
         }
-        // Reclaim the project's existing agent group, for example after a host restart.
-        match self
-            .refusable(json!({ "type": "claim", "group": project }))
+        let life = self.reserve(project, false)?;
+        self.open_generation(project, &life).await
+    }
+
+    async fn open_generation(
+        &self,
+        project: &str,
+        life: &Arc<SessionLife>,
+    ) -> Result<view::Session, Refusal> {
+        let mut executor = tokio::time::timeout(EXTENSION_REPLY, life.executor.lock())
             .await
-        {
-            Ok(claimed) => {
-                let session = {
-                    let mut state = self.state();
-                    for entry in claimed["tabs"].as_array().into_iter().flatten() {
-                        if let Some(tab) = entry["tab"].as_i64() {
-                            self.register(&mut state, project, tab, entry["target"].clone());
-                        }
-                    }
-                    let session = state.sessions.get(project);
-                    session.map(|session| (session.token.clone(), session.artifacts.clone()))
-                };
-                // The executor starts with its session and gets ready while the agent prepares
-                // its first execution; a failed start is retried by that execution.
-                if let Some((token, artifacts)) = session {
-                    let endpoint =
-                        runtime::socket_url(&self.cdp_socket, &format!("/session/{token}"));
-                    if let Ok(executor) =
-                        executor::Executor::start(&self.config, &endpoint, &artifacts)
-                    {
-                        self.keep(project, &token, executor);
-                    }
-                }
-                tracing::info!(event.name = "browser.session.opened", outcome = "ok");
-                Ok(view_session(&mut self.state(), project))
+            .map_err(|_| Refusal::Timeout)?;
+        let (endpoint, artifacts) = {
+            let mut state = self.state();
+            Self::ready(&state)?;
+            let session = state
+                .sessions
+                .get_mut(project)
+                .filter(|session| Arc::ptr_eq(&session.life, life))
+                .ok_or(Refusal::SessionNotFound)?;
+            if session.closing || life.stop.is_cancelled() {
+                return Err(Refusal::PermissionRequired);
             }
-            Err(refusal) => {
-                let removed = self.state().sessions.remove(project);
-                if let Some(session) = removed {
-                    discard(session).await;
+            if session.opened {
+                return Ok(view_session(&mut state, project));
+            }
+            runtime::private_directory(&session.artifacts)
+                .map_err(|_| Refusal::ExecutorUnavailable)?;
+            session.opened = true;
+            (
+                runtime::socket_url(&self.cdp_socket, &format!("/session/{}", session.token)),
+                session.artifacts.clone(),
+            )
+        };
+        // Retain the operation lock through the actual claim answer. Close cannot
+        // release/reuse this project while a claim is still being processed.
+        let claimed = self
+            .refusable_work(
+                json!({ "type": "claim", "group": project }),
+                Some(PendingWork::new(life.clone())),
+            )
+            .await;
+        if let Err(refusal) = claimed {
+            if refusal == Refusal::Timeout || refusal == Refusal::ExtensionUnavailable {
+                life.uncertain.store(true, Ordering::Release);
+            }
+            life.stop.cancel();
+            if let Some(session) = self
+                .state()
+                .sessions
+                .get_mut(project)
+                .filter(|s| Arc::ptr_eq(&s.life, life))
+            {
+                session.closing = true;
+            }
+            tracing::warn!(event.name = "browser.session.opened", outcome = "rejected", error.type = refusal.code());
+            return Err(refusal);
+        }
+        let claimed = claimed.unwrap();
+        {
+            let mut state = self.state();
+            let current = state
+                .sessions
+                .get(project)
+                .is_some_and(|s| Arc::ptr_eq(&s.life, life) && !s.closing);
+            if !current || life.stop.is_cancelled() {
+                return Err(Refusal::PermissionRequired);
+            }
+            for entry in claimed["tabs"].as_array().into_iter().flatten() {
+                if let Some(tab) = entry["tab"].as_i64() {
+                    self.register(&mut state, project, tab, entry["target"].clone());
                 }
-                tracing::warn!(event.name = "browser.session.opened", outcome = "rejected", error.type = refusal.code());
-                Err(refusal)
             }
         }
+        if let Ok(started) = executor::Executor::start(&self.config, &endpoint, &artifacts) {
+            *executor = Some(started);
+        }
+        tracing::info!(event.name = "browser.session.opened", outcome = "ok");
+        Ok(view_session(&mut self.state(), project))
+    }
+
+    async fn stop_executor(executor: &mut Option<executor::Executor>) -> Result<(), Refusal> {
+        if let Some(current) = executor {
+            current.stop().await?;
+        }
+        executor.take();
+        Ok(())
+    }
+
+    async fn stop_interrupted(
+        &self,
+        project: &str,
+        life: &Arc<SessionLife>,
+    ) -> Result<(), Refusal> {
+        let mut executor = tokio::time::timeout(EXTENSION_REPLY, life.executor.lock())
+            .await
+            .map_err(|_| Refusal::Timeout)?;
+        Self::stop_executor(&mut executor).await?;
+        let mut state = self.state();
+        if let Some(session) = state
+            .sessions
+            .get_mut(project)
+            .filter(|s| Arc::ptr_eq(&s.life, life))
+            && !session.owned
+            && !life.stop.is_cancelled()
+        {
+            session.closing = false;
+        }
+        Ok(())
     }
 
     async fn close(&self, project: &str, close_tabs: bool) -> Result<(), Refusal> {
-        let session = {
+        let life = self.session_life(project, None)?;
+        self.close_generation(project, &life, close_tabs, true)
+            .await
+    }
+
+    async fn close_generation(
+        &self,
+        project: &str,
+        life: &Arc<SessionLife>,
+        close_tabs: bool,
+        release: bool,
+    ) -> Result<(), Refusal> {
+        let _close = tokio::time::timeout(EXTENSION_REPLY, life.close.lock())
+            .await
+            .map_err(|_| Refusal::Timeout)?;
+        let (artifacts, opened) = {
             let mut state = self.state();
             let session = state
                 .sessions
-                .remove(project)
+                .get_mut(project)
+                .filter(|s| Arc::ptr_eq(&s.life, life))
                 .ok_or(Refusal::SessionNotFound)?;
+            session.closing = true;
+            life.stop.cancel();
+            session.client = None;
+            session.aliases.clear();
+            (session.artifacts.clone(), session.opened)
+        };
+        let mut executor = tokio::time::timeout(EXTENSION_REPLY, life.executor.lock())
+            .await
+            .map_err(|_| Refusal::Timeout)?;
+        Self::stop_executor(&mut executor).await?;
+        let mut pending = life.pending.subscribe();
+        let drained = async {
+            loop {
+                if *pending.borrow_and_update() == 0 {
+                    return Ok(());
+                }
+                pending
+                    .changed()
+                    .await
+                    .map_err(|_| Refusal::ExecutorUnavailable)?;
+            }
+        };
+        tokio::time::timeout(EXTENSION_REPLY, drained)
+            .await
+            .map_err(|_| Refusal::Timeout)??;
+        // An unacknowledged old browser action forbids project replacement.
+        if self.state().connected && life.uncertain.load(Ordering::Acquire) {
+            return Err(Refusal::Timeout);
+        }
+        if self.state().connected
+            && (!release || !opened)
+            && (life.cdp_state.load(Ordering::Acquire) == CDP_UNCERTAIN
+                || *life.cdp_pending.borrow() != 0)
+        {
+            return Err(Refusal::Timeout);
+        }
+        if release && opened {
+            let released = self
+                .refusable_work(
+                    json!({ "type": "release", "group": project, "close": close_tabs }),
+                    Some(PendingWork::new(life.clone())),
+                )
+                .await?;
+            if released != json!({ "released": true }) {
+                // Older {} ACKs and unverified/malformed releases prove nothing.
+                return Err(Refusal::ExtensionUnavailable);
+            }
+            self.release_cdp(life);
+        }
+        // Keep the closing generation registered until its artifact area is gone.
+        if opened {
+            std::fs::remove_dir_all(artifacts).map_err(|_| Refusal::ExecutorUnavailable)?;
+        }
+        {
+            let mut state = self.state();
+            if !state
+                .sessions
+                .get(project)
+                .is_some_and(|s| Arc::ptr_eq(&s.life, life))
+            {
+                return Err(Refusal::SessionNotFound);
+            }
+            state.sessions.remove(project);
             let tabs: Vec<i64> = state
                 .tabs
                 .iter()
@@ -847,26 +1412,22 @@ impl Host {
                 state.tabs.remove(&tab);
                 state.children.retain(|_, owner| *owner != tab);
             }
-            session
-        };
-        discard(session).await;
-        let released = self
-            .refusable(json!({ "type": "release", "group": project, "close": close_tabs }))
-            .await;
+        }
         tracing::info!(event.name = "browser.session.closed", outcome = "ok");
-        released.map(|_| ())
+        Ok(())
     }
 
     async fn execute(
         &self,
         project: &str,
+        life: &Arc<SessionLife>,
         code: &str,
         timeout_ms: u64,
         expect: Option<Document>,
     ) -> Reply {
-        let start = Instant::now();
-        let result = self.run(project, code, timeout_ms, expect).await;
-        let duration_ms = start.elapsed().as_millis() as u64;
+        let started = Instant::now();
+        let result = self.run(project, life, code, timeout_ms, expect).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
         match &result {
             Ok(outcome) => match outcome.failure {
                 None => tracing::info!(
@@ -891,6 +1452,7 @@ impl Host {
     async fn run(
         &self,
         project: &str,
+        life: &Arc<SessionLife>,
         code: &str,
         timeout_ms: u64,
         expect: Option<Document>,
@@ -899,7 +1461,8 @@ impl Host {
             return Err(Refusal::InvalidRequest);
         }
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        let (current, token, artifacts) = {
+        let mut executor = life.executor.try_lock().map_err(|_| Refusal::Busy)?;
+        let (endpoint, artifacts) = {
             let mut state = self.state();
             Self::ready(&state)?;
             if let Some(expect) = &expect {
@@ -915,63 +1478,76 @@ impl Host {
             let session = state
                 .sessions
                 .get_mut(project)
+                .filter(|s| Arc::ptr_eq(&s.life, life))
                 .ok_or(Refusal::SessionNotFound)?;
+            if session.closing || life.stop.is_cancelled() {
+                return Err(Refusal::PermissionRequired);
+            }
+            if !session.opened {
+                return Err(Refusal::SessionNotFound);
+            }
             if session.running {
                 return Err(Refusal::Busy);
             }
             session.running = true;
             (
-                session.executor.take(),
-                session.token.clone(),
+                runtime::socket_url(&self.cdp_socket, &format!("/session/{}", session.token)),
                 session.artifacts.clone(),
             )
         };
-        let _running = Running {
+        let mut running = Running {
             host: self,
             project,
+            life,
+            finished: false,
         };
-        let mut executor = match current {
-            Some(executor) => executor,
-            None => {
-                let endpoint = runtime::socket_url(&self.cdp_socket, &format!("/session/{token}"));
-                executor::Executor::start(&self.config, &endpoint, &artifacts)?
-            }
-        };
-        // No code has run yet, so a start that outlasts this deadline is kept for the next one.
-        if let Err(refusal) = executor.ready(deadline).await {
-            if refusal == Refusal::Timeout {
-                self.keep(project, &token, executor);
-            }
-            return Err(refusal);
+        if executor.is_none() {
+            *executor = Some(executor::Executor::start(
+                &self.config,
+                &endpoint,
+                &artifacts,
+            )?);
         }
-        // A timeout drops the executor here, which kills it: no action continues.
-        let (failure, output, truncated) = match executor.run(code, deadline).await {
-            Ok(completed) => completed,
-            // Revocation disconnects the executor mid-run; report the cause.
-            Err(Refusal::ExecutorUnavailable) if !self.state().enabled => {
-                return Err(Refusal::PermissionRequired);
-            }
-            Err(refusal) => return Err(refusal),
+        let current = executor.as_mut().unwrap();
+        let ready = tokio::select! {
+            () = life.stop.cancelled() => Err(Refusal::PermissionRequired),
+            result = current.ready(deadline) => result,
         };
-        let tabs = self.tabs(project).await;
-        self.keep(project, &token, executor);
-        Ok(view::Outcome {
-            failure,
-            output,
-            truncated,
-            tabs,
-        })
-    }
-
-    /// Returns an executor to its session, unless that session has ended or holds another one.
-    fn keep(&self, project: &str, token: &str, executor: executor::Executor) {
-        if let Some(session) = self
-            .state()
-            .sessions
-            .get_mut(project)
-            .filter(|session| session.token == token && session.executor.is_none())
-        {
-            session.executor = Some(executor);
+        // Preserve the existing pending-start behavior: no script has run yet.
+        if ready == Err(Refusal::Timeout) && !life.stop.is_cancelled() {
+            running.finished = true;
+            return Err(Refusal::Timeout);
+        }
+        let result = match ready {
+            Err(refusal) => Err(refusal),
+            Ok(()) => tokio::select! {
+                () = life.stop.cancelled() => Err(Refusal::PermissionRequired),
+                result = current.run(code, deadline) => result,
+            },
+        };
+        match result {
+            Ok((failure, output, truncated)) => {
+                let tabs = tokio::select! {
+                    () = life.stop.cancelled() => {
+                        Self::stop_executor(&mut executor).await?;
+                        running.finished = true;
+                        return Err(Refusal::PermissionRequired);
+                    }
+                    tabs = self.tabs(project) => tabs,
+                };
+                running.finished = true;
+                Ok(view::Outcome {
+                    failure,
+                    output,
+                    truncated,
+                    tabs,
+                })
+            }
+            Err(refusal) => {
+                Self::stop_executor(&mut executor).await?;
+                running.finished = true;
+                Err(refusal)
+            }
         }
     }
 
@@ -1027,12 +1603,23 @@ impl Host {
 struct Running<'a> {
     host: &'a Host,
     project: &'a str,
+    life: &'a Arc<SessionLife>,
+    finished: bool,
 }
 
 impl Drop for Running<'_> {
     fn drop(&mut self) {
-        if let Some(session) = self.host.state().sessions.get_mut(self.project) {
+        if let Some(session) = self
+            .host
+            .state()
+            .sessions
+            .get_mut(self.project)
+            .filter(|s| Arc::ptr_eq(&s.life, self.life))
+        {
             session.running = false;
+            if !self.finished {
+                session.closing = true;
+            }
         }
     }
 }
@@ -1045,11 +1632,15 @@ fn view_session(state: &mut State, project: &str) -> view::Session {
             .values()
             .filter(|tab| tab.project == project)
             .count(),
-        executor: state
-            .sessions
-            .get_mut(project)
-            .and_then(|session| session.executor.as_mut())
-            .is_some_and(executor::Executor::is_ready),
+        executor: state.sessions.get_mut(project).is_some_and(|session| {
+            session
+                .life
+                .executor
+                .try_lock()
+                .ok()
+                .and_then(|mut executor| executor.as_mut().map(executor::Executor::is_ready))
+                == Some(true)
+        }),
     }
 }
 
@@ -1065,7 +1656,8 @@ fn deliver(state: &mut State, project: &str, event: Value) {
         .is_some_and(|client| !client.send(&event))
     {
         session.client = None;
-        session.executor = None;
+        session.closing = true;
+        session.life.stop.cancel();
         tracing::warn!(event.name = "browser.client.dropped", outcome = "error", error.type = "queue_full", dropped_count = 1u64);
     }
 }
@@ -1076,6 +1668,9 @@ fn cdp_error(message: &str) -> Value {
         .filter(|error| error["code"].is_i64() && error["message"].is_string())
         .unwrap_or_else(|| json!({ "code": -32000, "message": bounded(message, 1024) }))
 }
+
+#[cfg(test)]
+mod owned_tests;
 
 #[cfg(test)]
 mod tests {
