@@ -105,7 +105,8 @@ async function handle(message: HostRequest): Promise<void> {
 }
 
 async function dispatch(message: HostRequest): Promise<unknown> {
-  if (!enabled) throw new Refusal("permission_required");
+  // Releasing stays possible while the owner's switch is off, so the host can finish closing.
+  if (!enabled && message.type !== "release") throw new Refusal("permission_required");
   switch (message.type) {
     case "cdp": {
       if (!attached.has(message.tab)) throw new Refusal("target_closed");
@@ -139,13 +140,15 @@ async function dispatch(message: HostRequest): Promise<unknown> {
       return { tabs: result };
     }
     case "release": {
-      for (const [tab, group] of attached) {
-        if (group !== message.group) continue;
-        attached.delete(tab);
-        if (message.close) await chrome.tabs.remove(tab).catch(() => undefined);
-        else await chrome.debugger.detach({ tabId: tab }).catch(() => undefined);
+      // Released only once every tab of the group is proven out of this worker's control. A tab
+      // that could not be released stays owned and the release fails, so the host keeps closing.
+      const failures: unknown[] = [];
+      for (const [tab, group] of [...attached]) {
+        if (group === message.group)
+          await relinquish(tab, message.close).catch((error) => failures.push(error));
       }
-      return {};
+      if (failures.length > 0) throw failures[0];
+      return { released: true };
     }
     case "tabs": {
       const result = [];
@@ -217,11 +220,28 @@ function attach(tab: number, group: string): Promise<unknown> {
   return next;
 }
 
+// Ends this worker's control of one agent tab, by closing it or detaching from it, and keeps the
+// tab as owned until Chrome confirms that: a resolved close or detach, or a probe that Chrome
+// refuses because the session has already ended.
+async function relinquish(tab: number, close: boolean): Promise<void> {
+  try {
+    if (close) await chrome.tabs.remove(tab);
+    else await chrome.debugger.detach({ tabId: tab });
+  } catch (error) {
+    const ended = await chrome.debugger.sendCommand({ tabId: tab }, "Target.getTargetInfo").then(
+      () => false,
+      () => true,
+    );
+    if (!ended) throw error;
+  }
+  attached.delete(tab);
+}
+
+// The owner's switch and a lost host end control of every agent tab at once. A tab whose detach
+// fails stays owned, so the release of its group retries and reports it.
 async function detachAll(): Promise<void> {
-  const tabs = [...attached.keys()];
-  attached.clear();
   await Promise.all(
-    tabs.map((tab) => chrome.debugger.detach({ tabId: tab }).catch(() => undefined)),
+    [...attached.keys()].map((tab) => relinquish(tab, false).catch(() => undefined)),
   );
 }
 
