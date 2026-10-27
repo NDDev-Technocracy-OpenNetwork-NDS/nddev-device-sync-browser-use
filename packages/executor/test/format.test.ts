@@ -35,6 +35,22 @@ test("results read in a fixed order and an empty run says so", () => {
   );
 });
 
+test("results carry no terminal escapes or control characters", () => {
+  const text = compose({
+    notices: [],
+    console: [
+      {
+        method: "log",
+        values: [
+          "\u001B[31mred\u001B[0m\r\n\u001B]8;;https://x.test\u0007link\u001B]8;;\u0007\u0000\tend",
+        ],
+      },
+    ],
+    value: "\u001B[1mdone\u001B[22m",
+  });
+  expect(text).toBe("Console output:\n[log] red\nlink\tend\n\n[return value] done");
+});
+
 test("Playwright objects print as tags, never their internals", () => {
   expect(tag(page("https://example.test/a"))).toBe("<Page https://example.test/a>");
   const response = {
@@ -95,6 +111,14 @@ test("a timeout names why the action could not proceed and keeps its last call l
   );
   missing.name = "TimeoutError";
   expect(describeError(missing).split("\n")[0]).toContain("no element matched the locator");
+  // Playwright dims call log lines where it detects a color terminal, as on Windows runners.
+  const colored = new Error(
+    "click: Timeout 2999ms exceeded.\nCall log:\n\u001B[2m  - waiting for locator('#missing')\u001B[22m\n\n",
+  );
+  colored.name = "TimeoutError";
+  expect(describeError(colored)).toBe(
+    "click: Timeout 2999ms exceeded. (no element matched the locator; take a fresh snapshot)\nCall log:\n  - waiting for locator('#missing')",
+  );
   expect(describeError(new TypeError("x is not a function"))).toBe(
     "TypeError: x is not a function",
   );
@@ -121,7 +145,22 @@ test("no edge of a value lets inspect reach a Playwright object's internals", ()
     },
   };
   const failed = Object.assign(new Error("boom"), { page: secret() });
+  // Built-ins and functions carrying a page in a field of their own.
+  const carrying = <T extends object>(value: T): T => Object.assign(value, { page: secret() });
+  const builtIns = [
+    carrying(new Date(0)),
+    carrying(/pattern/g),
+    carrying(new Uint8Array([1, 2])),
+    carrying(new ArrayBuffer(4)),
+    carrying(Buffer.from("ab")),
+    carrying(new URL("https://example.test/")),
+    carrying(new DataView(new ArrayBuffer(2))),
+    carrying(function named() {}),
+    carrying(() => 1),
+  ];
   for (const value of [
+    ...builtIns,
+    { nested: builtIns },
     new Map([[secret(), 1]]),
     new Map([[1, secret()]]),
     new Set([secret()]),
@@ -141,6 +180,9 @@ test("no edge of a value lets inspect reach a Playwright object's internals", ()
   expect(render(cyclic)).toContain("[Circular]");
   expect(render(new Map([[secret(), 1]]))).toContain("<Page https://example.test/> => 1");
   expect(render({ when: new Date(0), pattern: /a/ })).toContain("1970-01-01");
+  expect(render(carrying(new Date(0)))).toContain("1970-01-01");
+  expect(render(carrying(new Uint8Array([7])))).toContain("7");
+  expect(render(carrying(function named() {}))).toBe("[Function: named]");
 });
 
 test("Playwright waits always end inside the execution's remaining budget", () => {
