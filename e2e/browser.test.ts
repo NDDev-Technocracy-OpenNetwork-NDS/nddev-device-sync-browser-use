@@ -107,8 +107,17 @@ async function opened(project: string): Promise<Result> {
   }
 }
 
+// An execution's protocol answer, with its text split the way an agent reads it: `value` is what
+// the code returned and `notices` the warnings and page errors printed before it.
 async function run(project: string, code: string, ...flags: string[]): Promise<Result> {
-  return cli("-s", project, "-e", code, ...flags);
+  const result = await cli("-s", project, "-e", code, "--json", ...flags);
+  const output = typeof result.body.output === "string" ? result.body.output : "";
+  const marker = output.lastIndexOf("[return value] ");
+  result.body.value = marker < 0 ? undefined : output.slice(marker + "[return value] ".length);
+  result.body.notices = output
+    .split("\n")
+    .filter((line) => line.startsWith("[WARNING]") || line.startsWith("[PAGE ERROR]"));
+  return result;
 }
 
 function tabs(result: Result): { target: string; document: string; url: string }[] {
@@ -287,7 +296,7 @@ test("agent code acts in its own tab and the browser shows the result", async ()
     "20000",
   );
   expect(result.code).toBe(0);
-  expect(result.body.output).toBe("1");
+  expect(result.body.value).toBe("1");
   expect(tabs(result)).toEqual([expect.objectContaining({ url: `${origin}/` })]);
   expect(requests).toBeGreaterThan(before);
   const page = await observed("/");
@@ -298,16 +307,16 @@ test("owner tabs stay outside the agent session", async () => {
   const owner = await observer.newPage();
   await owner.goto(`${origin}/owner`);
   const result = await run("acceptance", "context.pages().map((page) => page.url())");
-  expect(result.body.output).not.toContain("/owner");
+  expect(result.body.value).not.toContain("/owner");
   expect(tabs(result).map((tab) => tab.url)).not.toContain(`${origin}/owner`);
   expect(owner.url()).toBe(`${origin}/owner`);
 });
 
 test("session state and the aria snapshot are available between runs", async () => {
   expect((await run("acceptance", "state.value = 41")).code).toBe(0);
-  expect((await run("acceptance", "state.value + 1")).body.output).toBe("42");
+  expect((await run("acceptance", "state.value + 1")).body.value).toBe("42");
   const snapshot = await run("acceptance", "snapshot(state.page)");
-  expect(snapshot.body.output).toContain('button "Increment"');
+  expect(snapshot.body.value).toContain('button "Increment"');
 });
 
 test("a replaced document refuses an outdated expectation", async () => {
@@ -320,7 +329,7 @@ test("a replaced document refuses an outdated expectation", async () => {
   const stale = await run("acceptance", "1", "--expect", `${first.target}:${first.document}`);
   expect(stale).toEqual({ code: 2, body: expect.objectContaining({ error: "stale_document" }) });
   const fresh = await run("acceptance", "2", "--expect", `${current.target}:${current.document}`);
-  expect(fresh.body.output).toBe("2");
+  expect(fresh.body.value).toBe("2");
 });
 
 test("popups opened by an agent page join the agent session", async () => {
@@ -330,9 +339,9 @@ test("popups opened by an agent page join the agent session", async () => {
     "--timeout",
     "20000",
   );
-  // Both new tabs are announced after the result, since the agent keeps their opener in state.
-  const [value, ...notices] = String(result.body.output).split("\n");
-  expect(value).toBe(`${origin}/target ${origin}/linked`);
+  // Both new tabs are announced before the result, since the agent keeps their opener in state.
+  const notices = result.body.notices as string[];
+  expect(result.body.value).toBe(`${origin}/target ${origin}/linked`);
   expect(notices).toHaveLength(2);
   for (const notice of notices)
     expect(notice).toStartWith(`[WARNING] New page opened from ${origin}/`);
@@ -347,7 +356,7 @@ test("the agent answers JavaScript dialogs", async () => {
     "--timeout",
     "20000",
   );
-  expect(result.body.output).toBe("accepted");
+  expect(result.body.value).toBe("accepted");
   expect(await (await observed("/dialog"))?.locator("#answer").textContent()).toBe("accepted");
 });
 
@@ -360,7 +369,7 @@ test("keyboard input and file uploads reach the page", async () => {
     "--timeout",
     "20000",
   );
-  expect(result.body.output).toBe("typed upload.txt:3");
+  expect(result.body.value).toBe("typed upload.txt:3");
 });
 
 test("network interception and cross-origin frames work in agent tabs", async () => {
@@ -370,7 +379,7 @@ test("network interception and cross-origin frames work in agent tabs", async ()
     "--timeout",
     "20000",
   );
-  expect(result.body.output).toBe("intercepted inside");
+  expect(result.body.value).toBe("intercepted inside");
   const frame = (await observed("/frame"))
     ?.frames()
     .find((candidate) => candidate.url().endsWith("/inner"));
@@ -395,7 +404,7 @@ test("bot checks are reported and handed to the owner", async () => {
     "--timeout",
     "20000",
   );
-  expect(JSON.parse(String(result.body.output))).toEqual({
+  expect(JSON.parse(String(result.body.value))).toEqual({
     before: [{ vendor: "cloudflare", solved: false }],
     notified: true,
     after: [{ vendor: "cloudflare", solved: true }],
@@ -434,8 +443,8 @@ async function helpers(): Promise<void> {
     "--timeout",
     "20000",
   );
-  const [json = "{}", ...notices] = String(result.body.output).split("\n");
-  const seen = JSON.parse(json) as Record<string, string | boolean>;
+  const notices = result.body.notices as string[];
+  const seen = JSON.parse(String(result.body.value ?? "{}")) as Record<string, string | boolean>;
   expect(seen.loaded).toBe(true);
   expect(seen.first).toStartWith(`URL: ${origin}/helpers\n\n`);
   expect(seen.again).toBe(`URL: ${origin}/helpers\n\nNo changes since last call`);
@@ -480,7 +489,7 @@ async function content(): Promise<void> {
     "--timeout",
     "20000",
   );
-  const seen = JSON.parse(String(result.body.output)) as Record<string, string>;
+  const seen = JSON.parse(String(result.body.value)) as Record<string, string>;
   expect(seen.html).toContain("<h1>");
   expect(seen.html).toContain('<button id="go">');
   expect(seen.html).not.toContain("script");
@@ -524,7 +533,7 @@ async function recorded(): Promise<void> {
      await page.mouse.move(120, 80); await page.click("#inc"); await page.waitForTimeout(1200);
      return recording.isRecording({ page })`,
   );
-  expect(started.body.output).toBe("true");
+  expect(started.body.value).toBe("true");
   expect(await (await observed("/?recording"))?.locator("#nds-ghost-cursor").count()).toBe(1);
   const stopped = await run(
     "recording",
@@ -532,7 +541,7 @@ async function recorded(): Promise<void> {
      state.result = await recording.stop({ page: state.page });
      return JSON.stringify(state.result)`,
   );
-  const result = JSON.parse(String(stopped.body.output)) as {
+  const result = JSON.parse(String(stopped.body.value)) as {
     path: string;
     duration: number;
     size: number;
@@ -560,7 +569,7 @@ async function recorded(): Promise<void> {
     `state.demo = createDemoVideo({ recordingPath: state.result.path, durationMs: state.result.duration, executionTimestamps: state.result.executionTimestamps, speed: 8 }); return 1`,
   );
   const demo = String(
-    (await run("recording", "await state.demo", "--timeout", "20000")).body.output,
+    (await run("recording", "await state.demo", "--timeout", "20000")).body.value,
   );
   expect(existsSync(demo)).toBe(true);
   expect(seconds(demo)).toBeLessThan(seconds(result.path));
@@ -599,7 +608,7 @@ test("devtools helpers style, edit and debug an agent page", async () => {
       "--timeout",
       "20000",
     );
-    const seen = JSON.parse(String(result.body.output)) as Record<string, unknown>;
+    const seen = JSON.parse(String(result.body.value)) as Record<string, unknown>;
     expect(seen.styles).toContain(".card");
     expect(seen.styles).toContain("color: rgb(1, 2, 3)");
     expect(seen.restyled).toBe("rgb(9, 9, 9)");
@@ -624,7 +633,7 @@ test("the recorder turns a person's actions in an agent tab into events and fram
       "recorder",
       `const page = await context.newPage(); await page.goto("${origin}/helpers?recorder"); return JSON.stringify(await recorder.start())`,
     );
-    expect(JSON.parse(String(started.body.output)).path).toStartWith(
+    expect(JSON.parse(String(started.body.value)).path).toStartWith(
       join(runtime, "sessions", "recorder"),
     );
     const tab = await observed("/helpers?recorder");
@@ -636,7 +645,7 @@ test("the recorder turns a person's actions in an agent tab into events and fram
       "recorder",
       `const stopped = await recorder.stop(); return JSON.stringify({ stopped, timeline: recorder.events(), first: recorder.frame({ eventId: 1 }) })`,
     );
-    const seen = JSON.parse(String(result.body.output)) as {
+    const seen = JSON.parse(String(result.body.value)) as {
       stopped: { events: number; frames: number };
       timeline: string;
       first: string;
@@ -661,8 +670,8 @@ test("agent code loads modules and lists the elements the owner pinned", async (
       "pins",
       `state.page = await context.newPage(); await state.page.goto("${origin}/helpers?pins"); return require("node:path").basename("/a/b.txt")`,
     );
-    expect(page.body.output).toBe("b.txt");
-    expect((await run("pins", `(await import("./helper.mjs")).answer`)).body.output).toBe("42");
+    expect(page.body.value).toBe("b.txt");
+    expect((await run("pins", `(await import("./helper.mjs")).answer`)).body.value).toBe("42");
     await (await observed("/helpers?pins"))?.click("#save", { button: "right" });
     const result = await run(
       "pins",
@@ -670,7 +679,7 @@ test("agent code loads modules and lists the elements the owner pinned", async (
        await state.page.evaluate(() => { const target = globalThis.__ndsContextTarget; globalThis.__ndsPins = [target]; globalThis.ndsPinnedElem1 = target; target.setAttribute("data-nds-pin", "1"); });
        return JSON.stringify({ remembered, pinned: await pinnedElements({ page: state.page }) })`,
     );
-    const seen = JSON.parse(String(result.body.output)) as { remembered: string; pinned: string };
+    const seen = JSON.parse(String(result.body.value)) as { remembered: string; pinned: string };
     expect(seen.remembered).toBe("save");
     expect(seen.pinned).toBe(
       'ndsPinnedElem1: locator("[data-nds-pin=\\"1\\"]") = getByRole("button", { name: "Save", exact: true })',
@@ -702,7 +711,7 @@ test("raw CDP sessions reach agent tabs, including a virtual authenticator", asy
     "--timeout",
     "20000",
   );
-  expect(result.body.output).toBe("NotAllowedError signed-in 1 event");
+  expect(result.body.value).toBe("NotAllowedError signed-in 1 event");
 });
 
 test("a raw CDP session that enables Runtime learns the page's contexts", async () => {
@@ -722,7 +731,7 @@ test("a raw CDP session that enables Runtime learns the page's contexts", async 
     "--timeout",
     "10000",
   );
-  expect(result.body.output).toBe("true Fixture");
+  expect(result.body.value).toBe("true Fixture");
   expect((await cli("session", "close", "runtime", "--close-tabs")).code).toBe(0);
 });
 
@@ -734,7 +743,7 @@ test("screenshots are written inside the session area", async () => {
     "20000",
   );
   // Agent code joins with "/", which Windows accepts beside its own separator.
-  const path = resolve(String(result.body.output));
+  const path = resolve(String(result.body.value));
   expect(path).toBe(join(runtime, "sessions", "acceptance", "form.png"));
   expect([...readFileSync(path).subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
 });
@@ -747,7 +756,7 @@ test("concurrent execution in one session is refused as busy", async () => {
   await Bun.sleep(300);
   const second = await run("acceptance", "1");
   expect(second.body.error).toBe("busy");
-  expect((await slow).body.output).toBe("slow");
+  expect((await slow).body.value).toBe("slow");
 });
 
 test("a timeout stops the run before its later action and resets state", async () => {
@@ -762,7 +771,7 @@ test("a timeout stops the run before its later action and resets state", async (
   expect(result).toEqual({ code: 2, body: expect.objectContaining({ error: "timeout" }) });
   await Bun.sleep(3500);
   expect(await page?.locator("#c").textContent()).toBe(before ?? "");
-  expect((await run("acceptance", "state.value === undefined")).body.output).toBe("true");
+  expect((await run("acceptance", "state.value === undefined")).body.value).toBe("true");
 });
 
 test("a replacement executor sees its page and none of the old executor's interception", async () => {
@@ -783,7 +792,7 @@ test("a replacement executor sees its page and none of the old executor's interc
     "--timeout",
     "8000",
   );
-  expect(replaced.body.output).toBe("Fixture");
+  expect(replaced.body.value).toBe("Fixture");
   expect((await cli("session", "close", "replaced", "--close-tabs")).code).toBe(0);
 });
 
@@ -799,11 +808,59 @@ test("another extension's frame neither ends an agent tab nor reaches agents", a
     "--timeout",
     "15000",
   );
-  expect(result.body.output).toBe("1 0 Foreign host");
+  expect(result.body.value).toBe("1 0 Foreign host");
   expect(
-    (await run("foreign", "await state.page.reload(); return state.page.url()")).body.output,
+    (await run("foreign", "await state.page.reload(); return state.page.url()")).body.value,
   ).toBe(`${origin}/foreign`);
   expect((await cli("session", "close", "foreign", "--close-tabs")).code).toBe(0);
+});
+
+// What an agent's shell sees from one CLI call: plain text, no protocol envelope.
+async function plain(...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const child = Bun.spawn([binary, ...args], { env, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return {
+    code: await child.exited,
+    stdout,
+    stderr: stderr.replace(/^\{.*"event.name".*\}\n/gm, ""),
+  };
+}
+
+test("agents read plain text, and a stuck action fails with its reason before the deadline", async () => {
+  await opened("plain");
+  const value = await plain("-s", "plain", "-e", "1 + 1");
+  expect(value).toMatchObject({ code: 0, stdout: "[return value] 2\n" });
+  const logged = await plain(
+    "-s",
+    "plain",
+    "-e",
+    `state.page = await context.newPage(); await state.page.goto("${origin}/"); await state.page.evaluate(() => console.log("%cstyled %s", "color: red", "text")); state.kept = 1; return getLatestLogs({ page: state.page, sinceLastCall: true })`,
+  );
+  expect(logged.stdout).toContain("[log] styled text");
+  expect(logged.stdout).not.toContain("color: red");
+  // A locator that matches nothing fails with Playwright's reason within the run's own deadline;
+  // the session keeps its state.
+  const stuck = await plain(
+    "-s",
+    "plain",
+    "-e",
+    'await state.page.click("#missing")',
+    "--timeout",
+    "4000",
+  );
+  expect(stuck.code).toBe(1);
+  expect(stuck.stderr).toContain("no element matched the locator");
+  expect((await plain("-s", "plain", "-e", "state.kept")).stdout).toBe("[return value] 1\n");
+  const closed = await plain("-s", "plain", "-e", "await state.page.close()");
+  expect(closed.stdout).toStartWith("[WARNING] Page closed");
+  expect(closed.stdout).toContain("for state.page");
+  const refused = await plain("-s", "nowhere", "-e", "1");
+  expect(refused.code).toBe(2);
+  expect(refused.stderr).toStartWith("Error (session_not_found)");
+  expect((await cli("session", "close", "plain")).code).toBe(0);
 });
 
 test("a client that disconnects mid-run cancels it and frees the session", async () => {
@@ -832,7 +889,7 @@ test("a client that disconnects mid-run cancels it and frees the session", async
     executors = processes(cdpEndpoint);
   }
   expect(executors).toEqual([]);
-  expect((await run("acceptance", "state.value === undefined")).body.output).toBe("true");
+  expect((await run("acceptance", "state.value === undefined")).body.value).toBe("true");
   await Bun.sleep(3000);
   expect(await page?.locator("#c").textContent()).toBe(before ?? "");
 });
@@ -914,7 +971,7 @@ test.skipIf(windows)(
         timeout_ms: 20000,
         expect: null,
       }),
-    ).toMatchObject({ result: "executed", failure: null, output: "Owned" });
+    ).toMatchObject({ result: "executed", failure: null, output: "[return value] Owned" });
     expect(await observed("/owned")).toBeDefined();
     // Close while an owned execution runs: the acknowledgement comes only after its executor ended.
     const executor = join(runtime, "sessions", "owned");
@@ -975,7 +1032,7 @@ test("the owner's switch revokes sessions until control is enabled again", async
   expect(reopened.body).toMatchObject({ project: "acceptance" });
   expect(Number(reopened.body.tabs)).toBeGreaterThan(0);
   const result = await run("acceptance", "context.pages().map((page) => page.url()).sort()");
-  expect(result.body.output).toContain(`${origin}/`);
+  expect(result.body.value).toContain(`${origin}/`);
 });
 
 test("a lost host is replaced and the agent group is reclaimed without owner tabs", async () => {
@@ -988,7 +1045,7 @@ test("a lost host is replaced and the agent group is reclaimed without owner tab
     "--timeout",
     "20000",
   );
-  expect(written.body.output).toBe("written");
+  expect(written.body.value).toBe("written");
   expect(existsSync(leftover)).toBe(true);
   // Only the host runs from the installed prefix; cmd starts a Windows host by its wrapper.
   const hostCommand = windows ? hostBinary : `${hostBinary} chrome-extension://`;
@@ -1016,9 +1073,9 @@ test("a lost host is replaced and the agent group is reclaimed without owner tab
     "acceptance",
     "[state.value === undefined, ...context.pages().map((page) => page.url())].join(' ')",
   );
-  expect(reclaimed.body.output).toStartWith("true ");
-  expect(reclaimed.body.output).toContain(`${origin}/`);
-  expect(reclaimed.body.output).not.toContain("/owner");
+  expect(reclaimed.body.value).toStartWith("true ");
+  expect(reclaimed.body.value).toContain(`${origin}/`);
+  expect(reclaimed.body.value).not.toContain("/owner");
   expect(owner?.url()).toBe(`${origin}/owner`);
 });
 

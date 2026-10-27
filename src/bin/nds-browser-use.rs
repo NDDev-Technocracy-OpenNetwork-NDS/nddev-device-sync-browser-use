@@ -17,7 +17,7 @@ const USAGE: &str = "usage:
   nds-browser-use session new <project>
   nds-browser-use session list
   nds-browser-use session close <project> [--keep-tabs]
-  nds-browser-use -s <project> (-e <code> | -f <file>) [--timeout <ms>] [--expect <target>:<document>]
+  nds-browser-use -s <project> (-e <code> | -f <file>) [--timeout <ms>] [--expect <target>:<document>] [--json]
   nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)";
 /// How agents use the tool, printed by `nds-browser-use skill`.
 const AGENT_GUIDE: &str = include_str!("../../docs/agent-guide.md");
@@ -133,7 +133,7 @@ async fn client(words: &[&str]) -> ExitCode {
                 )
                 .await
             {
-                Ok(outcome) => {
+                Ok(outcome) if execution.json => {
                     print(&outcome);
                     if outcome.failure.is_none() {
                         ExitCode::SUCCESS
@@ -141,7 +141,20 @@ async fn client(words: &[&str]) -> ExitCode {
                         ExitCode::from(1)
                     }
                 }
-                Err(error) => failed(&error),
+                // Agents read plain text: the result on stdout, a failed script's on stderr.
+                Ok(outcome) if outcome.failure.is_none() => {
+                    println!("{}", outcome.output);
+                    ExitCode::SUCCESS
+                }
+                Ok(outcome) => {
+                    eprintln!("{}", outcome.output);
+                    ExitCode::from(1)
+                }
+                Err(error) if execution.json => failed(&error),
+                Err(error) => {
+                    eprintln!("Error ({}): {error}", code(&error));
+                    ExitCode::from(2)
+                }
             };
         }
         _ => return usage(),
@@ -157,15 +170,28 @@ struct Execution {
     code: String,
     timeout: Duration,
     expect: Option<Document>,
+    /// The protocol answer as JSON, for scripts and NDS; agents read the text form.
+    json: bool,
 }
 
 #[cfg(any(unix, windows))]
 impl Execution {
     fn parse(mut words: &[&str]) -> Option<Self> {
-        let (mut code, mut timeout, mut expect) = (None, Duration::from_secs(10), None);
-        while let [flag, value, rest @ ..] = words {
-            match *flag {
-                "-e" => code = Some((*value).to_owned()),
+        let (mut code, mut timeout, mut expect, mut json) =
+            (None, Duration::from_secs(10), None, false);
+        loop {
+            let (flag, value, rest) = match words {
+                [] => break,
+                ["--json", rest @ ..] => {
+                    json = true;
+                    words = rest;
+                    continue;
+                }
+                [flag, value, rest @ ..] => (*flag, *value, rest),
+                _ => return None,
+            };
+            match flag {
+                "-e" => code = Some(value.to_owned()),
                 "-f" => code = Some(read_code(value)?),
                 "--timeout" => timeout = Duration::from_millis(value.parse().ok()?),
                 "--expect" => {
@@ -179,11 +205,12 @@ impl Execution {
             }
             words = rest;
         }
-        let code = code.filter(|code| words.is_empty() && code.len() <= CODE_LIMIT)?;
+        let code = code.filter(|code| code.len() <= CODE_LIMIT)?;
         Some(Self {
             code,
             timeout,
             expect,
+            json,
         })
     }
 }
@@ -258,14 +285,18 @@ fn print<T: serde::Serialize>(value: &T) {
 
 #[cfg(any(unix, windows))]
 fn failed(error: &Error) -> ExitCode {
-    let code = match error {
+    print(&serde_json::json!({ "error": code(error), "message": error.to_string() }));
+    ExitCode::from(2)
+}
+
+#[cfg(any(unix, windows))]
+fn code(error: &Error) -> &'static str {
+    match error {
         Error::Io(error) => error.code(),
         Error::Refused(refusal) => refusal.code(),
         Error::InvalidResponse => "invalid_response",
         Error::UnsupportedPlatform => "unsupported_platform",
-    };
-    print(&serde_json::json!({ "error": code, "message": error.to_string() }));
-    ExitCode::from(2)
+    }
 }
 
 fn usage() -> ExitCode {

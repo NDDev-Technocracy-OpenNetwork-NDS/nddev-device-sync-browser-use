@@ -4,7 +4,6 @@
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { inspect } from "node:util";
 import vm from "node:vm";
 import { chromium, type Page } from "playwright-core";
 import { checks, owner } from "./agent/checks";
@@ -18,6 +17,7 @@ import {
   getReactSource,
   getStylesForLocator,
 } from "./agent/devtools";
+import { bounded, type Console, compose, describeError } from "./agent/format";
 import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
 import { getLocatorStringForElement, pinnedElements } from "./agent/locators";
@@ -27,10 +27,11 @@ import { createDemoVideo, executing, ghostCursor, recording } from "./agent/reco
 import { resizeImageForAgent, screenshotWithAccessibilityLabels } from "./agent/screens";
 import { ref, refToLocator, snapshot, attach as watchSnapshots } from "./agent/snapshot";
 
-const OUTPUT_LIMIT = 900_000;
 const LOG_LIMIT = 200;
+// Playwright's waits end this long before an execution's deadline.
+const WAIT_MARGIN_MS = 1_000;
 
-type Request = { id: number; code: string };
+type Request = { id: number; code: string; timeout_ms?: number };
 type Failure = "script_error" | "target_closed" | "browser_disconnected" | "invalid_request";
 const [endpoint, artifacts] = process.argv.slice(2);
 if (!endpoint || !artifacts) process.exit(2);
@@ -43,28 +44,28 @@ const browser = await chromium.connectOverCDP(endpoint, { timeout: 15_000 });
 const context = browser.contexts()[0] ?? process.exit(3);
 browser.on("disconnected", () => process.exit(4));
 
-let logs: string[] = [];
-const record = (...values: unknown[]): void => {
-  if (logs.length < LOG_LIMIT) logs.push(values.map(render).join(" "));
-};
-const captured = { log: record, info: record, warn: record, error: record, debug: record };
-
-function render(value: unknown): string {
-  return typeof value === "string" ? value : inspect(value, { depth: 4, breakLength: 120 });
-}
+let logs: Console[] = [];
+const recorder =
+  (method: string) =>
+  (...values: unknown[]): void => {
+    if (logs.length < LOG_LIMIT) logs.push({ method, values });
+  };
+const captured = Object.fromEntries(
+  ["log", "info", "warn", "error", "debug"].map((method) => [method, recorder(method)]),
+);
 
 const state: Record<string, unknown> = {};
 
-// The pages an agent keeps in `state`, whose errors and new tabs its results report.
-function watched(): Set<Page> {
-  return new Set(
-    Object.values(state).filter((value): value is Page => context.pages().includes(value as Page)),
-  );
+// The `state` keys that hold a page; results report the errors, new tabs and closing of such pages.
+function keys(page: Page): string[] {
+  return Object.entries(state)
+    .filter(([, value]) => value === page)
+    .map(([key]) => key);
 }
 
 // Every page the session sees is recorded from the moment the executor sees it.
 function observe(page: Page): void {
-  watchLogs(page, context, watched);
+  watchLogs(page, context, keys);
   watchLoad(page);
   watchSnapshots(page);
 }
@@ -141,28 +142,19 @@ function classify(error: unknown): Failure {
     : "script_error";
 }
 
-function bounded(text: string): { output: string; truncated: boolean } {
-  return text.length > OUTPUT_LIMIT
-    ? { output: text.slice(0, OUTPUT_LIMIT), truncated: true }
-    : { output: text, truncated: false };
-}
-
 async function run(request: Request): Promise<void> {
   logs = [];
   executing(true);
+  const wait = Math.max(1_000, (request.timeout_ms ?? 10_000) - WAIT_MARGIN_MS);
+  context.setDefaultTimeout(wait);
+  context.setDefaultNavigationTimeout(wait);
   try {
     const value = await compile(request.code).runInContext(sandbox);
-    const result = value === undefined ? [] : [render(value)];
-    const text = [...logs, ...result, ...notified()].join("\n");
+    const text = compose({ notices: notified(), console: logs, value });
     write({ id: request.id, ok: true, ...bounded(text) });
   } catch (error) {
-    const detail = error instanceof Error ? `${error.name}: ${error.message}` : render(error);
-    write({
-      id: request.id,
-      ok: false,
-      error: classify(error),
-      ...bounded([...logs, detail, ...notified()].join("\n")),
-    });
+    const text = compose({ notices: notified(), console: logs, error: describeError(error) });
+    write({ id: request.id, ok: false, error: classify(error), ...bounded(text) });
   } finally {
     executing(false);
   }
