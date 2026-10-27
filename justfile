@@ -33,7 +33,7 @@ install browser="chrome" prefix=(env_var("HOME") / ".local/share/nds-browser-use
     stage="{{prefix}}.stage"; rm -rf "$stage"; mkdir -p "$stage/bin" "$stage/extension" "$stage/executor"; \
     install -m 0755 "$target/release/nds-browser-use" "$stage/bin/"; \
     cp -r packages/extension/manifest.json packages/extension/background.js packages/extension/popup.html packages/extension/popup.js packages/extension/icons "$stage/extension/"; \
-    cp packages/executor/executor.ts "$stage/executor/"; cp package.json bun.lock "$stage/"; \
+    cp -r packages/executor/executor.ts packages/executor/agent "$stage/executor/"; cp package.json bun.lock "$stage/"; \
     (cd "$stage" && bun install --frozen-lockfile --production --ignore-scripts); \
     rm -rf "{{prefix}}.previous"; if [ -e "{{prefix}}" ]; then mv "{{prefix}}" "{{prefix}}.previous"; fi; mv "$stage" "{{prefix}}"; rm -rf "{{prefix}}.previous"; \
     "{{prefix}}/bin/nds-browser-use" install --bun "${bun:-$(command -v bun)}" --executor "{{prefix}}/executor/executor.ts" --browser {{browser}}; \

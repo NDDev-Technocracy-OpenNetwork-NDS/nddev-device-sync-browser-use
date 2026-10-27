@@ -168,6 +168,7 @@ beforeAll(async () => {
         // A different site (localhost vs 127.0.0.1) renders out of process.
         "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
         "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
+        "/helpers": `<title>Helpers</title><script>console.log("loaded helpers")</script><main><button id="save" onclick="this.textContent = 'Saved'">Save</button><button id="fail" onclick="setTimeout(() => { throw new Error('boom') })">Fail</button><a id="pop" href="/linked" target="_blank">Pop</a><div id="box" style="overflow-y: auto; height: 50px"><p style="height: 200px">tall</p></div><input id="name" value="x" aria-label="Name"></main>`,
         // A Turnstile widget with its response field, and reCAPTCHA's invisible badge, which is no
         // check a person passes; the test routes both vendors' frames.
         "/check": `<iframe src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv0/0/e2e/0x4AAAAAAA/auto/normal" width="300" height="65"></iframe><iframe src="https://www.google.com/recaptcha/api2/anchor?ar=1&k=e2e&size=invisible" width="256" height="60"></iframe><input type="hidden" name="cf-turnstile-response" value="">`,
@@ -311,7 +312,12 @@ test("popups opened by an agent page join the agent session", async () => {
     "--timeout",
     "20000",
   );
-  expect(result.body.output).toBe(`${origin}/target ${origin}/linked`);
+  // Both new tabs are announced after the result, since the agent keeps their opener in state.
+  const [value, ...notices] = String(result.body.output).split("\n");
+  expect(value).toBe(`${origin}/target ${origin}/linked`);
+  expect(notices).toHaveLength(2);
+  for (const notice of notices)
+    expect(notice).toStartWith(`[WARNING] New page opened from ${origin}/`);
   const popup = tabs(result).find((tab) => tab.url === `${origin}/target`);
   expect(popup?.document).toBeString();
 });
@@ -378,6 +384,57 @@ test("bot checks are reported and handed to the owner", async () => {
     cleared: {},
   });
 });
+
+// The agent helpers: load detection, snapshots with refs, searches and diffs, page logs, element
+// inspection, and the page errors and new tabs reported with a result.
+test("agent helpers observe a page and report its errors and new tabs", async () => {
+  await opened("helpers");
+  try {
+    await helpers();
+  } finally {
+    await cli("session", "close", "helpers", "--close-tabs");
+  }
+});
+
+async function helpers(): Promise<void> {
+  const result = await run(
+    "helpers",
+    `const page = await context.newPage(); state.page = page; await page.goto("${origin}/helpers");
+     const loaded = await waitForPageLoad({ page, timeout: 5000 });
+     const first = await snapshot({ page });
+     const again = await snapshot({ page });
+     const found = await snapshot({ page, search: /button/ });
+     const save = first.match(/button "Save" \\[ref=(e\\d+)\\]/)[1];
+     await page.locator(refToLocator({ ref: save })).click();
+     const changed = await snapshot({ page });
+     const logs = getLatestLogs({ page, sinceLastCall: true });
+     const none = getLatestLogs({ page, sinceLastCall: true });
+     const box = await inspect({ locator: page.locator("#box") });
+     const input = await inspect({ locator: page.locator("#name") });
+     await page.click("#fail"); await page.click("#pop"); await page.waitForTimeout(500);
+     return JSON.stringify({ loaded: loaded.success, first, again, found, changed, logs, none, box, input })`,
+    "--timeout",
+    "20000",
+  );
+  const [json = "{}", ...notices] = String(result.body.output).split("\n");
+  const seen = JSON.parse(json) as Record<string, string | boolean>;
+  expect(seen.loaded).toBe(true);
+  expect(seen.first).toStartWith(`URL: ${origin}/helpers\n\n`);
+  expect(seen.again).toBe(`URL: ${origin}/helpers\n\nNo changes since last call`);
+  expect(seen.found).toContain('button "Save"');
+  expect(seen.found).not.toContain("link");
+  expect(seen.changed).toContain("+ ");
+  expect(seen.changed).toContain('"Saved"');
+  expect(seen.logs).toContain("[log] loaded helpers");
+  expect(seen.none).toBe("No new logs since last call");
+  expect(seen.box).toMatch(/Scroll Y: size=\d+ client=50 overflowing=true/);
+  expect(seen.input).toContain('Input: value="x"');
+  expect(seen.input).toContain("Aria: aria-label=Name");
+  expect(notices.some((line) => line.startsWith("[PAGE ERROR]") && line.includes("boom"))).toBe(
+    true,
+  );
+  expect(notices.some((line) => line.startsWith("[WARNING] New page opened"))).toBe(true);
+}
 
 // Chrome serves WebAuthn only to a focused page: a background agent tab is
 // refused, and the agent must bring its tab to the front for a passkey step.
