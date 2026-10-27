@@ -18,7 +18,7 @@ import {
   getReactSource,
   getStylesForLocator,
 } from "./agent/devtools";
-import { bounded, type Console, compose, describeError } from "./agent/format";
+import { bounded, type Console, compose, describeError, waitBudget } from "./agent/format";
 import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
 import { getLocatorStringForElement, pinnedElements } from "./agent/locators";
@@ -29,8 +29,6 @@ import { resizeImageForAgent, screenshotWithAccessibilityLabels } from "./agent/
 import { ref, refToLocator, snapshot, attach as watchSnapshots } from "./agent/snapshot";
 
 const LOG_LIMIT = 200;
-// Playwright's waits end this long before an execution's deadline.
-const WAIT_MARGIN_MS = 1_000;
 
 type Request = { id: number; code: string; timeout_ms?: number };
 // The host asks the executor to abort the script of one request once it passed its deadline.
@@ -193,7 +191,7 @@ async function run(request: Request): Promise<void> {
     },
   };
   executing(true);
-  const wait = Math.max(1_000, budget - WAIT_MARGIN_MS);
+  const wait = waitBudget(budget);
   context.setDefaultTimeout(wait);
   context.setDefaultNavigationTimeout(wait);
   try {
