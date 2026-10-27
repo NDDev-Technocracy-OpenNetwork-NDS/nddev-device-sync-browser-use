@@ -1003,7 +1003,7 @@ impl Host {
         };
         let mut probe = [0u8; 1];
         let reply = if let Some((project, generation, code, timeout_ms, expect)) = execution {
-            match self.session_life(&project, generation.as_deref()) {
+            match self.execution_life(&project, generation.as_deref()) {
                 Err(refusal) => Reply::Refused { refusal },
                 Ok(life) => {
                     let completed = {
@@ -1146,6 +1146,18 @@ impl Host {
             Request::Execute { .. } | Request::ExecuteOwned { .. } => Err(Refusal::InvalidRequest),
         };
         result.unwrap_or_else(|refusal| Reply::Refused { refusal })
+    }
+
+    /// The session an execution runs in. The owner's switch and the extension come first: once
+    /// control is off, the sweep may already have drained the session, and the agent learns why
+    /// rather than that the session is gone.
+    fn execution_life(
+        &self,
+        project: &str,
+        generation: Option<&str>,
+    ) -> Result<Arc<SessionLife>, Refusal> {
+        Self::ready(&self.state())?;
+        self.session_life(project, generation)
     }
 
     fn ready(state: &State) -> Result<(), Refusal> {

@@ -828,3 +828,24 @@ async fn an_idle_cli_session_closes_with_its_tabs_while_owned_and_recent_ones_st
     assert!(!state.sessions.contains_key("idle"));
     assert!(state.sessions.contains_key("recent") && state.sessions.contains_key("owned"));
 }
+
+#[tokio::test]
+async fn an_execution_after_the_switch_is_refused_for_the_switch_even_once_drained() {
+    let (host, _queue, _root) = fixture();
+    host.reserve("drained", false).unwrap();
+    host.on_control(false);
+    assert_eq!(
+        host.execution_life("drained", None).err(),
+        Some(Refusal::PermissionRequired)
+    );
+    host.state().sessions.remove("drained");
+    assert_eq!(
+        host.execution_life("drained", None).err(),
+        Some(Refusal::PermissionRequired)
+    );
+    host.on_control(true);
+    assert_eq!(
+        host.execution_life("drained", None).err(),
+        Some(Refusal::SessionNotFound)
+    );
+}
