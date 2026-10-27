@@ -4,7 +4,7 @@
 //! browser-level calls Playwright needs and limits every target to the
 //! session's own tab group. Commands it cannot honour fail visibly.
 
-use super::{EXTENSION_REPLY, Failure, Host, MAX_TABS, Waiter, tab_session};
+use super::{EXTENSION_REPLY, Failure, Host, MAX_TABS, tab_session};
 use crate::{CancellationToken, socket};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
