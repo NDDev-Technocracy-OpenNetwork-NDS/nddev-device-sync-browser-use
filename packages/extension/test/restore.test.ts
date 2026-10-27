@@ -142,20 +142,56 @@ test("recorded setup stays within its count and size, and removals free room", (
   const restore = new Restore();
   restore.startSession(1);
   const script = "Page.addScriptToEvaluateOnNewDocument";
+  const fits = (tab: number, method: string, params: object) => {
+    const release = restore.reserve(tab, method, params);
+    if (release) release();
+    return release !== false;
+  };
   const ids: string[] = [];
   for (let index = 0; index < MAX_SETUP_COMMANDS; index++) {
-    expect(restore.admits(1, script, { source: `${index}` })).toBe(true);
+    const release = restore.reserve(1, script, { source: `${index}` });
+    expect(release).not.toBe(false);
     const given = restore.record(1, script, { source: `${index}` }, { identifier: `c${index}` });
+    if (release) release();
     ids.push((given as { identifier: string }).identifier);
   }
-  // Every further unique script or binding is refused; replacing a recorded key still fits.
-  expect(restore.admits(1, script, { source: "one more" })).toBe(false);
-  expect(restore.admits(1, "Runtime.addBinding", { name: "more" })).toBe(false);
-  expect(restore.admits(1, "Network.disable", {})).toBe(true);
+  // Every further unique script or binding is refused; a removal always fits and frees room.
+  expect(fits(1, script, { source: "one more" })).toBe(false);
+  expect(fits(1, "Runtime.addBinding", { name: "more" })).toBe(false);
+  expect(fits(1, "Network.disable", {})).toBe(true);
   restore.record(1, "Page.removeScriptToEvaluateOnNewDocument", { identifier: ids[0] }, {});
-  expect(restore.admits(1, "Runtime.addBinding", { name: "more" })).toBe(true);
+  expect(fits(1, "Runtime.addBinding", { name: "more" })).toBe(true);
   // One script larger than the whole budget never fits.
   restore.startSession(2);
-  expect(restore.admits(2, script, { source: "x".repeat(MAX_SETUP_BYTES) })).toBe(false);
-  expect(restore.admits(2, script, { source: "x".repeat(1000) })).toBe(true);
+  expect(fits(2, script, { source: "x".repeat(MAX_SETUP_BYTES) })).toBe(false);
+  expect(fits(2, script, { source: "x".repeat(1000) })).toBe(true);
+});
+
+test("setup commands in flight hold their room, so only one of two fits the last slot", () => {
+  const restore = new Restore();
+  restore.startSession(1);
+  const script = "Page.addScriptToEvaluateOnNewDocument";
+  for (let index = 0; index < MAX_SETUP_COMMANDS - 1; index++) {
+    const release = restore.reserve(1, script, { source: `${index}` });
+    restore.record(1, script, { source: `${index}` }, { identifier: `c${index}` });
+    if (release) release();
+  }
+  // Two commands are sent before either answers: the second finds the last slot held.
+  const first = restore.reserve(1, script, { source: "a" });
+  const second = restore.reserve(1, script, { source: "b" });
+  expect(first).not.toBe(false);
+  expect(second).toBe(false);
+  restore.record(1, script, { source: "a" }, { identifier: "ca" });
+  if (first) first();
+  const sent: string[] = [];
+  restore.replay(1, async (method) => {
+    sent.push(method);
+    return { identifier: "x" };
+  });
+  expect(sent.length).toBeLessThanOrEqual(MAX_SETUP_COMMANDS);
+  // A command that failed gives its room back.
+  restore.startSession(3);
+  const failed = restore.reserve(3, script, { source: "lost" });
+  if (failed) failed();
+  expect(restore.reserve(3, script, { source: "next" })).not.toBe(false);
 });

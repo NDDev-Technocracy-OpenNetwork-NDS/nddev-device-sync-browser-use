@@ -41,8 +41,9 @@ class Browser {
   readonly evaluated: string[] = [];
   // Every command sent to Chrome, as "method tab" or "method tab/session".
   readonly commands: string[] = [];
-  // Tabs whose frames the worker removed foreign iframes from.
+  // Tabs whose frames the worker removed foreign iframes from, and cleanups that wait, by tab.
   readonly scripted: number[] = [];
+  readonly heldScripts = new Map<number, ReturnType<typeof deferred>>();
   readonly menu = new Event();
   readonly posted: Message[] = [];
   readonly port = { onMessage: new Event(), onDisconnect: new Event() };
@@ -168,6 +169,7 @@ class Browser {
       scripting: {
         executeScript: async ({ target }: { target: { tabId: number } }) => {
           this.scripted.push(target.tabId);
+          await this.heldScripts.get(target.tabId)?.promise;
           return [];
         },
       },
@@ -536,4 +538,48 @@ test("setup a reattach could not restore in full is refused before it reaches Ch
     await send({ type: "cdp", tab: 1, method: script, params: { source: "over" } })(),
   ).toMatchObject({ error: { code: "capacity" } });
   expect(browser.commands).toEqual([]);
+});
+
+test("of two setup commands in flight for the last slot exactly one is admitted", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  const script = "Page.addScriptToEvaluateOnNewDocument";
+  for (let index = 0; index < 255; index++)
+    await send({ type: "cdp", tab: 1, method: script, params: { source: `${index}` } })();
+  const held = deferred();
+  browser.heldCommands.set(script, held);
+  const first = send({ type: "cdp", tab: 1, method: script, params: { source: "a" } });
+  await Bun.sleep(5);
+  const second = send({ type: "cdp", tab: 1, method: script, params: { source: "b" } });
+  expect(await second()).toMatchObject({ error: { code: "capacity" } });
+  held.resolve();
+  expect(await first()).toMatchObject({ result: {} });
+  expect(browser.commands.filter((sent) => sent.startsWith(script)).length).toBe(256 + 1);
+});
+
+test("a tab that moves during frame cleanup is never attached", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  const cleanup = deferred();
+  browser.heldScripts.set(1, cleanup);
+  const claim = send({ type: "claim", group: "p" });
+  await until(() => browser.scripted.includes(1));
+  browser.move(1, -1);
+  cleanup.resolve();
+  expect(await claim()).toMatchObject({ result: { tabs: [] } });
+  expect(browser.actions).not.toContain("attach 1");
+});
+
+test("a reattach that loses its tab between the pin script's two commands sends no second", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  const pin = deferred();
+  browser.heldCommands.set("Page.addScriptToEvaluateOnNewDocument", pin);
+  browser.commands.length = 0;
+  browser.end(1);
+  await until(() => browser.commands.includes("Page.addScriptToEvaluateOnNewDocument 1"));
+  browser.move(1, -1);
+  pin.resolve();
+  await until(() => !browser.sessions.has(1));
+  await Bun.sleep(10);
+  expect(browser.commands).not.toContain("Runtime.evaluate 1");
 });
