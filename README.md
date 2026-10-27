@@ -36,13 +36,18 @@ the tabs with `target` and `document`; pass `--expect <target>:<document>` to
 refuse running against a replaced document.
 
 - `snapshot({ page })` returns the page's accessibility snapshot, headed by its
-  URL, in which every element carries a ref such as `[ref=e5]`;
-  `page.locator(refToLocator({ ref: "e5" }))` or `ref({ page, ref: "e5" })`
-  reaches it until the next snapshot. The first call shows the whole page,
-  later calls only the lines that changed, and a navigation starts over.
-  `search` (a string or pattern) shows the first matching lines,
-  `showDiffSinceLastCall: false` the whole page again, and a `locator` or
-  `frame` only that part.
+  URL, with a Playwright locator on every interactive line, such as
+  `[id="save"]` or `role=button[name="Save"i] >> nth=1`, for `page.locator()`.
+  A `locator` or `frame` snapshot shows only that part, and its locators are
+  relative to it. The first call shows the whole page, later calls only the
+  lines that changed, and a navigation starts over. `search` (a string or
+  pattern) shows the first matching lines, `showDiffSinceLastCall: false` the
+  whole page again. A frame of another process is shown through Playwright's
+  snapshot, with refs such as `[ref=e5]`; those refs and the labels of
+  `screenshotWithAccessibilityLabels` reach their element, through its frame,
+  with `ref({ page, ref: "e5" })` or
+  `page.locator(refToLocator({ ref: "e5", page }))`, until the next view that
+  shows refs.
 - `getLatestLogs({ page, sinceLastCall, search, count })` reads the page's
   console messages and errors, kept from the moment the session first saw the
   page; with `sinceLastCall` it returns only what is new.

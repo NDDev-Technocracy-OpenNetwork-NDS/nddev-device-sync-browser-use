@@ -185,6 +185,89 @@ test("no edge of a value lets inspect reach a Playwright object's internals", ()
   expect(render(carrying(function named() {}))).toBe("[Function: named]");
 });
 
+test("subclasses of built-ins never construct what inspect walks", () => {
+  const marker = "SECRET-SPECIES-MARKER";
+  const secret = () => ({
+    _type: "Page",
+    _guid: "page@3",
+    url: () => "https://example.test/",
+    _connection: { _platform: { env: { TOKEN: marker } } },
+  });
+  // Ordinary subclasses with a class field: their species would build a new instance with a page.
+  class PageBytes extends Uint8Array {
+    page = secret();
+  }
+  class PageBuffer extends ArrayBuffer {
+    page = secret();
+  }
+  class PageArray extends Array<unknown> {
+    page = secret();
+  }
+  class PageMap extends Map<unknown, unknown> {
+    page = secret();
+  }
+  class PageSet extends Set<unknown> {
+    page = secret();
+  }
+  class PageDate extends Date {
+    page = secret();
+  }
+  class PageRegExp extends RegExp {
+    page = secret();
+  }
+  class PageUrl extends URL {
+    page = secret();
+  }
+  class PageError extends Error {
+    page = secret();
+  }
+  class PageNodeBuffer extends Buffer {
+    page = secret();
+  }
+  const indexed: unknown[] = [];
+  Object.defineProperty(indexed, 0, { get: secret, enumerable: true });
+  const cases: unknown[] = [
+    new PageBytes([1, 2]),
+    new PageBuffer(2),
+    new PageArray(1, 2),
+    new PageMap([["a", 1]]),
+    new PageSet([1]),
+    new PageDate(0),
+    new PageRegExp("a", "g"),
+    new PageUrl("https://example.test/"),
+    new PageError("boom"),
+    Object.setPrototypeOf(Buffer.from("ab"), PageNodeBuffer.prototype),
+    new Proxy({ page: secret() }, {}),
+    indexed,
+    Object.create(Date.prototype),
+    Object.create(Uint8Array.prototype),
+    Object.create(URL.prototype),
+  ];
+  for (const value of [...cases, { nested: cases }]) {
+    const text = render(value);
+    expect(text).not.toContain(marker);
+    expect(text).not.toContain("_connection");
+  }
+  expect(render(new PageBytes([1, 2]))).toBe("Uint8Array(2) [ 1, 2 ]");
+  expect(render(new PageArray(1, 2))).toBe("[ 1, 2 ]");
+  expect(render(new PageMap([["a", 1]]))).toBe("Map(1) { 'a' => 1 }");
+  expect(render(new PageDate(0))).toBe("1970-01-01T00:00:00.000Z");
+  expect(render(new PageRegExp("a", "gi"))).toBe("/a/gi");
+  expect(render(new PageUrl("https://example.test/"))).toBe(
+    "URL { href: 'https://example.test/' }",
+  );
+  expect(render(new PageError("boom"))).toBe("[Error: boom]");
+  expect(render(Buffer.from("ab"))).toBe("<Buffer 61 62>");
+  expect(render(indexed)).toBe("[ [Getter] ]");
+  const detached = new ArrayBuffer(2);
+  const view = new Uint8Array(detached);
+  structuredClone(detached, { transfer: [detached] });
+  expect(render([detached, view, Object.create(URL.prototype)])).toBe(
+    "[ [detached], [detached], [URL] ]",
+  );
+  expect(render(Array.from({ length: 150 }, (_, index) => index))).toContain("... 50 more items");
+});
+
 test("Playwright waits always end inside the execution's remaining budget", () => {
   expect(waitBudget(10_000)).toBe(9_000);
   expect(waitBudget(2_000)).toBe(1_000);
