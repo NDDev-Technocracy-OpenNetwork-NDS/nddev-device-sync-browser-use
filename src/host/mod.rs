@@ -635,6 +635,7 @@ impl Host {
             Some(error) => Err(match error["code"].as_str() {
                 Some("permission_required") => Failure::Refused(Refusal::PermissionRequired),
                 Some("target_closed") => Failure::Refused(Refusal::TargetClosed),
+                Some("capacity") => Failure::Refused(Refusal::Capacity),
                 _ => Failure::Cdp(cdp_error(error["message"].as_str().unwrap_or_default())),
             }),
         };
@@ -1366,6 +1367,11 @@ impl Host {
         }
         {
             let mut state = self.state();
+            // The life may have been closed or replaced while its release was answered; only the
+            // current, open life claims its group again.
+            if !Self::current(&state, project, life) {
+                return Err(Refusal::PermissionRequired);
+            }
             let tabs: Vec<i64> = state
                 .tabs
                 .iter()
@@ -1391,12 +1397,26 @@ impl Host {
             )
             .await?;
         let mut state = self.state();
+        // The same fence after the claim: a life closed meanwhile starts no executor, and its close
+        // releases what the claim attached.
+        if !Self::current(&state, project, life) {
+            return Err(Refusal::PermissionRequired);
+        }
         for entry in claimed["tabs"].as_array().into_iter().flatten() {
             if let Some(tab) = entry["tab"].as_i64() {
                 self.register(&mut state, project, tab, entry["target"].clone());
             }
         }
         Ok(())
+    }
+
+    /// Whether `life` is still the project's open, uncancelled life.
+    fn current(state: &State, project: &str, life: &Arc<SessionLife>) -> bool {
+        state
+            .sessions
+            .get(project)
+            .is_some_and(|s| Arc::ptr_eq(&s.life, life) && !s.closing)
+            && !life.stop.is_cancelled()
     }
 
     async fn stop_executor(executor: &mut Option<executor::Executor>) -> Result<(), Refusal> {
