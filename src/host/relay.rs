@@ -483,8 +483,12 @@ impl Host {
             "Target.closeTarget" => {
                 let tab =
                     self.owned_target(project, params["targetId"].as_str().unwrap_or_default())?;
-                self.session_request(project, client, json!({ "type": "close", "tab": tab }))
-                    .await?;
+                self.session_request(
+                    project,
+                    client,
+                    json!({ "type": "close", "group": project, "tab": tab }),
+                )
+                .await?;
                 Ok(json!({ "success": true }))
             }
             _ => Err(Failure::Cdp(json!({
@@ -530,7 +534,8 @@ impl Host {
             }
             (tab, child)
         };
-        let mut message = json!({ "type": "cdp", "tab": tab, "method": method, "params": params });
+        // The worker admits the command only for this group's current attachment of the tab.
+        let mut message = json!({ "type": "cdp", "group": project, "tab": tab, "method": method, "params": params });
         if let Some(child) = child {
             message["session"] = child.into();
         }
