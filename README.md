@@ -25,12 +25,33 @@ device. Not a replacement for Playwriter in current NDS acceptance.
 
 Agent code runs as an async function body with `context`, `browser`, a
 persistent `state` object, `artifacts` (the session's private directory for
-screenshots and files, removed with the session), `snapshot(page)` for an
-ARIA snapshot, and `fetch`/timers. A single expression is returned; otherwise
-use `return`. `context.pages()` lists only the session's tabs, and
+screenshots and files, removed with the session), the helpers below, and
+`fetch`/timers. A single expression is returned; otherwise use `return`.
+`context.pages()` lists only the session's tabs, and
 `context.newCDPSession(page)` gives raw CDP for those tabs. Each reply lists
 the tabs with `target` and `document`; pass `--expect <target>:<document>` to
 refuse running against a replaced document.
+
+- `snapshot({ page })` returns the page's accessibility snapshot, headed by its
+  URL, in which every element carries a ref such as `[ref=e5]`;
+  `page.locator(refToLocator({ ref: "e5" }))` or `ref({ page, ref: "e5" })`
+  reaches it until the next snapshot. The first call shows the whole page,
+  later calls only the lines that changed, and a navigation starts over.
+  `search` (a string or pattern) shows the first matching lines,
+  `showDiffSinceLastCall: false` the whole page again, and a `locator` or
+  `frame` only that part.
+- `getLatestLogs({ page, sinceLastCall, search, count })` reads the page's
+  console messages and errors, kept from the moment the session first saw the
+  page; with `sinceLastCall` it returns only what is new.
+- `waitForPageLoad({ page, timeout })` waits until the document is complete
+  and its own requests have finished, ignoring analytics, ads, long polls and
+  streams, and reports `{ success, readyState, pendingRequests, waitTimeMs }`.
+- `inspect({ locator, properties })` describes an element's box, scroll state,
+  styles, visibility, input state and aria attributes.
+
+A result also carries `[PAGE ERROR]` lines for uncaught errors and
+`[WARNING] New page opened` lines for new tabs of the pages an agent keeps in
+`state`, so a failure or a popup is seen without asking for it.
 
 Bot checks such as Cloudflare Turnstile, reCAPTCHA and hCaptcha are for a person
 to pass, so agent code never acts inside one. `checks(page)` lists the visible

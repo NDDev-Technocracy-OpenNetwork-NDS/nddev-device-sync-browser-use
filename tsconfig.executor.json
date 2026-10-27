@@ -5,5 +5,5 @@
     "types": ["node"],
     "noEmit": true
   },
-  "files": ["packages/executor/executor.ts"]
+  "include": ["packages/executor/executor.ts", "packages/executor/agent/*.ts"]
 }
