@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use std::{path::PathBuf, time::Duration};
 
 const USAGE: &str = "usage:
+  nds-browser-use skill
   nds-browser-use status
   nds-browser-use update
   nds-browser-use session new <project>
@@ -18,6 +19,8 @@ const USAGE: &str = "usage:
   nds-browser-use session close <project> [--keep-tabs]
   nds-browser-use -s <project> (-e <code> | -f <file>) [--timeout <ms>] [--expect <target>:<document>]
   nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)";
+/// How agents use the tool, printed by `nds-browser-use skill`.
+const AGENT_GUIDE: &str = include_str!("../../docs/agent-guide.md");
 const ARGUMENT_LIMIT: usize = 16;
 const CODE_LIMIT: usize = 60_000;
 
@@ -62,6 +65,10 @@ async fn main() -> ExitCode {
     let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["install", rest @ ..] => install_host(rest),
+        ["skill"] => {
+            print!("{AGENT_GUIDE}");
+            ExitCode::SUCCESS
+        }
         [] => usage(),
         _ => client(&words).await,
     }
