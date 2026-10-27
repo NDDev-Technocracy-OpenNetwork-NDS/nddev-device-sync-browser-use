@@ -515,14 +515,14 @@ test.skipIf(Bun.which("ffmpeg") === null)(
 async function recorded(): Promise<void> {
   const started = await run(
     "recording",
-    `const page = await context.newPage(); state.page = page; await page.goto("${origin}/");
+    `const page = await context.newPage(); state.page = page; await page.goto("${origin}/?recording");
      state.path = artifacts + "/work.mp4";
      await recording.start({ page, outputPath: state.path });
      await page.mouse.move(120, 80); await page.click("#inc"); await page.waitForTimeout(1200);
      return recording.isRecording({ page })`,
   );
   expect(started.body.output).toBe("true");
-  expect(await (await observed("/"))?.locator("#nds-ghost-cursor").count()).toBe(1);
+  expect(await (await observed("/?recording"))?.locator("#nds-ghost-cursor").count()).toBe(1);
   const stopped = await run(
     "recording",
     `await state.page.click("#inc"); await state.page.waitForTimeout(600);
