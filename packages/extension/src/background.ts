@@ -139,6 +139,13 @@ async function drained(life: Life): Promise<void> {
   while (life.work.size > 0) await Promise.allSettled([...life.work]);
 }
 
+// The lives of a group that still hold attachments, in addition to its current one.
+function holding(group: string): Set<Life> {
+  return new Set(
+    [...attached.values()].map(({ life }) => life).filter((life) => life.group === group),
+  );
+}
+
 async function dispatch(message: HostRequest): Promise<unknown> {
   // Releasing stays possible while the owner's switch is off, so the host can finish closing.
   if (!enabled && message.type !== "release") throw new Refusal("permission_required");
@@ -162,11 +169,23 @@ async function dispatch(message: HostRequest): Promise<unknown> {
       return {};
     }
     case "claim": {
-      // A claim continues an open life, or starts the next one once the previous life's work
-      // settled; nothing else starts a life.
+      // A claim continues an open life or starts the next one; nothing else starts a life. The
+      // next life starts only once every earlier life of the group settled its work and ended
+      // every attachment. One still owned, after a release that failed or is still running,
+      // refuses the claim; it is never taken over.
       let life = lives.get(message.group);
       if (!life?.open) {
-        if (life) await drained(life);
+        const earlier = holding(message.group);
+        if (life) earlier.add(life);
+        for (const previous of earlier) await drained(previous);
+        await Promise.allSettled(
+          [...attached.values()]
+            .filter((held) => earlier.has(held.life))
+            .map((held) => held.ending),
+        );
+        if ([...attached.values()].some((held) => earlier.has(held.life))) {
+          throw new Refusal("busy");
+        }
         // A concurrent claim may have started the next life meanwhile.
         const current = lives.get(message.group);
         life = current?.open
@@ -187,15 +206,19 @@ async function dispatch(message: HostRequest): Promise<unknown> {
       // group is released once its admitted work settled and every tab it attached is confirmed
       // out of this worker's control. A tab that is not stays owned and fails the release, so the
       // host keeps closing. A tab the owner took back is detached, never closed.
+      // The lives to end are fixed here: the current one and any earlier one still holding a tab.
+      // A life a later claim starts is not among them.
+      const ending = holding(message.group);
       const life = lives.get(message.group);
       if (life) {
         life.open = false;
         life.close = message.close;
-        await drained(life);
+        ending.add(life);
       }
+      for (const old of ending) await drained(old);
       const failures: unknown[] = [];
       for (const [tab, attachment] of [...attached]) {
-        if (attachment.life.group !== message.group) continue;
+        if (!ending.has(attachment.life)) continue;
         const close = message.close && !attachment.revoked;
         await relinquish(tab, attachment, close).catch((error) => failures.push(error));
       }
@@ -281,14 +304,13 @@ function attach(tab: number, life: Life): Promise<unknown> {
     life,
     (async () => {
       const attachment = attached.get(tab);
+      // A tab another life still holds stays with that life until its release ends it.
+      if (attachment && attachment.life !== life) throw new Refusal("busy");
       if (!attachment) {
         await chrome.debugger.attach({ tabId: tab }, PROTOCOL);
         // Recorded even when the life closed meanwhile: its release waits for this work and then
         // detaches the tab.
         attached.set(tab, { life, ended: false, revoked: false });
-      } else if (attachment.life !== life && !attachment.life.open && !attachment.revoked) {
-        // A release that failed left the tab attached; the next life of its group takes it over.
-        attachment.life = life;
       }
       const info = (await chrome.debugger.sendCommand({ tabId: tab }, "Target.getTargetInfo")) as {
         targetInfo: unknown;
@@ -304,6 +326,9 @@ function attach(tab: number, life: Life): Promise<unknown> {
 // resolved close or detach, or Chrome's own report that this session or tab ended, removes the
 // attachment; otherwise it stays owned and the original failure stands.
 function relinquish(tab: number, attachment: Attachment, close: boolean): Promise<void> {
+  if (attachment.ended) return Promise.resolve();
+  // A record that no longer holds its tab never acts, so it cannot end a later attachment.
+  if (attached.get(tab) !== attachment) return Promise.reject(new Refusal("target_closed"));
   attachment.ending ??= (async () => {
     try {
       if (close) await chrome.tabs.remove(tab);
@@ -328,15 +353,17 @@ function closeAll(): void {
   for (const life of lives.values()) life.open = false;
 }
 
-// The owner's switch and a lost host end every life at once and then every attachment. A tab
-// whose detach fails stays owned, so the release of its group retries and reports it.
+// The owner's switch and a lost host end every life at once and then the attachments of exactly
+// those lives, never of a life a later claim starts. A tab whose detach fails stays owned, so the
+// release of its group retries and reports it.
 async function detachAll(): Promise<void> {
-  closeAll();
-  await Promise.all([...lives.values()].map(drained));
+  const ending = new Set([...lives.values(), ...[...attached.values()].map(({ life }) => life)]);
+  for (const life of ending) life.open = false;
+  await Promise.all([...ending].map(drained));
   await Promise.all(
-    [...attached].map(([tab, attachment]) =>
-      relinquish(tab, attachment, false).catch(() => undefined),
-    ),
+    [...attached]
+      .filter(([, attachment]) => ending.has(attachment.life))
+      .map(([tab, attachment]) => relinquish(tab, attachment, false).catch(() => undefined)),
   );
 }
 
@@ -525,6 +552,9 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.groupId === undefined || grouping.has(tabId)) return;
   const attachment = attached.get(tabId);
   if (attachment && attachment.life.group !== groupKey(change.groupId)) {
+    // Out of its agent group, whether the owner took it back or Chrome is closing it: from now on
+    // no agent command or release closes the tab.
+    attachment.revoked = true;
     void revoke(tabId, attachment);
   } else if (!attachment) {
     const life = liveIn(change.groupId);
@@ -534,14 +564,13 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
 
 // Closing tabs and windows also clears their group; that is a closed target
 // reported by onDetach, not the owner moving the tab out of the agent area.
-// The owner taking a tab back ends agent access to it at once, before Chrome confirms the detach;
-// a detach that fails keeps the attachment owned, so the release of its group retries it.
+// The owner taking a tab back ended agent access to it already; the detach follows, and one that
+// fails keeps the attachment owned, so the release of its group retries it.
 async function revoke(tabId: number, attachment: Attachment): Promise<void> {
   const tab = await chrome.tabs.get(tabId).catch(() => undefined);
   const window = tab && (await chrome.windows.get(tab.windowId).catch(() => undefined));
   if (!tab || !window || groupKey(tab.groupId) !== undefined) return;
-  if (attached.get(tabId) !== attachment || attachment.revoked) return;
-  attachment.revoked = true;
+  if (attached.get(tabId) !== attachment || attachment.ended || attachment.ending) return;
   send({ type: "detached", tab: tabId, reason: "revoked" });
   await relinquish(tabId, attachment, false).catch(() => undefined);
 }
