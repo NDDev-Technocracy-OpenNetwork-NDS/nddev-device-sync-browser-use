@@ -8,6 +8,11 @@ const ENABLED = "enabled";
 const GROUPS = "groups";
 const RELOADED_FOR = "reloadedFor";
 const OWNER = "owner:";
+const PIN = "nds-pin";
+// Installed in every agent tab: remembers the element of the last right-click, for pinning.
+const CONTEXT = `if (!globalThis.__ndsContext) { globalThis.__ndsContext = true; addEventListener("contextmenu", (event) => { globalThis.__ndsContextTarget = event.target; }, true); }`;
+// Pins that element as ndsPinnedElemN and marks it, so agent code can reach it by locator.
+const PINNING = `(() => { const target = globalThis.__ndsContextTarget; if (!(target instanceof Element)) return 0; const pins = (globalThis.__ndsPins ??= []); if (!pins.includes(target)) pins.push(target); const number = pins.indexOf(target) + 1; globalThis["ndsPinnedElem" + number] = target; target.setAttribute("data-nds-pin", String(number)); return number; })()`;
 class Refusal extends Error {
 }
 let port;
@@ -314,6 +319,7 @@ function attach(tab, life) {
                 throw new Refusal("target_closed");
             }
             attachment.pending = false;
+            await remember(tab);
         }
         else if (attachment.revoked || attachment.pending) {
             throw new Refusal("target_closed");
@@ -482,6 +488,56 @@ async function clearOwner(tab) {
     await chrome.notifications.clear(`${OWNER}${tab}`);
     return {};
 }
+// The element of a right-click in an agent tab is remembered there, for the owner's pin.
+async function remember(tab) {
+    await chrome.debugger
+        .sendCommand({ tabId: tab }, "Page.addScriptToEvaluateOnNewDocument", { source: CONTEXT })
+        .catch(() => undefined);
+    await chrome.debugger
+        .sendCommand({ tabId: tab }, "Runtime.evaluate", { expression: CONTEXT })
+        .catch(() => undefined);
+}
+// The owner points an agent at an element: right-click, "Pin this element for the NDS agent".
+// Only tabs in an agent group can be pinned; the agent lists the pins with pinnedElements().
+async function pin(tab) {
+    const attachment = usable(tab);
+    const id = `pin:${tab}`;
+    if (!attachment) {
+        await chrome.notifications.create(id, {
+            type: "basic",
+            iconUrl: "icons/icon-128.png",
+            title: "NDS agent pin",
+            message: "Only tabs in an NDS agent group can be pinned; move this tab into the agent's group first.",
+        });
+        return;
+    }
+    const { result } = (await chrome.debugger.sendCommand({ tabId: tab }, "Runtime.evaluate", {
+        expression: PINNING,
+        returnByValue: true,
+    }));
+    const number = result?.value ?? 0;
+    await chrome.notifications.create(id, {
+        type: "basic",
+        iconUrl: "icons/icon-128.png",
+        title: `NDS agent ${attachment.life.group}`,
+        message: number
+            ? `Pinned as ndsPinnedElem${number}.`
+            : "Right-click the element itself to pin it.",
+    });
+}
+chrome.runtime.onInstalled.addListener(() => {
+    chrome.contextMenus.removeAll(() => {
+        chrome.contextMenus.create({
+            id: PIN,
+            title: "Pin this element for the NDS agent",
+            contexts: ["all"],
+        });
+    });
+});
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+    if (info.menuItemId === PIN && tab?.id !== undefined)
+        void pin(tab.id).catch(() => undefined);
+});
 chrome.notifications.onClicked.addListener((id) => {
     if (!id.startsWith(OWNER))
         return;
