@@ -10,6 +10,7 @@ ts-check:
     bun install --frozen-lockfile --ignore-scripts
     bun run check
     bun run check:generated
+    bun run test
 
 # Requires NDS_TEST_CHROME (Chrome for Testing); on AppArmor-restricted hosts
 # also CHROME_DEVEL_SANDBOX.

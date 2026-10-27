@@ -30,6 +30,16 @@ use `return`. `context.pages()` lists only the session's tabs, and
 the tabs with `target` and `document`; pass `--expect <target>:<document>` to
 refuse running against a replaced document.
 
+Bot checks such as Cloudflare Turnstile, reCAPTCHA and hCaptcha are for a person
+to pass, so agent code never acts inside one. `checks(page)` lists the visible
+checks of a page with their vendor and whether the page holds a passed response.
+When one stays unsolved, `notifyOwner(page, reason)` shows the owner a Chrome
+notification that names the agent and the site and opens the tab when clicked.
+The agent continues with other work, checks the page again later and calls
+`clearOwner(page)` once the check is passed; closing the tab also clears it.
+Fewer checks appear when agents work in the owner's profile without request
+bursts and use an official API or CLI where one exists.
+
 Limits: Chrome serves WebAuthn only to a focused page, so a passkey step needs
 `page.bringToFront()` and visibly activates the agent tab. Chrome keeps every
 extension out of `chrome://` pages and the Chrome Web Store. Browser-chrome
