@@ -7,6 +7,7 @@ const PROTOCOL = "1.3";
 const ENABLED = "enabled";
 const GROUPS = "groups";
 const RELOADED_FOR = "reloadedFor";
+const OWNER = "owner:";
 class Refusal extends Error {
 }
 let port;
@@ -97,6 +98,10 @@ async function dispatch(message) {
         case "cdp": {
             if (!attached.has(message.tab))
                 throw new Refusal("target_closed");
+            if (message.method === "NDS.notifyOwner")
+                return notifyOwner(message.tab, message.params);
+            if (message.method === "NDS.clearOwner")
+                return clearOwner(message.tab);
             const target = { tabId: message.tab };
             if (message.session)
                 target.sessionId = message.session;
@@ -285,6 +290,41 @@ async function adopt(tab, group) {
         adopting.delete(tab);
     }
 }
+// A check in an agent tab that only a person passes, such as a CAPTCHA. One notification per tab
+// names the agent and the site and stays until the owner opens the tab from it, the agent clears
+// it, or the tab closes. The agent keeps working meanwhile.
+async function notifyOwner(tab, params) {
+    const reason = params?.reason;
+    const page = await chrome.tabs.get(tab);
+    const id = `${OWNER}${tab}`;
+    await chrome.notifications.create(id, {
+        type: "basic",
+        iconUrl: "icons/icon-128.png",
+        title: `NDS agent ${attached.get(tab)} needs you`,
+        message: typeof reason === "string" && reason.trim() !== ""
+            ? reason.trim().slice(0, 200)
+            : "A check in its tab needs a person.",
+        contextMessage: page.url ? new URL(page.url).host : "",
+        requireInteraction: true,
+    });
+    return { notification: id };
+}
+async function clearOwner(tab) {
+    await chrome.notifications.clear(`${OWNER}${tab}`);
+    return {};
+}
+chrome.notifications.onClicked.addListener((id) => {
+    if (!id.startsWith(OWNER))
+        return;
+    void chrome.notifications.clear(id);
+    void chrome.tabs
+        .update(Number(id.slice(OWNER.length)), { active: true })
+        .then((tab) => tab && chrome.windows.update(tab.windowId, { focused: true }))
+        .catch(() => undefined);
+});
+chrome.tabs.onRemoved.addListener((tab) => {
+    void chrome.notifications.clear(`${OWNER}${tab}`);
+});
 chrome.debugger.onEvent.addListener((source, method, params) => {
     if (source.tabId === undefined || !attached.has(source.tabId))
         return;

@@ -168,6 +168,9 @@ beforeAll(async () => {
         // A different site (localhost vs 127.0.0.1) renders out of process.
         "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
         "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
+        // A Turnstile widget with its response field, and reCAPTCHA's invisible badge, which is no
+        // check a person passes; the test routes both vendors' frames.
+        "/check": `<iframe src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv0/0/e2e/0x4AAAAAAA/auto/normal" width="300" height="65"></iframe><iframe src="https://www.google.com/recaptcha/api2/anchor?ar=1&k=e2e&size=invisible" width="256" height="60"></iframe><input type="hidden" name="cf-turnstile-response" value="">`,
         // WebAuthn needs a domain RP ID; localhost is a secure context.
         "/passkey": `<button id="register" onclick="navigator.credentials.create({ publicKey: { rp: { name: 'NDS', id: 'localhost' }, user: { id: new Uint8Array(16), name: 'agent', displayName: 'Agent' }, challenge: new Uint8Array(32), pubKeyCredParams: [{ type: 'public-key', alg: -7 }], authenticatorSelection: { residentKey: 'required', userVerification: 'required' } } }).then(() => (outcome.textContent = 'registered'), (e) => (outcome.textContent = e.name))">Register</button><button id="signin" onclick="navigator.credentials.get({ publicKey: { rpId: 'localhost', challenge: new Uint8Array(32), userVerification: 'required' } }).then(() => (outcome.textContent = 'signed-in'), (e) => (outcome.textContent = e.name))">Sign in</button><span id="outcome"></span>`,
       };
@@ -348,6 +351,32 @@ test("network interception and cross-origin frames work in agent tabs", async ()
     ?.frames()
     .find((candidate) => candidate.url().endsWith("/inner"));
   expect(await frame?.locator("#inner").textContent()).toBe("inside");
+});
+
+// Only a person passes a bot check: agent code finds it, hands it to the owner through a Chrome
+// notification and sees it solved, without acting inside it.
+test("bot checks are reported and handed to the owner", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage();
+     await page.route((url) => ["challenges.cloudflare.com", "www.google.com"].includes(url.hostname), (route) => route.fulfill({ contentType: "text/html", body: "<p>check</p>" }));
+     await page.goto("${origin}/check");
+     await page.frameLocator("iframe").first().locator("p").waitFor();
+     const before = await checks(page);
+     const notified = await notifyOwner(page, "Pass the check on the fixture");
+     await page.evaluate(() => { document.getElementsByName("cf-turnstile-response")[0].value = "passed"; });
+     const after = await checks(page);
+     const cleared = await clearOwner(page);
+     return JSON.stringify({ before, notified: notified.notification.startsWith("owner:"), after, cleared })`,
+    "--timeout",
+    "20000",
+  );
+  expect(JSON.parse(String(result.body.output))).toEqual({
+    before: [{ vendor: "cloudflare", solved: false }],
+    notified: true,
+    after: [{ vendor: "cloudflare", solved: true }],
+    cleared: {},
+  });
 });
 
 // Chrome serves WebAuthn only to a focused page: a background agent tab is
