@@ -18,7 +18,14 @@ import {
   getReactSource,
   getStylesForLocator,
 } from "./agent/devtools";
-import { bounded, type Console, compose, describeError, waitBudget } from "./agent/format";
+import {
+  bounded,
+  type Console,
+  compose,
+  describeError,
+  errorParts,
+  waitBudget,
+} from "./agent/format";
 import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
 import { getLocatorStringForElement, pinnedElements } from "./agent/locators";
@@ -159,7 +166,7 @@ function compile(code: string): vm.Script {
 
 function classify(error: unknown): Failure {
   if (!browser.isConnected()) return "browser_disconnected";
-  const message = error instanceof Error ? error.message : "";
+  const message = errorParts(error)?.message ?? "";
   return /Target page, context or browser has been closed|Target closed/.test(message)
     ? "target_closed"
     : "script_error";

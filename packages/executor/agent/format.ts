@@ -13,20 +13,75 @@ const INSPECT = {
   breakLength: 80,
 } as const;
 
-type Handle = { _type: string; _guid: string; url?: () => string };
+// Reading an agent's value for its text never runs the agent's code: no getter is called and no
+// proxy trap fires. A walk up a prototype chain ends before the first proxy, and Playwright's
+// markers count only as own data properties. Every public entry below classifies through these.
 
-// Playwright's client objects (Page, Frame, Response, Request, ElementHandle, ...) are channel
-// owners: each carries its protocol type and guid.
-function handle(value: unknown): Handle | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const candidate = value as Partial<Handle>;
-  return typeof candidate._type === "string" && typeof candidate._guid === "string"
-    ? (value as Handle)
-    : undefined;
+function isObject(value: unknown): value is object {
+  return (typeof value === "object" && value !== null) || typeof value === "function";
 }
 
-function locator(value: unknown): value is { toString(): string; _selector: string } {
-  return typeof value === "object" && value !== null && "_selector" in value && "_frame" in value;
+// An object and its prototypes, ending before the first proxy, whose traps are the agent's code.
+function* chain(value: object): Generator<object> {
+  for (
+    let owner: object | null = value;
+    owner !== null && !types.isProxy(owner);
+    owner = Object.getPrototypeOf(owner)
+  ) {
+    yield owner;
+  }
+}
+
+// An own data property; undefined for an accessor, a missing property or a proxy.
+function ownData(value: object, key: string): unknown {
+  if (types.isProxy(value)) return undefined;
+  const field = Object.getOwnPropertyDescriptor(value, key);
+  return field && "value" in field ? field.value : undefined;
+}
+
+// A data property of an object or its prototypes up to the first proxy, read without calling a
+// getter; undefined for an accessor or a missing property.
+function dataField(value: object, key: string): unknown {
+  for (const owner of chain(value)) {
+    const field = Object.getOwnPropertyDescriptor(owner, key);
+    if (field) return "value" in field ? field.value : undefined;
+  }
+  return undefined;
+}
+
+function textField(value: object, key: string): string | undefined {
+  const field = dataField(value, key);
+  return typeof field === "string" && field ? field : undefined;
+}
+
+// Whether `prototype` is on the value's prototype chain before any proxy.
+function inherits(prototype: object, value: object): boolean {
+  for (const owner of chain(value)) if (owner !== value && owner === prototype) return true;
+  return false;
+}
+
+const ERROR = Error.prototype;
+
+/** The name and message of an error, read as data; undefined for a value that is no error. */
+export function errorParts(value: unknown): { name: string; message: string } | undefined {
+  if (!isObject(value) || types.isProxy(value)) return undefined;
+  if (!types.isNativeError(value) && !inherits(ERROR, value)) return undefined;
+  const message = dataField(value, "message");
+  return {
+    name: textField(value, "name") ?? "Error",
+    message: typeof message === "string" ? message : "",
+  };
+}
+
+// Playwright's client objects (Page, Frame, Response, Request, ElementHandle, ...) are channel
+// owners: each carries its protocol type and guid as own fields.
+function handleType(value: object): string | undefined {
+  const type = ownData(value, "_type");
+  return typeof type === "string" && typeof ownData(value, "_guid") === "string" ? type : undefined;
+}
+
+function isLocator(value: object): boolean {
+  return typeof ownData(value, "_selector") === "string" && ownData(value, "_frame") !== undefined;
 }
 
 /** A URL short enough for a line: its origin and path, and only the size of a long query. */
@@ -40,23 +95,27 @@ export function shortUrl(url: string, limit = URL_LIMIT): string {
 
 /** A Playwright object as a short tag, or undefined for any other value. */
 export function tag(value: unknown): string | undefined {
-  if (locator(value)) return `<Locator ${value.toString()}>`;
-  const found = handle(value);
-  if (!found) return undefined;
-  const object = value as Record<string, unknown>;
+  if (!isObject(value) || types.isProxy(value)) return undefined;
+  // One of Playwright's describing methods (url, status, method, toString), called on its own
+  // object; a result other than a string or number is ignored.
   const call = (name: string): string | undefined => {
-    const method = object[name];
-    if (typeof method !== "function") return undefined;
+    const method = dataField(value, name);
+    if (typeof method !== "function" || types.isProxy(method)) return undefined;
     try {
-      return String(method.call(value));
+      const result: unknown = method.call(value);
+      return typeof result === "string" || typeof result === "number" ? String(result) : undefined;
     } catch {
       return undefined;
     }
   };
+  if (isLocator(value))
+    return `<Locator ${call("toString") ?? String(ownData(value, "_selector"))}>`;
+  const type = handleType(value);
+  if (type === undefined) return undefined;
   const url = call("url");
-  const parts = [found._type];
-  if (found._type === "Response") parts.push(call("status") ?? "");
-  if (found._type === "Request") parts.push(call("method") ?? "");
+  const parts = [type];
+  if (type === "Response") parts.push(call("status") ?? "");
+  if (type === "Request") parts.push(call("method") ?? "");
   if (url) parts.push(shortUrl(url));
   return `<${parts.filter(Boolean).join(" ")}>`;
 }
@@ -108,8 +167,6 @@ const intrinsic = {
   typedSet: uncurry<void>(Reflect.get(TYPED, "set")),
   mapEntries: uncurry<Iterable<[unknown, unknown]>>(Map.prototype.entries),
   setValues: uncurry<Iterable<unknown>>(Set.prototype.values),
-  // Whether the first object is on the second's prototype chain.
-  inherits: uncurry<boolean>(Object.prototype.isPrototypeOf),
   buffer: Buffer.prototype,
   url: URL.prototype,
   allocBuffer: Buffer.alloc,
@@ -134,27 +191,12 @@ const intrinsic = {
   ) as Record<string, new (length: number) => object>,
 };
 
-// A data property of an object or its prototypes, read without calling a getter; undefined for an
-// accessor or a missing property.
-function dataField(value: object, key: string): unknown {
-  for (let owner: object | null = value; owner !== null; owner = Object.getPrototypeOf(owner)) {
-    const field = Object.getOwnPropertyDescriptor(owner, key);
-    if (field) return "value" in field ? field.value : undefined;
-  }
-  return undefined;
-}
-
-function textField(value: object, key: string): string | undefined {
-  const field = dataField(value, key);
-  return typeof field === "string" && field ? field : undefined;
-}
-
 // A typed array or Buffer copied into a new built-in one of the same type.
 function freshView(value: object): object {
   const name = intrinsic.typedName(value);
   const length = intrinsic.typedLength(value);
   if (intrinsic.typedBytes(value) > COPY_BYTES) return opaque(`${name}(${length})`);
-  const buffer = intrinsic.inherits(intrinsic.buffer, value);
+  const buffer = inherits(intrinsic.buffer, value);
   const made = intrinsic.typed[name];
   if (!buffer && !made) return opaque(`${name}(${length})`);
   const copy = buffer
@@ -183,7 +225,7 @@ function fresh(value: object): object | undefined {
     if (types.isSharedArrayBuffer(value)) return opaque("SharedArrayBuffer");
     if (types.isDataView(value)) return opaque(`DataView(${intrinsic.viewBytes(value)})`);
     if (types.isTypedArray(value)) return freshView(value);
-    if (intrinsic.inherits(intrinsic.url, value)) {
+    if (inherits(intrinsic.url, value)) {
       return opaque(`URL ${inspect({ href: intrinsic.href(value) }, INSPECT)}`);
     }
   } catch {
@@ -225,9 +267,8 @@ function shield(value: unknown, depth: number, ancestors: Set<object>): unknown 
   if (ancestors.has(value)) return opaque("[Circular]");
   const copy = fresh(value);
   if (copy !== undefined) return copy;
-  if (types.isNativeError(value) || value instanceof Error) {
-    return opaque(`[${textField(value, "name") ?? "Error"}: ${textField(value, "message") ?? ""}]`);
-  }
+  const error = errorParts(value);
+  if (error) return opaque(`[${error.name}: ${error.message}]`);
   if (types.isPromise(value)) return opaque("Promise");
   if (depth > INSPECT.depth) return opaque(Array.isArray(value) ? "[Array]" : "[Object]");
   ancestors.add(value);
@@ -274,7 +315,6 @@ export function shown(value: unknown): boolean {
 
 export type Console = { method: string; values: unknown[] };
 
-/** The text of one execution, in a fixed order: notices, console output, then the value. */
 // Terminal escape sequences and the other control characters but tab and newline. Playwright colors
 // its call logs where it detects a color terminal, and pages can log them; an agent reads neither.
 const CONTROL = new RegExp(
@@ -292,6 +332,7 @@ export function plain(text: string): string {
   return text.replace(CONTROL, "");
 }
 
+/** The text of one execution, in a fixed order: notices, console output, then the value. */
 export function compose(parts: {
   notices: string[];
   console: Console[];
@@ -345,17 +386,18 @@ const REASONS = [
 /** A Playwright error made readable: a timeout names why the action could not proceed, its call
  * log is cut to its last distinct lines, and internal stacks are dropped. */
 export function describeError(error: unknown): string {
-  if (!(error instanceof Error)) return render(error);
-  const message = plain(error.message);
+  const parts = errorParts(error);
+  if (!parts) return render(error);
+  const message = plain(parts.message);
   const [head = "", ...rest] = message.split("\n");
   const log = rest
     .map((line) => line.trim())
     .filter((line) => line.startsWith("- "))
     .map((line) => line.slice(2));
-  if (error.name !== "TimeoutError" || log.length === 0) {
-    return error.name === "Error" || error.name === "TimeoutError"
+  if (parts.name !== "TimeoutError" || log.length === 0) {
+    return parts.name === "Error" || parts.name === "TimeoutError"
       ? message
-      : `${error.name}: ${message}`;
+      : `${parts.name}: ${message}`;
   }
   const reason = [...log].reverse().find((line) => REASONS.some((pattern) => pattern.test(line)));
   const waited = log.some((line) => /locator resolved to/.test(line));
