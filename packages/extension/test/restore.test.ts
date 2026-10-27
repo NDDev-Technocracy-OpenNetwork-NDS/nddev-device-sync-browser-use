@@ -1,6 +1,13 @@
 // The rules that restore an agent tab's debugger session after Chrome detached it.
 import { expect, test } from "bun:test";
-import { MAX_REATTACHES, REATTACH_WINDOW_MS, Restore, restricted } from "../src/restore.js";
+import {
+  MAX_REATTACHES,
+  MAX_SETUP_BYTES,
+  MAX_SETUP_COMMANDS,
+  REATTACH_WINDOW_MS,
+  Restore,
+  restricted,
+} from "../src/restore.js";
 
 function replayed(restore: Restore, tab: number) {
   const sent: string[] = [];
@@ -129,4 +136,26 @@ test("other extensions' and browser pages are restricted, ours and the web are n
     expect(restricted(url, own)).toBe(true);
   for (const url of ["https://example.test/", "about:blank", "", undefined])
     expect(restricted(url, own)).toBe(false);
+});
+
+test("recorded setup stays within its count and size, and removals free room", () => {
+  const restore = new Restore();
+  restore.startSession(1);
+  const script = "Page.addScriptToEvaluateOnNewDocument";
+  const ids: string[] = [];
+  for (let index = 0; index < MAX_SETUP_COMMANDS; index++) {
+    expect(restore.admits(1, script, { source: `${index}` })).toBe(true);
+    const given = restore.record(1, script, { source: `${index}` }, { identifier: `c${index}` });
+    ids.push((given as { identifier: string }).identifier);
+  }
+  // Every further unique script or binding is refused; replacing a recorded key still fits.
+  expect(restore.admits(1, script, { source: "one more" })).toBe(false);
+  expect(restore.admits(1, "Runtime.addBinding", { name: "more" })).toBe(false);
+  expect(restore.admits(1, "Network.disable", {})).toBe(true);
+  restore.record(1, "Page.removeScriptToEvaluateOnNewDocument", { identifier: ids[0] }, {});
+  expect(restore.admits(1, "Runtime.addBinding", { name: "more" })).toBe(true);
+  // One script larger than the whole budget never fits.
+  restore.startSession(2);
+  expect(restore.admits(2, script, { source: "x".repeat(MAX_SETUP_BYTES) })).toBe(false);
+  expect(restore.admits(2, script, { source: "x".repeat(1000) })).toBe(true);
 });
