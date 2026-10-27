@@ -92,10 +92,16 @@ pub(crate) struct Host {
     state: Mutex<State>,
 }
 
+/// The one extension contract this host speaks: every cdp and close request names its group,
+/// and the worker admits it only for that group's current attachment of the tab.
+const CONTRACT: u64 = 2;
+
 #[derive(Default)]
 struct State {
     connected: bool,
     enabled: bool,
+    /// The contract the connected extension announced; only [`CONTRACT`] is admitted.
+    contract: Option<u64>,
     extension: String,
     browser: String,
     user_agent: String,
@@ -139,6 +145,8 @@ struct SessionLife {
     pending: watch::Sender<usize>,
     cdp_state: AtomicU8,
     cdp_pending: watch::Sender<usize>,
+    /// An executor of this life has started, so the next one to start is a replacement.
+    started: std::sync::atomic::AtomicBool,
 }
 
 impl SessionLife {
@@ -152,6 +160,7 @@ impl SessionLife {
             pending: watch::channel(0).0,
             cdp_state: AtomicU8::new(0),
             cdp_pending: watch::channel(0).0,
+            started: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -444,6 +453,7 @@ impl Host {
         let state = self.state();
         let admitted = state.connected
             && state.enabled
+            && state.contract == Some(CONTRACT)
             && state.sessions.get(&forward.project).is_some_and(|session| {
                 !session.closing
                     && !session.life.stop.is_cancelled()
@@ -493,6 +503,9 @@ impl Host {
         kind: WorkKind,
     ) -> Result<PendingWork, Failure> {
         let state = self.state();
+        // Every client action, target creation and close included, needs the connected,
+        // enabled extension of the supported contract.
+        Self::ready(&state).map_err(Failure::Refused)?;
         let session = state
             .sessions
             .get(project)
@@ -571,6 +584,7 @@ impl Host {
                 let mut state = self.state();
                 state.connected = true;
                 state.enabled = message["enabled"].as_bool() == Some(true);
+                state.contract = message["contract"].as_u64();
                 state.user_agent = bounded(message["userAgent"].as_str().unwrap_or_default(), 512);
                 state.extension = bounded(message["version"].as_str().unwrap_or_default(), 32);
                 state.browser = state
@@ -583,7 +597,14 @@ impl Host {
                     })
                     .unwrap_or("Chrome")
                     .to_owned();
-                tracing::info!(event.name = "browser.extension.connected", outcome = "ok");
+                if state.contract == Some(CONTRACT) {
+                    tracing::info!(event.name = "browser.extension.connected", outcome = "ok");
+                } else {
+                    // An extension of another contract may still answer cleanup, but admits nothing,
+                    // and the lives it met end here, so a later supported hello revives none.
+                    Self::seal(&mut state);
+                    tracing::warn!(event.name = "browser.extension.connected", outcome = "rejected", error.type = "contract");
+                }
                 drop(state);
                 self.update();
             }
@@ -632,6 +653,7 @@ impl Host {
             Some(error) => Err(match error["code"].as_str() {
                 Some("permission_required") => Failure::Refused(Refusal::PermissionRequired),
                 Some("target_closed") => Failure::Refused(Refusal::TargetClosed),
+                Some("capacity") => Failure::Refused(Refusal::Capacity),
                 _ => Failure::Cdp(cdp_error(error["message"].as_str().unwrap_or_default())),
             }),
         };
@@ -870,13 +892,7 @@ impl Host {
         let mut state = self.state();
         state.enabled = enabled;
         if !enabled {
-            state.tabs.clear();
-            state.children.clear();
-            for session in state.sessions.values_mut() {
-                session.closing = true;
-                session.life.stop.cancel();
-                session.client = None;
-            }
+            Self::seal(&mut state);
         }
         let name = if enabled {
             "browser.control.enabled"
@@ -884,6 +900,18 @@ impl Host {
             "browser.control.disabled"
         };
         tracing::info!(event.name = name, outcome = "ok");
+    }
+
+    /// Ends every current life: none acts again, and each is drained by its own strict release.
+    /// A later switch or hello never revives one.
+    fn seal(state: &mut State) {
+        state.tabs.clear();
+        state.children.clear();
+        for session in state.sessions.values_mut() {
+            session.closing = true;
+            session.life.stop.cancel();
+            session.client = None;
+        }
     }
 
     async fn shutdown(&self) -> Result<(), Refusal> {
@@ -1161,7 +1189,7 @@ impl Host {
     }
 
     fn ready(state: &State) -> Result<(), Refusal> {
-        if !state.connected {
+        if !state.connected || state.contract != Some(CONTRACT) {
             return Err(Refusal::ExtensionUnavailable);
         }
         if !state.enabled {
@@ -1323,9 +1351,96 @@ impl Host {
         }
         if let Ok(started) = executor::Executor::start(&self.config, &endpoint, &artifacts) {
             *executor = Some(started);
+            life.started.store(true, Ordering::Release);
         }
         tracing::info!(event.name = "browser.session.opened", outcome = "ok");
         Ok(view_session(&mut self.state(), project))
+    }
+
+    /// Gives a replacement executor fresh debugger sessions on the same tabs. The executor it
+    /// replaces may have left domains enabled, requests intercepted, breakpoints set or bindings
+    /// exposed, and Chrome reports a page's execution contexts only to a session that enables
+    /// Runtime anew; only a new chrome.debugger session clears all of that. The group's tabs stay
+    /// open and grouped: the extension detaches them and attaches them again.
+    async fn refresh(&self, project: &str, life: &Arc<SessionLife>) -> Result<(), Refusal> {
+        let started = Instant::now();
+        let refreshed = self.reattach_group(project, life).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match &refreshed {
+            Ok(()) => tracing::info!(
+                event.name = "browser.session.refreshed",
+                outcome = "ok",
+                duration_ms
+            ),
+            Err(refusal) => {
+                tracing::warn!(event.name = "browser.session.refreshed", outcome = "rejected", error.type = refusal.code(), duration_ms)
+            }
+        }
+        refreshed
+    }
+
+    async fn reattach_group(&self, project: &str, life: &Arc<SessionLife>) -> Result<(), Refusal> {
+        let released = self
+            .refusable_work(
+                json!({ "type": "release", "group": project, "close": false }),
+                Some(PendingWork::new(life.clone())),
+            )
+            .await?;
+        if released != json!({ "released": true }) || self.state().contract != Some(CONTRACT) {
+            return Err(Refusal::ExtensionUnavailable);
+        }
+        {
+            let mut state = self.state();
+            // The life may have been closed or replaced while its release was answered; only the
+            // current, open life claims its group again.
+            if !Self::current(&state, project, life) {
+                return Err(Refusal::PermissionRequired);
+            }
+            let tabs: Vec<i64> = state
+                .tabs
+                .iter()
+                .filter(|(_, tab)| tab.project == project)
+                .map(|(id, _)| *id)
+                .collect();
+            for tab in &tabs {
+                state.tabs.remove(tab);
+            }
+            state.children.retain(|_, tab| !tabs.contains(tab));
+            if let Some(session) = state
+                .sessions
+                .get_mut(project)
+                .filter(|s| Arc::ptr_eq(&s.life, life))
+            {
+                session.aliases.clear();
+            }
+        }
+        let claimed = self
+            .refusable_work(
+                json!({ "type": "claim", "group": project }),
+                Some(PendingWork::new(life.clone())),
+            )
+            .await?;
+        let mut state = self.state();
+        // The same fence after the claim: a life closed meanwhile starts no executor, and its close
+        // releases what the claim attached.
+        if !Self::current(&state, project, life) {
+            return Err(Refusal::PermissionRequired);
+        }
+        for entry in claimed["tabs"].as_array().into_iter().flatten() {
+            if let Some(tab) = entry["tab"].as_i64() {
+                self.register(&mut state, project, tab, entry["target"].clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `life` is still the project's open, uncancelled life.
+    fn current(state: &State, project: &str, life: &Arc<SessionLife>) -> bool {
+        state
+            .sessions
+            .get(project)
+            .is_some_and(|s| Arc::ptr_eq(&s.life, life) && !s.closing)
+            && !life.stop.is_cancelled()
     }
 
     async fn stop_executor(executor: &mut Option<executor::Executor>) -> Result<(), Refusal> {
@@ -1424,8 +1539,9 @@ impl Host {
                     Some(PendingWork::new(life.clone())),
                 )
                 .await?;
-            if released != json!({ "released": true }) {
-                // Older {} ACKs and unverified/malformed releases prove nothing.
+            // Older {} ACKs, unverified or malformed releases, and an extension of another contract
+            // prove nothing: the release was attempted, but the close is not confirmed.
+            if released != json!({ "released": true }) || self.state().contract != Some(CONTRACT) {
                 return Err(Refusal::ExtensionUnavailable);
             }
             self.release_cdp(life);
@@ -1545,11 +1661,15 @@ impl Host {
             finished: false,
         };
         if executor.is_none() {
+            if life.started.load(Ordering::Acquire) {
+                self.refresh(project, life).await?;
+            }
             *executor = Some(executor::Executor::start(
                 &self.config,
                 &endpoint,
                 &artifacts,
             )?);
+            life.started.store(true, Ordering::Release);
         }
         let current = executor.as_mut().unwrap();
         let ready = tokio::select! {

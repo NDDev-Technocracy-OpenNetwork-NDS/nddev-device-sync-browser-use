@@ -13,6 +13,7 @@
   },
   "files": [
     "packages/extension/src/background.ts",
-    "packages/extension/src/popup.ts"
+    "packages/extension/src/popup.ts",
+    "packages/extension/src/restore.ts"
   ]
 }

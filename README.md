@@ -105,6 +105,20 @@ The agent continues with other work, checks the page again later and calls
 Fewer checks appear when agents work in the owner's profile without request
 bursts and use an official API or CLI where one exists.
 
+Agent tabs keep working through other extensions and executor replacements:
+
+- **Other extensions' frames.** A password manager's inline menu or a similar frame from another
+  extension would make Chrome refuse to attach to a tab, or detach the debugger from it. Before
+  each attach to an agent tab, the extension removes such `chrome-extension://` frames from that
+  tab only; this is why it holds `scripting` with access to all sites, used on no other tab. A
+  tab Chrome detaches anyway is attached again and restored at most five times in five seconds:
+  agents see its execution contexts and frames gone, and Playwright's setup is replayed.
+  Restricted child targets (other extensions' and browser pages) are detached and never reach
+  agents.
+- **Replacement executors.** A replacement starts on fresh debugger sessions of the same tabs, so
+  nothing the earlier executor enabled, intercepted or exposed survives. Every client that
+  enables `Runtime` on a tab is told the page's execution contexts again.
+
 Limits: Chrome serves WebAuthn only to a focused page, so a passkey step needs
 `page.bringToFront()` and visibly activates the agent tab. Chrome keeps every
 extension out of `chrome://` pages and the Chrome Web Store. Browser-chrome
