@@ -1042,7 +1042,7 @@ impl Host {
             let mut state = self.state();
             Self::ready(&state)?;
             if let Some(session) = state.sessions.get(project) {
-                if session.closing || !session.opened {
+                if session.closing || (session.owned && !session.opened) {
                     return Err(Refusal::Busy);
                 }
                 return Ok(view_session(&mut state, project));
