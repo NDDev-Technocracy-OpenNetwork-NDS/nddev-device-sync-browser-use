@@ -21,6 +21,7 @@ fn fixture() -> (Arc<Host>, mpsc::Receiver<Vec<u8>>, tempfile::TempDir) {
         state: Mutex::new(State {
             connected: true,
             enabled: true,
+            contract: Some(CONTRACT),
             ..State::default()
         }),
     });
@@ -892,4 +893,39 @@ async fn a_replacement_whose_life_closes_during_its_release_claims_and_starts_no
     drained.await.unwrap();
     assert!(!host.state().sessions.contains_key("project"));
     host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_extension_of_another_contract_admits_nothing_and_confirms_no_close() {
+    let (host, mut queue, _root) = fixture();
+    let life = host.reserve("legacy", false).unwrap();
+    {
+        let mut state = host.state();
+        let session = state.sessions.get_mut("legacy").unwrap();
+        runtime::private_directory(&session.artifacts).unwrap();
+        session.opened = true;
+    }
+    // An extension that announces another contract connects.
+    host.on_extension(json!({
+        "type": "hello",
+        "enabled": true,
+        "version": "0.0.4",
+        "userAgent": "Chrome/157.0.0.0",
+        "contract": 1,
+    }));
+    assert!(matches!(
+        host.reserve("other", false),
+        Err(Refusal::ExtensionUnavailable)
+    ));
+    // Closing still attempts the release, but that extension's acknowledgement confirms nothing.
+    let closing = {
+        let host = host.clone();
+        tokio::spawn(async move { host.close("legacy", false).await })
+    };
+    let release = message(&mut queue).await;
+    assert_eq!(release["type"], "release");
+    answer(&host, &release);
+    assert_eq!(closing.await.unwrap(), Err(Refusal::ExtensionUnavailable));
+    assert!(host.state().sessions.contains_key("legacy"));
+    assert!(life.stop.is_cancelled());
 }
