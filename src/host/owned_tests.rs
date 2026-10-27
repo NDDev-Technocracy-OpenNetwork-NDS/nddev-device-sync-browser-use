@@ -44,6 +44,19 @@ fn answer(host: &Host, request: &Value) {
 }
 
 #[tokio::test]
+async fn legacy_open_reuses_its_pending_session_without_adopting_owned_reservations() {
+    let (host, mut queue, _root) = fixture();
+    host.reserve("legacy", false).unwrap();
+    let legacy = host.open("legacy").await.unwrap();
+    assert_eq!(legacy.project, "legacy");
+    assert!(!legacy.executor);
+    host.create_owned("owned").unwrap();
+    assert!(matches!(host.open("owned").await, Err(Refusal::Busy)));
+    assert!(queue.try_recv().is_err());
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn owned_handles_cannot_adopt_or_change_a_foreign_or_replaced_session() {
     let (host, mut queue, _root) = fixture();
     let original = host.create_owned("project").unwrap();
