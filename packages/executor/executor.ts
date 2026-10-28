@@ -199,18 +199,27 @@ async function run(request: Request): Promise<void> {
   const wait = waitBudget(budget);
   context.setDefaultTimeout(wait);
   context.setDefaultNavigationTimeout(wait);
+  let outcome: { ok: true; value: unknown } | { ok: false; error: unknown };
   try {
     const value = await scope.run(execution, () => compile(request.code).runInContext(sandbox));
-    const text = compose({ notices: notified(), console: execution.logs, value });
-    answer({ id: request.id, ok: true, ...bounded(text) });
+    outcome = { ok: true, value };
   } catch (error) {
-    const text = compose({
-      notices: notified(),
-      console: execution.logs,
-      error: describeError(error),
-    });
-    answer({ id: request.id, ok: false, error: classify(error), ...bounded(text) });
+    outcome = { ok: false, error };
   }
+  // An aborted script that ends later was answered already: it neither formats nor takes the
+  // notices that belong to the result of the script running now.
+  if (answered) return;
+  if (outcome.ok) {
+    const text = compose({ notices: notified(), console: execution.logs, value: outcome.value });
+    answer({ id: request.id, ok: true, ...bounded(text) });
+    return;
+  }
+  const text = compose({
+    notices: notified(),
+    console: execution.logs,
+    error: describeError(outcome.error),
+  });
+  answer({ id: request.id, ok: false, error: classify(outcome.error), ...bounded(text) });
 }
 
 write({ ready: true });
