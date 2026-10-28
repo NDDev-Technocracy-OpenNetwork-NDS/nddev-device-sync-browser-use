@@ -84,6 +84,8 @@ const INTERACTIVE_ROLES = new Set([
   "option",
   "tab",
   "treeitem",
+  // Chrome's role for <summary>, which opens its <details>.
+  "disclosuretriangle",
   "img",
   "video",
   "audio",
@@ -175,14 +177,25 @@ function buildBaseLocator({
   name,
   stable,
   isPromotedContentEditable,
+  attributes,
 }: {
   role: string;
   name: string;
   stable: { value: string; attr: string } | null;
   isPromotedContentEditable?: boolean | undefined;
+  attributes?: Map<string, string> | undefined;
 }): string {
   if (stable) {
     return buildLocatorFromStable(stable);
+  }
+  // Playwright's role engine has no role for <summary>: its label, else its whole text, names it.
+  if (role === "disclosuretriangle") {
+    const label = attributes?.get("aria-label")?.trim();
+    if (label) {
+      return `summary[aria-label="${escapeLocatorValue(label)}"]`;
+    }
+    const trimmedName = name.trim();
+    return trimmedName ? `summary >> internal:has-text=${JSON.stringify(trimmedName)}s` : "summary";
   }
   // For promoted contenteditable elements (bare <div contenteditable="true"> without
   // role="textbox"), use CSS attribute selector. Playwright's role=textbox selector
@@ -234,7 +247,6 @@ export type SnapshotNode = {
   baseLocator?: string | undefined;
   ref?: string | undefined;
   backendNodeId?: BackendNodeId | undefined;
-  indentOffset?: number | undefined;
   ignored?: boolean | undefined;
   children: SnapshotNode[];
 };
@@ -269,24 +281,17 @@ function buildTextLine(text: string, indent: number): SnapshotLine {
 
 export function buildSnapshotLines(nodes: SnapshotNode[], indent = 0): SnapshotLine[] {
   return nodes.flatMap((node) => {
-    const nodeIndent = indent + (node.indentOffset ?? 0);
     const line =
       node.role === "text"
-        ? buildTextLine(node.name, nodeIndent)
+        ? buildTextLine(node.name, indent)
         : buildSnapshotLine({
             role: node.role,
             name: node.name,
             baseLocator: node.baseLocator,
-            indent: nodeIndent,
+            indent,
             hasChildren: node.children.length > 0,
           });
-    return [line, ...buildSnapshotLines(node.children, nodeIndent + 1)];
-  });
-}
-
-function shiftIndent(nodes: SnapshotNode[], offset: number): SnapshotNode[] {
-  return nodes.map((node) => {
-    return { ...node, indentOffset: (node.indentOffset ?? 0) + offset };
+    return [line, ...buildSnapshotLines(node.children, indent + 1)];
   });
 }
 
@@ -369,7 +374,7 @@ export function filterInteractiveSnapshotTree(options: {
   }, new Set<string>());
 
   if (options.node.ignored) {
-    return { nodes: shiftIndent(childNodes, 1), names: childNames };
+    return { nodes: childNodes, names: childNames };
   }
 
   if (isTextRole(role)) {
@@ -429,7 +434,13 @@ export function filterInteractiveSnapshotTree(options: {
     const isPromoted =
       options.node.backendNodeId != null &&
       (options.promotedContentEditableIds?.has(options.node.backendNodeId) ?? false);
-    baseLocator = buildBaseLocator({ role, name, stable, isPromotedContentEditable: isPromoted });
+    baseLocator = buildBaseLocator({
+      role,
+      name,
+      stable,
+      isPromotedContentEditable: isPromoted,
+      attributes: domInfo?.attributes,
+    });
     ref = options.createRefForNode({ backendNodeId: options.node.backendNodeId, role, name });
   }
 
@@ -486,7 +497,7 @@ export function filterFullSnapshotTree(options: {
   }, new Set<string>());
 
   if (options.node.ignored) {
-    return { nodes: shiftIndent(childNodes, 1), names: childNames };
+    return { nodes: childNodes, names: childNames };
   }
 
   if (isTextRole(role)) {
@@ -535,7 +546,13 @@ export function filterFullSnapshotTree(options: {
     const isPromoted =
       options.node.backendNodeId != null &&
       (options.promotedContentEditableIds?.has(options.node.backendNodeId) ?? false);
-    baseLocator = buildBaseLocator({ role, name, stable, isPromotedContentEditable: isPromoted });
+    baseLocator = buildBaseLocator({
+      role,
+      name,
+      stable,
+      isPromotedContentEditable: isPromoted,
+      attributes: domInfo?.attributes,
+    });
     ref = options.createRefForNode({ backendNodeId: options.node.backendNodeId, role, name });
   }
 
