@@ -837,6 +837,70 @@ test("a timeout aborts the script: its later action never happens and the state 
   expect((await run("acceptance", "state.kept")).body.value).toBe("7");
 });
 
+// Callbacks a script handed to Playwright act in later scripts only if that script ended on its
+// own: an aborted script's listeners and routes are removed, so the page behaves as without them,
+// and its bindings can no longer act.
+test("an aborted script's callbacks never act after its abort, and an ended script's still do", async () => {
+  await opened("callbacks");
+  try {
+    const kept = await run(
+      "callbacks",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/");
+      state.page.on("console", async (message) => { if (message.text() === "kept") await state.page.click("#inc"); });
+      return "kept"`,
+    );
+    expect(kept.body.value).toBe("kept");
+    const aborted = await run(
+      "callbacks",
+      `state.page.once("console", async () => {
+        try { await state.page.click("#inc"); state.acted = true; } catch { state.denied = true; }
+      });
+      state.page.on("dialog", () => {});
+      await state.page.route("**/linked", (route) => route.fulfill({ contentType: "text/html", body: "aborted route" }));
+      await state.page.exposeBinding("abortedClick", async () => { await state.page.click("#inc"); });
+      await new Promise((done) => setTimeout(done, 8000));`,
+      "--timeout",
+      "1500",
+    );
+    expect(aborted.body.failure).toBe("aborted");
+    const after = await run(
+      "callbacks",
+      `const page = state.page;
+      const count = () => page.locator("#c").textContent();
+      const seen = { start: await count() };
+      await page.evaluate(() => console.log("after abort"));
+      await page.waitForTimeout(500);
+      seen.afterEvent = await count();
+      seen.binding = await page.evaluate(() => window.abortedClick().then(() => "resolved", () => "rejected"));
+      seen.afterBinding = await count();
+      seen.dialog = await page.evaluate(() => { alert("left alone"); return "dismissed"; });
+      seen.acted = state.acted === true;
+      await page.goto("${origin}/linked");
+      seen.routed = await page.locator("body").textContent();
+      await page.goto("${origin}/");
+      await page.evaluate(() => console.log("kept"));
+      await page.waitForFunction(() => document.getElementById("c")?.textContent === "1");
+      seen.kept = await count();
+      await page.close();
+      return JSON.stringify(seen)`,
+      "--timeout",
+      "15000",
+    );
+    expect(JSON.parse(String(after.body.value))).toEqual({
+      start: "0",
+      afterEvent: "0",
+      binding: "rejected",
+      afterBinding: "0",
+      dialog: "dismissed",
+      acted: false,
+      routed: "linked",
+      kept: "1",
+    });
+  } finally {
+    await cli("session", "close", "callbacks");
+  }
+});
+
 test("a script that blocks its executor past the deadline is stopped and its state resets", async () => {
   await opened("blocking");
   expect((await run("blocking", "state.kept = 1")).code).toBe(0);
