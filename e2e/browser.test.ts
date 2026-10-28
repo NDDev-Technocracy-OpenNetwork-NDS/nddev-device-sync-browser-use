@@ -181,6 +181,8 @@ beforeAll(async () => {
         "/form": `<input id="text" oninput="echo.textContent = this.value"><span id="echo"></span><input id="file" type="file" onchange="picked.textContent = this.files[0].name + ':' + this.files[0].size"><span id="picked"></span>`,
         "/fetch": `<button id="load" onclick="fetch('/api').then((r) => r.text()).then((t) => (out.textContent = t))">Load</button><span id="out"></span>`,
         "/api": "live",
+        "/download": `<title>Download</title><a id="get" href="/report-data" download="report.txt">Get</a>`,
+        "/report-data": "report body",
         // A different site (localhost vs 127.0.0.1) renders out of process.
         "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
         "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
@@ -711,6 +713,12 @@ test("the recorder turns a person's actions in an agent tab into events and fram
     expect(JSON.parse(String(started.body.value)).path).toStartWith(
       join(runtime, "sessions", "recorder"),
     );
+    // The CLI's recorder commands are the helper's calls.
+    const status = await plain("-s", "recorder", "recorder", "status");
+    expect(status.code).toBe(0);
+    // inspect escapes a Windows path's separators, so only its platform-neutral parts are compared.
+    expect(status.stdout).toContain("id: '1'");
+    expect(status.stdout).toContain("recordings");
     const tab = await observed("/helpers?recorder");
     await tab?.click("#save");
     await tab?.fill("#name", "Ada");
@@ -730,6 +738,10 @@ test("the recorder turns a person's actions in an agent tab into events and fram
     expect(seen.timeline).toContain("press");
     expect(seen.stopped.frames).toBeGreaterThan(0);
     expect(existsSync(seen.first)).toBe(true);
+    expect((await plain("-s", "recorder", "recorder", "status")).stdout).toBe(
+      "[return value] null\n",
+    );
+    expect((await plain("-s", "recorder", "recorder", "pause")).code).toBe(2);
   } finally {
     await cli("session", "close", "recorder", "--close-tabs");
   }
@@ -747,6 +759,9 @@ test("agent code loads modules and lists the elements the owner pinned", async (
     );
     expect(page.body.value).toBe("b.txt");
     expect((await run("pins", `(await import("./helper.mjs")).answer`)).body.value).toBe("42");
+    expect((await run("pins", `(await importModule("./helper.mjs")).answer`)).body.value).toBe(
+      "42",
+    );
     await (await observed("/helpers?pins"))?.click("#save", { button: "right" });
     const result = await run(
       "pins",
@@ -756,11 +771,56 @@ test("agent code loads modules and lists the elements the owner pinned", async (
     );
     const seen = JSON.parse(String(result.body.value)) as { remembered: string; pinned: string };
     expect(seen.remembered).toBe("save");
+    const inspected = await run(
+      "pins",
+      `state.page = undefined; const found = await inspectPinnedElement(${JSON.stringify(`${origin}/helpers?pins`)}, "globalThis.ndsPinnedElem1"); return JSON.stringify({ html: found.outerHTML, page: state.page?.url() })`,
+    );
+    expect(JSON.parse(String(inspected.body.value))).toEqual({
+      html: '<button id="save" onclick="this.textContent = \'Saved\'" data-nds-pin="1">Save</button>',
+      page: `${origin}/helpers?pins`,
+    });
     expect(seen.pinned).toBe(
       'ndsPinnedElem1: locator("[data-nds-pin=\\"1\\"]") = getByRole("button", { name: "Save", exact: true })',
     );
   } finally {
     await cli("session", "close", "pins", "--close-tabs");
+  }
+});
+
+// Agent code has Node.js's common globals, a process it cannot stop or move, and intervals that
+// stop with an aborted script.
+test("agent code keeps its executor and its intervals end with an aborted script", async () => {
+  await opened("globals");
+  try {
+    const kept = await run(
+      "globals",
+      `const refused = []; for (const name of ["exit", "chdir", "abort"]) { try { process[name](0); } catch (error) { refused.push(error.message.includes("not available")); } }
+       return JSON.stringify({ refused, cwd: process.cwd() === artifacts, buffer: Buffer.from("ab").toString("hex"), id: typeof crypto.randomUUID(), timeout: AbortSignal.timeout(5) instanceof AbortSignal, alias: accessibilitySnapshot === snapshot })`,
+    );
+    expect(JSON.parse(String(kept.body.value))).toEqual({
+      refused: [true, true, true],
+      cwd: true,
+      buffer: "6162",
+      id: "string",
+      timeout: true,
+      alias: true,
+    });
+    // The executor is the same one: state from before is still there.
+    expect((await run("globals", "state.ticks = 0; return 'set'")).body.value).toBe("set");
+    const aborted = await run(
+      "globals",
+      "setInterval(() => { state.ticks += 1; }, 50); await new Promise((done) => setTimeout(done, 5000))",
+      "--timeout",
+      "1000",
+    );
+    expect(aborted.body.failure).toBe("aborted");
+    const first = Number((await run("globals", "state.ticks")).body.value);
+    await Bun.sleep(400);
+    const later = Number((await run("globals", "state.ticks")).body.value);
+    expect(first).toBeGreaterThan(5);
+    expect(later).toBe(first);
+  } finally {
+    await cli("session", "close", "globals");
   }
 });
 
@@ -1036,6 +1096,27 @@ async function plain(...args: string[]): Promise<{ code: number; stdout: string;
   ]);
   return { code: await child.exited, stdout, stderr };
 }
+
+// A download of an agent tab reaches Playwright as its event, with the URL and the name the site
+// suggests; the file keeps the browser's own folder, so the agent fetches the URL in the page,
+// with the page's cookies, and keeps the bytes in its artifacts.
+test("an agent tab's download reaches the agent's code", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/download");
+     const [download] = await Promise.all([page.waitForEvent("download"), page.click("#get")]);
+     const text = await page.evaluate(async (url) => (await fetch(url)).text(), download.url());
+     require("node:fs").writeFileSync(\`\${artifacts}/report.txt\`, text); await page.close();
+     return JSON.stringify({ name: download.suggestedFilename(), url: download.url(), text })`,
+    "--timeout",
+    "20000",
+  );
+  expect(JSON.parse(String(result.body.value))).toEqual({
+    name: "report.txt",
+    url: `${origin}/report-data`,
+    text: "report body",
+  });
+});
 
 // Another device's browser is driven through that device's own CLI: here a device whose transport
 // runs this CLI again, so the whole path is exercised without a second machine.

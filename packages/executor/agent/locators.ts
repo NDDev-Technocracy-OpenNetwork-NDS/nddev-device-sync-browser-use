@@ -64,3 +64,36 @@ export async function pinnedElements({ page }: { page: Page }): Promise<string> 
   }
   return lines.join("\n");
 }
+
+/**
+ * The element a pinned-element expression names on the agent tab with that URL, such as
+ * `globalThis.ndsPinnedElem1`: its outer HTML, at most 4000 characters, and its React component
+ * when the page is a React build. The tab becomes `state.page`.
+ */
+export async function inspectPinnedElement(
+  pageUrl: string,
+  expression: string,
+  pages: Page[],
+  state: Record<string, unknown>,
+  react: (options: { locator: Locator }) => Promise<unknown>,
+): Promise<{ url: string; outerHTML: string | null; react: unknown }> {
+  const page = pages.findLast((candidate) => candidate.url() === pageUrl);
+  if (!page) {
+    throw new Error(`No agent tab has the URL ${pageUrl}; pin the element in an agent tab again`);
+  }
+  state.page = page;
+  const handle = (
+    await page.evaluateHandle((source) => Function(`return (${source})`)(), expression)
+  ).asElement();
+  if (!handle) return { url: page.url(), outerHTML: null, react: null };
+  try {
+    const outerHTML = await handle.evaluate((element) => element.outerHTML.slice(0, 4000));
+    const pin = await handle.evaluate((element) => element.getAttribute("data-nds-pin"));
+    const info = pin
+      ? await react({ locator: page.locator(`[data-nds-pin="${pin}"]`) }).catch(() => null)
+      : null;
+    return { url: page.url(), outerHTML, react: info };
+  } finally {
+    await handle.dispose();
+  }
+}

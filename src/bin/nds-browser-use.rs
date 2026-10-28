@@ -20,6 +20,7 @@ const USAGE: &str = "usage:
   nds-browser-use [--device <name>] session close <project> [--keep-tabs]
   nds-browser-use [--device <name>] -s <project> (-e <code> | -f <file> | -f -) [--timeout <ms>] [--expect <target>:<document>] [--json]
   nds-browser-use [--device <name>] -s <project> artifact (list | <path> [--output <file>])
+  nds-browser-use [--device <name>] -s <project> recorder (start | stop | status)
   nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)
 NDS_BROWSER_DEVICE names the default device.";
 /// How agents use the tool, printed by `nds-browser-use skill`.
@@ -165,7 +166,7 @@ async fn remote(name: &str, words: &[&str]) -> ExitCode {
             args = ["-s", project, "artifact", path].map(String::from).to_vec();
             output = Some(PathBuf::from(file));
         }
-        ["-s", _, "artifact", ..] => {}
+        ["-s", _, "artifact" | "recorder", ..] => {}
         ["-s", project, rest @ ..] => {
             let Some(execution) = Execution::parse(rest) else {
                 return usage();
@@ -384,7 +385,18 @@ async fn client(words: &[&str]) -> ExitCode {
             .await
             .map(|()| print(&serde_json::json!({ "closed": project }))),
         ["-s", project, rest @ ..] => {
-            let Some(execution) = Execution::parse(rest) else {
+            // The recorder commands are its helper's calls, run as the session's code.
+            let execution = match rest {
+                ["recorder", action @ ("start" | "stop" | "status")] => Some(Execution {
+                    code: format!("return await recorder.{action}()"),
+                    timeout: Duration::from_secs(20),
+                    expect: None,
+                    json: false,
+                }),
+                ["recorder", ..] => None,
+                _ => Execution::parse(rest),
+            };
+            let Some(execution) = execution else {
                 return usage();
             };
             return match client

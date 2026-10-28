@@ -125,6 +125,8 @@ struct Session {
     /// Raw CDP sessions the current client opened (`newCDPSession`); they end
     /// with the client, the session or their tab.
     aliases: HashMap<String, relay::Alias>,
+    /// Whether the current client asked for download events; it ends with the client.
+    downloads: Option<relay::Downloads>,
 }
 
 struct Tab {
@@ -816,6 +818,11 @@ impl Host {
             let event = json!({ "method": method, "params": params, "sessionId": alias });
             deliver(&mut state, &project, event);
         }
+        if child.is_none()
+            && let Some(event) = relay::download_event(&mut state, &project, method, params)
+        {
+            deliver(&mut state, &project, event);
+        }
         let session = child.unwrap_or_else(|| tab_session(tab));
         let event = json!({ "method": method, "params": params, "sessionId": session });
         deliver(&mut state, &project, event);
@@ -1252,6 +1259,7 @@ impl Host {
                 running: false,
                 used: Instant::now(),
                 aliases: HashMap::new(),
+                downloads: None,
             },
         );
         Ok(life)
@@ -1423,6 +1431,7 @@ impl Host {
                 .filter(|s| Arc::ptr_eq(&s.life, life))
             {
                 session.aliases.clear();
+                session.downloads = None;
             }
         }
         let claimed = self
@@ -1511,6 +1520,7 @@ impl Host {
             life.stop.cancel();
             session.client = None;
             session.aliases.clear();
+            session.downloads = None;
             (session.artifacts.clone(), session.opened)
         };
         let mut executor = tokio::time::timeout(EXTENSION_REPLY, life.executor.lock())
