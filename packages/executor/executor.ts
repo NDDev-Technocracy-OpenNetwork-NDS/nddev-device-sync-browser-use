@@ -21,7 +21,7 @@ import { bounded, compose, describeError, errorParts, waitBudget } from "./agent
 import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
 import { getLocatorStringForElement, pinnedElements } from "./agent/locators";
-import { getLatestLogs, notified, attach as watchLogs } from "./agent/logs";
+import { clearAllLogs, getLatestLogs, notified, attach as watchLogs } from "./agent/logs";
 import { recorderFor } from "./agent/recorder";
 import { createDemoVideo, executing, ghostCursor, recording } from "./agent/recording";
 import { resizeImageForAgent, screenshotWithAccessibilityLabels } from "./agent/screens";
@@ -103,6 +103,7 @@ const sandbox = vm.createContext({
   ref,
   refToLocator,
   getLatestLogs,
+  clearAllLogs,
   waitForPageLoad,
   inspect: describe,
   getCleanHTML,
