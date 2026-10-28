@@ -420,6 +420,11 @@ test("snapshot locators and shown refs reach the element their line shows", asyn
     seen.push(framed.includes("Locators are inside the frame") && framed.includes('[id="inner"]'));
     await same.locator('[id="inner"]').click();
     seen.push(await same.locator("#inner").textContent());
+    // A part inside a frame, named through the page or through the frame, shows that part only.
+    for (const part of [page.frameLocator("#same").locator("body"), same.locator("#inner")]) {
+      const view = await snapshot(part);
+      seen.push(view.includes('[id="inner"]') && !view.includes("Save"));
+    }
     const shot = await screenshotWithAccessibilityLabels({ page });
     const labels = [...shot.matchAll(/button "Save" \\[ref=([^\\]]+)\\]/g)].map((found) => found[1]);
     await snapshot({ page, showDiffSinceLastCall: false });
@@ -428,6 +433,12 @@ test("snapshot locators and shown refs reach the element their line shows", asyn
     const far = await context.newPage(); await far.goto("${origin}/frame");
     const other = far.frames().find((frame) => frame.url().endsWith("/inner"));
     await other.locator("#inner").waitFor();
+    // A part inside a frame of another process: Playwright's snapshot of that part, whose refs
+    // enter the frame.
+    for (const part of [far.frameLocator("iframe").locator("body"), other.locator("#inner")]) {
+      const view = await snapshot(part);
+      seen.push(/button "Inner" \\[ref=/.test(view) && !view.includes("iframe"));
+    }
     const remote = await snapshot({ frame: other });
     const shown = remote.match(/button "Inner" \\[ref=([^\\]]+)\\]/)?.[1];
     seen.push(Boolean(shown));
@@ -438,7 +449,9 @@ test("snapshot locators and shown refs reach the element their line shows", asyn
     "--timeout",
     "25000",
   );
-  expect(result.body.value).toBe("true second true first true inside 2 second true inside");
+  expect(result.body.value).toBe(
+    "true second true first true inside true true 2 second true true true inside",
+  );
 });
 
 // Only a person passes a bot check: agent code finds it, hands it to the owner through a Chrome
@@ -835,6 +848,70 @@ test("a timeout aborts the script: its later action never happens and the state 
   await Bun.sleep(3500);
   expect(await page?.locator("#c").textContent()).toBe(before ?? "");
   expect((await run("acceptance", "state.kept")).body.value).toBe("7");
+});
+
+// Callbacks a script handed to Playwright act in later scripts only if that script ended on its
+// own: an aborted script's listeners and routes are removed, so the page behaves as without them,
+// and its bindings can no longer act.
+test("an aborted script's callbacks never act after its abort, and an ended script's still do", async () => {
+  await opened("callbacks");
+  try {
+    const kept = await run(
+      "callbacks",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/");
+      state.page.on("console", async (message) => { if (message.text() === "kept") await state.page.click("#inc"); });
+      return "kept"`,
+    );
+    expect(kept.body.value).toBe("kept");
+    const aborted = await run(
+      "callbacks",
+      `state.page.once("console", async () => {
+        try { await state.page.click("#inc"); state.acted = true; } catch { state.denied = true; }
+      });
+      state.page.on("dialog", () => {});
+      await state.page.route("**/linked", (route) => route.fulfill({ contentType: "text/html", body: "aborted route" }));
+      await state.page.exposeBinding("abortedClick", async () => { await state.page.click("#inc"); });
+      await new Promise((done) => setTimeout(done, 8000));`,
+      "--timeout",
+      "1500",
+    );
+    expect(aborted.body.failure).toBe("aborted");
+    const after = await run(
+      "callbacks",
+      `const page = state.page;
+      const count = () => page.locator("#c").textContent();
+      const seen = { start: await count() };
+      await page.evaluate(() => console.log("after abort"));
+      await page.waitForTimeout(500);
+      seen.afterEvent = await count();
+      seen.binding = await page.evaluate(() => window.abortedClick().then(() => "resolved", () => "rejected"));
+      seen.afterBinding = await count();
+      seen.dialog = await page.evaluate(() => { alert("left alone"); return "dismissed"; });
+      seen.acted = state.acted === true;
+      await page.goto("${origin}/linked");
+      seen.routed = await page.locator("body").textContent();
+      await page.goto("${origin}/");
+      await page.evaluate(() => console.log("kept"));
+      await page.waitForFunction(() => document.getElementById("c")?.textContent === "1");
+      seen.kept = await count();
+      await page.close();
+      return JSON.stringify(seen)`,
+      "--timeout",
+      "15000",
+    );
+    expect(JSON.parse(String(after.body.value))).toEqual({
+      start: "0",
+      afterEvent: "0",
+      binding: "rejected",
+      afterBinding: "0",
+      dialog: "dismissed",
+      acted: false,
+      routed: "linked",
+      kept: "1",
+    });
+  } finally {
+    await cli("session", "close", "callbacks");
+  }
 });
 
 test("a script that blocks its executor past the deadline is stopped and its state resets", async () => {

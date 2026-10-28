@@ -1,7 +1,6 @@
 // Per-session Playwright executor for ADR 0015. The Rust host spawns it with a
 // session-scoped CDP endpoint on its private socket and talks JSON lines over
 // stdio. The vm context only keeps per-session state; it is not a sandbox.
-import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -18,14 +17,7 @@ import {
   getReactSource,
   getStylesForLocator,
 } from "./agent/devtools";
-import {
-  bounded,
-  type Console,
-  compose,
-  describeError,
-  errorParts,
-  waitBudget,
-} from "./agent/format";
+import { bounded, compose, describeError, errorParts, waitBudget } from "./agent/format";
 import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
 import { getLocatorStringForElement, pinnedElements } from "./agent/locators";
@@ -34,6 +26,7 @@ import { recorderFor } from "./agent/recorder";
 import { createDemoVideo, executing, ghostCursor, recording } from "./agent/recording";
 import { resizeImageForAgent, screenshotWithAccessibilityLabels } from "./agent/screens";
 import { ref, refToLocator, snapshot, attach as watchSnapshots } from "./agent/snapshot";
+import { bindEmitter, bindPage, definer, type Execution, scope, withdraw } from "./execution";
 
 const LOG_LIMIT = 200;
 
@@ -52,12 +45,15 @@ const browser = await chromium.connectOverCDP(endpoint, { timeout: 15_000 });
 const context = browser.contexts()[0] ?? process.exit(3);
 browser.on("disconnected", () => process.exit(4));
 
-// One execution: its abort signal and its console output. Callbacks and timers its script starts
-// carry it along, so a script aborted earlier can neither write into a later result nor act.
-type Execution = { signal: AbortSignal; logs: Console[] };
-const scope = new AsyncLocalStorage<Execution>();
+// Callbacks agent code hands to Playwright stay in its execution (./execution): the event emitter
+// every client object shares and the context now, each page's class once a page is seen.
+const emitter = definer(browser, "prependOnceListener");
+if (!emitter) process.exit(3);
+bindEmitter(emitter);
+bindPage(Object.getPrototypeOf(context));
 
-// Playwright calls of an aborted script throw before they reach the browser (ADR 0015).
+// Playwright calls of an aborted script, and of the callbacks it registered, throw before they
+// reach the browser (ADR 0015).
 (
   browser as unknown as { _instrumentation: { addListener(listener: object): void } }
 )._instrumentation.addListener({
@@ -89,6 +85,7 @@ function keys(page: Page): string[] {
 
 // Every page the session sees is recorded from the moment the executor sees it.
 function observe(page: Page): void {
+  bindPage(Object.getPrototypeOf(page));
   watchLogs(page, context, keys);
   watchLoad(page);
   watchSnapshots(page);
@@ -177,7 +174,7 @@ let running: { id: number; abort: () => void } | undefined;
 
 async function run(request: Request): Promise<void> {
   const controller = new AbortController();
-  const execution: Execution = { signal: controller.signal, logs: [] };
+  const execution: Execution = { signal: controller.signal, logs: [], withdraw: [] };
   const budget = request.timeout_ms ?? 10_000;
   let answered = false;
   // Exactly one answer per request: the script's own, or the abort's, whichever comes first.
@@ -192,8 +189,9 @@ async function run(request: Request): Promise<void> {
     id: request.id,
     abort: () => {
       controller.abort();
+      withdraw(execution);
       const error =
-        "Code execution reached its deadline and was aborted: its later Playwright calls throw and `signal` is aborted. An action already in progress may still complete, so check the page before retrying. The session keeps its state.";
+        "Code execution reached its deadline and was aborted: its later Playwright calls throw, its listeners, routes and locator handlers are removed, and `signal` is aborted. An action already in progress may still complete, so check the page before retrying. The session keeps its state.";
       const text = compose({ notices: notified(), console: execution.logs, error });
       answer({ id: request.id, ok: false, error: "aborted", ...bounded(text) });
     },
