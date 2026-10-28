@@ -176,8 +176,15 @@ impl Executor {
             return Err(Refusal::ExecutorUnavailable);
         }
         self.next += 1;
-        let mut line = serde_json::to_vec(&serde_json::json!({ "id": self.next, "code": code }))
-            .map_err(|_| Refusal::InvalidRequest)?;
+        // The executor ends Playwright's own waits before this deadline, so a stuck action fails
+        // with Playwright's reason instead of the execution's timeout.
+        let timeout_ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as u64;
+        let mut line = serde_json::to_vec(
+            &serde_json::json!({ "id": self.next, "code": code, "timeout_ms": timeout_ms }),
+        )
+        .map_err(|_| Refusal::InvalidRequest)?;
         line.push(b'\n');
         within(deadline, async {
             self.input
