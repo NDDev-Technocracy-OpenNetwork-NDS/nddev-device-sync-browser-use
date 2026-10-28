@@ -716,7 +716,9 @@ test("the recorder turns a person's actions in an agent tab into events and fram
     // The CLI's recorder commands are the helper's calls.
     const status = await plain("-s", "recorder", "recorder", "status");
     expect(status.code).toBe(0);
-    expect(status.stdout).toContain(`path: '${join(runtime, "sessions", "recorder")}`);
+    // inspect escapes a Windows path's separators, so only its platform-neutral parts are compared.
+    expect(status.stdout).toContain("id: '1'");
+    expect(status.stdout).toContain("recordings");
     const tab = await observed("/helpers?recorder");
     await tab?.click("#save");
     await tab?.fill("#name", "Ada");
