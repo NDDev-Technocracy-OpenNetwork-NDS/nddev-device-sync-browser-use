@@ -893,22 +893,27 @@ test("raw CDP sessions reach agent tabs, including a virtual authenticator", asy
 test("a raw CDP session that enables Runtime learns the page's contexts", async () => {
   // Playwright enabled Runtime on the tab first; a later session must still be told the contexts.
   await opened("runtime");
-  const result = await run(
-    "runtime",
-    `const page = await context.newPage(); await page.goto("${origin}/");
-     const cdp = await getCDPSession({ page });
-     const contexts = [];
-     cdp.on("Runtime.executionContextCreated", ({ context }) => contexts.push(context.auxData?.isDefault));
-     await cdp.send("Runtime.enable");
-     const { result } = await cdp.send("Runtime.evaluate", { expression: "document.title" });
-     await page.evaluate(() => document.title);
-     await page.close();
-     return [contexts.includes(true), result.value].join(" ")`,
-    "--timeout",
-    "10000",
-  );
-  expect(result.body.value).toBe("true Fixture");
-  expect((await cli("session", "close", "runtime", "--close-tabs")).code).toBe(0);
+  try {
+    const result = await run(
+      "runtime",
+      `const page = await context.newPage(); await page.goto("${origin}/");
+       const cdp = await getCDPSession({ page });
+       const contexts = [];
+       cdp.on("Runtime.executionContextCreated", ({ context }) => contexts.push(context.auxData?.isDefault));
+       await cdp.send("Runtime.enable");
+       const { result } = await cdp.send("Runtime.evaluate", { expression: "document.title" });
+       await page.evaluate(() => document.title);
+       await page.close();
+       return [contexts.includes(true), result.value].join(" ")`,
+      "--timeout",
+      "10000",
+    );
+    expect(result.body.value).toBe("true Fixture");
+    expect((await cli("session", "close", "runtime", "--close-tabs")).code).toBe(0);
+  } finally {
+    // A failure above must not leave this session's executor to the tests after it.
+    await cli("session", "close", "runtime");
+  }
 });
 
 test("screenshots are written inside the session area", async () => {
@@ -1079,53 +1084,69 @@ test("a late end of an aborted script leaves the next result its notices", async
 
 test("a script that blocks its executor past the deadline is stopped and its state resets", async () => {
   await opened("blocking");
-  expect((await run("blocking", "state.kept = 1")).code).toBe(0);
-  const blocked = await run("blocking", "while (true) {}", "--timeout", "1000");
-  expect(blocked).toEqual({ code: 2, body: expect.objectContaining({ error: "timeout" }) });
-  expect((await run("blocking", "state.kept === undefined")).body.value).toBe("true");
-  expect((await cli("session", "close", "blocking")).code).toBe(0);
+  try {
+    expect((await run("blocking", "state.kept = 1")).code).toBe(0);
+    const blocked = await run("blocking", "while (true) {}", "--timeout", "1000");
+    expect(blocked).toEqual({ code: 2, body: expect.objectContaining({ error: "timeout" }) });
+    expect((await run("blocking", "state.kept === undefined")).body.value).toBe("true");
+    expect((await cli("session", "close", "blocking")).code).toBe(0);
+  } finally {
+    // A failure above must not leave this session's executor to the tests after it.
+    await cli("session", "close", "blocking");
+  }
 });
 
 test("a replacement executor sees its page and none of the old executor's interception", async () => {
   await opened("replaced");
-  // The first executor opens a page, holds every later request of it unanswered, and then
-  // outlives its deadline.
-  const first = await run(
-    "replaced",
-    `state.page = await context.newPage(); await state.page.goto("${origin}/"); await state.page.route("**/*", () => {}); while (true) {}`,
-    "--timeout",
-    "1500",
-  );
-  // A script that blocks its executor cannot confirm an abort, so the executor is replaced.
-  expect(first.body.error).toBe("timeout");
-  // Its replacement evaluates in the same tab and loads it again.
-  const replaced = await run(
-    "replaced",
-    "const page = context.pages()[0]; await page.reload(); return await page.evaluate(() => document.title)",
-    "--timeout",
-    "8000",
-  );
-  expect(replaced.body.value).toBe("Fixture");
-  expect((await cli("session", "close", "replaced", "--close-tabs")).code).toBe(0);
+  try {
+    // The first executor opens a page, holds every later request of it unanswered, and then
+    // outlives its deadline.
+    const first = await run(
+      "replaced",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/"); await state.page.route("**/*", () => {}); while (true) {}`,
+      "--timeout",
+      "1500",
+    );
+    // A script that blocks its executor cannot confirm an abort, so the executor is replaced.
+    expect(first.body.error).toBe("timeout");
+    // Its replacement evaluates in the same tab and loads it again.
+    const replaced = await run(
+      "replaced",
+      "const page = context.pages()[0]; await page.reload(); return await page.evaluate(() => document.title)",
+      "--timeout",
+      "8000",
+    );
+    expect(replaced.body.value).toBe("Fixture");
+    expect((await cli("session", "close", "replaced", "--close-tabs")).code).toBe(0);
+  } finally {
+    // A failure above must not leave this session's executor to the tests after it.
+    await cli("session", "close", "replaced");
+  }
 });
 
 test("another extension's frame neither ends an agent tab nor reaches agents", async () => {
   await opened("foreign");
-  // The fixture extension injects its own page as a frame half a second after load. Chrome then
-  // detaches the debugger from the whole tab; the tab is attached again, and its frame removed.
-  const result = await run(
-    "foreign",
-    `state.page = await context.newPage(); await state.page.goto("${origin}/foreign");
-     await state.page.waitForTimeout(2500);
-     return [context.pages().length, await state.page.evaluate(() => document.querySelectorAll("iframe").length), await state.page.title()].join(" ")`,
-    "--timeout",
-    "15000",
-  );
-  expect(result.body.value).toBe("1 0 Foreign host");
-  expect(
-    (await run("foreign", "await state.page.reload(); return state.page.url()")).body.value,
-  ).toBe(`${origin}/foreign`);
-  expect((await cli("session", "close", "foreign", "--close-tabs")).code).toBe(0);
+  try {
+    // The fixture extension injects its own page as a frame half a second after load. Chrome then
+    // detaches the debugger from the whole tab; the tab is attached again, and its frame removed.
+    const result = await run(
+      "foreign",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/foreign");
+       await state.page.waitForTimeout(2500);
+       return [context.pages().length, await state.page.evaluate(() => document.querySelectorAll("iframe").length), await state.page.title()].join(" ")`,
+      "--timeout",
+      "15000",
+    );
+    // The whole answer is compared, so a failure shows its reason.
+    expect(result.body).toMatchObject({ value: "1 0 Foreign host" });
+    expect(
+      (await run("foreign", "await state.page.reload(); return state.page.url()")).body,
+    ).toMatchObject({ value: `${origin}/foreign` });
+    expect((await cli("session", "close", "foreign", "--close-tabs")).code).toBe(0);
+  } finally {
+    // A failure above must not leave this session's executor to the tests after it.
+    await cli("session", "close", "foreign");
+  }
 });
 
 // What an agent's shell sees from one CLI call: plain text, no protocol envelope.
@@ -1445,18 +1466,23 @@ test.skipIf(windows)(
 // Once the extension's deadline for the call passed, the session still closes and opens again.
 test("a session whose execution timed out during a long wait closes and opens again", async () => {
   await opened("waiting");
-  const waited = await run(
-    "waiting",
-    `const page = await context.newPage(); await page.goto("${origin}/"); await page.waitForFunction(() => false, null, { timeout: 0 })`,
-    "--timeout",
-    "3000",
-  );
-  expect(waited.body.failure).toBe("aborted");
-  // The extension answers or drops the abandoned call within its 30 s reply deadline.
-  await Bun.sleep(32_000);
-  expect((await cli("session", "close", "waiting", "--close-tabs")).code).toBe(0);
-  expect((await cli("session", "new", "waiting")).code).toBe(0);
-  expect((await cli("session", "close", "waiting", "--close-tabs")).code).toBe(0);
+  try {
+    const waited = await run(
+      "waiting",
+      `const page = await context.newPage(); await page.goto("${origin}/"); await page.waitForFunction(() => false, null, { timeout: 0 })`,
+      "--timeout",
+      "3000",
+    );
+    expect(waited.body.failure).toBe("aborted");
+    // The extension answers or drops the abandoned call within its 30 s reply deadline.
+    await Bun.sleep(32_000);
+    expect((await cli("session", "close", "waiting", "--close-tabs")).code).toBe(0);
+    expect((await cli("session", "new", "waiting")).code).toBe(0);
+    expect((await cli("session", "close", "waiting", "--close-tabs")).code).toBe(0);
+  } finally {
+    // A failure above must not leave this session's executor to the tests after it.
+    await cli("session", "close", "waiting");
+  }
 }, 60_000);
 
 test("the owner's switch revokes sessions until control is enabled again", async () => {
