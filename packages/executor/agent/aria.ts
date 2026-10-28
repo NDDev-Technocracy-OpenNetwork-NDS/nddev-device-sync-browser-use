@@ -755,7 +755,28 @@ function isTruthy<T>(value: T): value is NonNullable<T> {
 }
 
 /** A frame this module cannot snapshot through the page session; callers fall back. */
-export class FrameOutOfReach extends Error {}
+export class FrameOutOfReach extends Error {
+  constructor(
+    message: string,
+    /** The frame whose part the snapshot needs. */
+    readonly frame: Frame,
+  ) {
+    super(message);
+  }
+}
+
+// The frame a locator's element is in, which for `page.frameLocator(...).locator(...)` is not the
+// locator's own frame.
+async function ownerFrame(locator: Locator): Promise<Frame> {
+  const handle = await locator.elementHandle();
+  try {
+    const frame = await handle.ownerFrame();
+    if (!frame) throw new Error(`the element of ${locator} is in no frame`);
+    return frame;
+  } finally {
+    await handle.dispose();
+  }
+}
 
 type FrameTree = { frame: { id: string; url: string; name?: string }; childFrames?: FrameTree[] };
 
@@ -850,11 +871,14 @@ export async function getAriaSnapshot({
   const scopeLocator = locator;
   // The session is this call's own from here on: every exit below detaches it.
   try {
-    const frameId = frame && frame !== page.mainFrame() ? await frameIdOf(session, frame) : null;
-    if (frame && frame !== page.mainFrame() && !frameId) {
-      throw new FrameOutOfReach(`frame ${frame.url()} is not reachable through its page`);
+    // The frame whose tree is read: the given one, or the one the locator's element is in.
+    const owner = locator ? await ownerFrame(locator) : (frame ?? page.mainFrame());
+    const child = owner !== page.mainFrame();
+    const frameId = child ? await frameIdOf(session, owner) : null;
+    if (child && !frameId) {
+      throw new FrameOutOfReach(`frame ${owner.url()} is not reachable through its page`, owner);
     }
-    const resolvedFrame = frame;
+    const resolvedFrame = child ? owner : undefined;
     const prefix = await refPrefix(page, frame, locator);
 
     await Promise.all([
@@ -901,6 +925,13 @@ export async function getAriaSnapshot({
     let scopeRootBackendId: BackendNodeId | null = null;
     if (scopeLocator) {
       scopeRootNodeId = findScopeRootNodeId(domNodes, scopeAttr, scopeValue);
+      // A part this session cannot see is never widened to the whole frame.
+      if (!scopeRootNodeId) {
+        throw new FrameOutOfReach(
+          `the element of ${scopeLocator} is not in its frame's document`,
+          owner,
+        );
+      }
       if (scopeRootNodeId) {
         const scopeNode = domById.get(scopeRootNodeId);
         if (scopeNode) {

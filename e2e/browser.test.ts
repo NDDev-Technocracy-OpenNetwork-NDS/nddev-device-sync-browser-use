@@ -420,6 +420,11 @@ test("snapshot locators and shown refs reach the element their line shows", asyn
     seen.push(framed.includes("Locators are inside the frame") && framed.includes('[id="inner"]'));
     await same.locator('[id="inner"]').click();
     seen.push(await same.locator("#inner").textContent());
+    // A part inside a frame, named through the page or through the frame, shows that part only.
+    for (const part of [page.frameLocator("#same").locator("body"), same.locator("#inner")]) {
+      const view = await snapshot(part);
+      seen.push(view.includes('[id="inner"]') && !view.includes("Save"));
+    }
     const shot = await screenshotWithAccessibilityLabels({ page });
     const labels = [...shot.matchAll(/button "Save" \\[ref=([^\\]]+)\\]/g)].map((found) => found[1]);
     await snapshot({ page, showDiffSinceLastCall: false });
@@ -428,6 +433,12 @@ test("snapshot locators and shown refs reach the element their line shows", asyn
     const far = await context.newPage(); await far.goto("${origin}/frame");
     const other = far.frames().find((frame) => frame.url().endsWith("/inner"));
     await other.locator("#inner").waitFor();
+    // A part inside a frame of another process: Playwright's snapshot of that part, whose refs
+    // enter the frame.
+    for (const part of [far.frameLocator("iframe").locator("body"), other.locator("#inner")]) {
+      const view = await snapshot(part);
+      seen.push(/button "Inner" \\[ref=/.test(view) && !view.includes("iframe"));
+    }
     const remote = await snapshot({ frame: other });
     const shown = remote.match(/button "Inner" \\[ref=([^\\]]+)\\]/)?.[1];
     seen.push(Boolean(shown));
@@ -438,7 +449,9 @@ test("snapshot locators and shown refs reach the element their line shows", asyn
     "--timeout",
     "25000",
   );
-  expect(result.body.value).toBe("true second true first true inside 2 second true inside");
+  expect(result.body.value).toBe(
+    "true second true first true inside true true 2 second true true true inside",
+  );
 });
 
 // Only a person passes a bot check: agent code finds it, hands it to the owner through a Chrome
