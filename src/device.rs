@@ -208,12 +208,21 @@ fn private(_path: &Path, metadata: &std::fs::Metadata) -> Result<(), IoError> {
 mod tests {
     use super::*;
 
+    // An absolute program on this platform.
+    const PROGRAM: &str = if cfg!(windows) {
+        r"C:\nds\nds-browser-use.exe"
+    } else {
+        "/usr/bin/nds-browser-use"
+    };
+
     #[test]
     fn devices_reach_a_cli_over_ssh_or_a_command() {
-        let devices = Devices::parse(
-            br#"{"schema":1,"devices":{"pc":{"ssh":"rldyourmnd-pc"},"lab":{"ssh":"me@lab.example","cli":"~/bin/nds-browser-use"},"self":{"command":["/usr/bin/nds-browser-use"]}}}"#,
-        )
-        .unwrap();
+        let file = serde_json::json!({ "schema": 1, "devices": {
+            "pc": { "ssh": "rldyourmnd-pc" },
+            "lab": { "ssh": "me@lab.example", "cli": "~/bin/nds-browser-use" },
+            "self": { "command": [PROGRAM] },
+        }});
+        let devices = Devices::parse(file.to_string().as_bytes()).unwrap();
         assert_eq!(
             devices.get("pc"),
             Some(&Transport::Ssh {
@@ -271,12 +280,12 @@ mod tests {
     #[test]
     fn a_command_device_appends_the_arguments_without_a_shell() {
         let transport = Transport::Command {
-            argv: vec!["/usr/bin/nds-browser-use".into()],
+            argv: vec![PROGRAM.into()],
         };
         assert_eq!(
             transport.invocation(&["-s", "a b", "status"]),
             (
-                "/usr/bin/nds-browser-use".into(),
+                PROGRAM.into(),
                 vec!["-s".into(), "a b".into(), "status".into()]
             )
         );
