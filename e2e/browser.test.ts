@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { type BrowserContext, chromium, type Page } from "playwright-core";
 
 const windows = process.platform === "win32";
@@ -54,6 +54,8 @@ const env: Record<string, string> = {
 };
 
 let observer: BrowserContext;
+// The CLI's configuration directory, beside the host configuration that `install` wrote.
+let configuration: string;
 let fixture: ReturnType<typeof Bun.serve>;
 let origin: string;
 let requests = 0;
@@ -237,6 +239,7 @@ beforeAll(async () => {
       : ["--host-dir", join(profile, "NativeMessagingHosts")]),
   );
   expect(registration.code).toBe(0);
+  configuration = dirname(String(registration.body.config));
   const manifest = String(registration.body.manifest);
   const registered = JSON.parse(readFileSync(manifest, "utf8"));
   expect(registered.allowed_origins).toEqual([
@@ -1037,7 +1040,7 @@ async function plain(...args: string[]): Promise<{ code: number; stdout: string;
 // Another device's browser is driven through that device's own CLI: here a device whose transport
 // runs this CLI again, so the whole path is exercised without a second machine.
 test("a device's CLI runs a session's code there and hands its artifacts back", async () => {
-  const devices = join(env.XDG_CONFIG_HOME ?? "", "nds-browser-use", "devices.json");
+  const devices = join(configuration, "devices.json");
   const missing = join(root, "missing", "nds-browser-use");
   const configured = { self: { command: [binary] }, broken: { command: [missing] } };
   writeFileSync(devices, JSON.stringify({ schema: 1, devices: configured }), { mode: 0o600 });
@@ -1091,7 +1094,7 @@ test("a device's CLI runs a session's code there and hands its artifacts back", 
     expect([...readFileSync(local).subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
     // Nothing outside the session's own area is read, also through a link agent code made there,
     // and only configured devices are reached.
-    const host = join(env.XDG_CONFIG_HOME ?? "", "nds-browser-use", "host.json");
+    const host = join(configuration, "host.json");
     const linked = await plain(
       "--device",
       "self",
