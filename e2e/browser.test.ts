@@ -1128,7 +1128,8 @@ test("a device's CLI runs a session's code there and hands its artifacts back", 
     ? {}
     : {
         idle: {
-          command: ["/usr/bin/env", `NDS_BROWSER_USE_RUNTIME_DIR=${join(root, "no-host")}`, binary],
+          // A short sibling of the run's own directory keeps its socket path inside sun_path.
+          command: ["/usr/bin/env", `NDS_BROWSER_USE_RUNTIME_DIR=${runtime}-idle`, binary],
         },
       };
   const configured = { self: { command: [binary] }, broken: { command: [missing] }, ...idle };
