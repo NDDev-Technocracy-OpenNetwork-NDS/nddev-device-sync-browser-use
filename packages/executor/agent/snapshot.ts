@@ -55,9 +55,12 @@ export async function snapshot(options: SnapshotOptions | Page | Locator): Promi
     });
     view = result.snapshot;
   } catch (error) {
-    if (!(error instanceof FrameOutOfReach) || !given.frame) throw error;
-    view = compact(await given.frame.locator(":root").ariaSnapshot({ mode: "ai" }));
-    useAriaRefs(page, await frameScope(given.frame));
+    if (!(error instanceof FrameOutOfReach)) throw error;
+    // Playwright reaches every frame: its snapshot of exactly that part stands in, and its refs
+    // enter that frame.
+    const part = given.locator ?? error.frame.locator(":root");
+    view = compact(await part.ariaSnapshot({ mode: "ai" }));
+    useAriaRefs(page, await frameScope(error.frame));
   }
   const scope = given.locator
     ? `locator ${given.locator}`
@@ -67,7 +70,7 @@ export async function snapshot(options: SnapshotOptions | Page | Locator): Promi
   const detail = given.interactiveOnly ? " interactive" : "";
   // A part's locators are relative to it; say so once rather than on every line.
   const relative = given.locator
-    ? "\nLocators are inside the locator: use locator.locator(...)."
+    ? "\nLocators are inside the locator: use locator.locator(...), or ref() for [ref=...]."
     : given.frame && given.frame !== page.mainFrame()
       ? "\nLocators are inside the frame: use frame.locator(...), or ref() for [ref=...]."
       : "";
