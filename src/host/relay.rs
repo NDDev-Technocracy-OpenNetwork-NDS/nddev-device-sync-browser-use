@@ -90,6 +90,32 @@ fn detached_event(session: &str, target: &str, parent: &str) -> Value {
     })
 }
 
+/// Whether the client asked for download events. `chrome.debugger` reaches no Browser domain, and
+/// Chrome refuses an extension's `Page.setDownloadBehavior`, so a download keeps the browser's own
+/// policy and folder; its tab's events still reach the client as the browser-level events
+/// Playwright reads, so the agent sees the download, its URL and its suggested name.
+pub(crate) struct Downloads {
+    events: bool,
+}
+
+/// The browser-level event for a tab's download event, when the client asked for them.
+pub(super) fn download_event(
+    state: &mut super::State,
+    project: &str,
+    method: &str,
+    params: &Value,
+) -> Option<Value> {
+    let downloads = state.sessions.get(project)?.downloads.as_ref()?;
+    let browser = match method {
+        "Page.downloadWillBegin" => "Browser.downloadWillBegin",
+        "Page.downloadProgress" => "Browser.downloadProgress",
+        _ => return None,
+    };
+    downloads
+        .events
+        .then(|| json!({ "method": browser, "params": params }))
+}
+
 pub(crate) struct Client {
     pub id: u64,
     pub auto_attach: bool,
@@ -277,6 +303,7 @@ impl Host {
         }) {
             session.client = None;
             session.aliases.clear();
+            session.downloads = None;
         }
     }
 
@@ -306,6 +333,19 @@ impl Host {
             .await;
         work.settle();
         reply(command["id"].clone(), via, result)
+    }
+
+    /// Records whether the client wants download events; the download policy stays the browser's.
+    fn set_downloads(&self, project: &str, params: &Value) -> Result<Value, Failure> {
+        let mut state = self.state();
+        let session = state
+            .sessions
+            .get_mut(project)
+            .ok_or(Failure::Refused(crate::protocol::Refusal::SessionNotFound))?;
+        session.downloads = Some(Downloads {
+            events: params["eventsEnabled"].as_bool().unwrap_or(false),
+        });
+        Ok(json!({}))
     }
 
     /// Opens a raw CDP session alias for the current session.
@@ -351,6 +391,7 @@ impl Host {
             Ok(message) => message,
             Err(failure) => return self.answer(forward, Err(failure)),
         };
+
         let (id, session) = (forward.id.clone(), forward.session.clone());
         if let Err(failure) = self.submit_cdp(message, forward) {
             // A failed submission drops its waiter; answer the client directly.
@@ -405,9 +446,8 @@ impl Host {
                     "jsVersion": "",
                 }))
             }
-            // Downloads keep the browser's own policy; Playwright download
-            // events are not produced for agent tabs.
-            "Browser.setDownloadBehavior" | "Target.setDiscoverTargets" => Ok(json!({})),
+            "Browser.setDownloadBehavior" => self.set_downloads(project, &params),
+            "Target.setDiscoverTargets" => Ok(json!({})),
             "Target.setAutoAttach" => {
                 let mut state = self.state();
                 let events: Vec<Value> = state
@@ -624,6 +664,7 @@ mod tests {
                 running: false,
                 used: Instant::now(),
                 aliases,
+                downloads: None,
             },
         );
         assert_eq!(tab_aliases(&state.sessions["nds"], 7), ["tab-7"]);

@@ -2,8 +2,9 @@
 // session-scoped CDP endpoint on its private socket and talks JSON lines over
 // stdio. The vm context only keeps per-session state; it is not a sandbox.
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { pathToFileURL } from "node:url";
 import vm from "node:vm";
 import { chromium, type Page } from "playwright-core";
 import { checks, owner } from "./agent/checks";
@@ -20,7 +21,7 @@ import {
 import { bounded, compose, describeError, errorParts, waitBudget } from "./agent/format";
 import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
-import { getLocatorStringForElement, pinnedElements } from "./agent/locators";
+import { getLocatorStringForElement, inspectPinnedElement, pinnedElements } from "./agent/locators";
 import { clearAllLogs, getLatestLogs, notified, attach as watchLogs } from "./agent/logs";
 import { recorderFor } from "./agent/recorder";
 import { createDemoVideo, executing, ghostCursor, recording } from "./agent/recording";
@@ -93,13 +94,42 @@ function observe(page: Page): void {
 for (const page of context.pages()) observe(page);
 context.on("page", observe);
 
+// The executor's own process with what would stop it or move it refused, its working directory
+// being the session's artifacts. `require("node:process")` still gives the real one.
+const refused = (name: string) => () => {
+  throw new Error(`process.${name} is not available to agent code; the session owns its process`);
+};
+const agentProcess = new Proxy(process, {
+  get(target, key, receiver) {
+    if (key === "exit" || key === "abort" || key === "chdir" || key === "reallyExit") {
+      return refused(String(key));
+    }
+    if (key === "cwd") return () => artifacts;
+    return Reflect.get(target, key, receiver);
+  },
+});
+
+// An interval of an aborted execution stops with it; a timeout fires once and can no longer act.
+const agentSetInterval = (
+  handler: (...args: unknown[]) => void,
+  ms?: number,
+  ...args: unknown[]
+) => {
+  const handle = setInterval(handler, ms, ...args);
+  scope.getStore()?.withdraw.push(() => clearInterval(handle));
+  return handle;
+};
+
 const sandbox = vm.createContext({
   browser,
   context,
   state,
   artifacts,
   console: captured,
+  process: agentProcess,
   snapshot,
+  // Playwriter's earlier name of `snapshot`.
+  accessibilitySnapshot: snapshot,
   ref,
   refToLocator,
   getLatestLogs,
@@ -110,7 +140,16 @@ const sandbox = vm.createContext({
   getPageMarkdown,
   getLocatorStringForElement,
   pinnedElements,
+  inspectPinnedElement: (pageUrl: string, expression: string) =>
+    inspectPinnedElement(pageUrl, expression, context.pages(), state, getReactComponentInfo),
   require: createRequire(join(artifacts, "agent.js")),
+  // `import()` by another name; relative specifiers resolve in the artifacts, as with `import()`.
+  importModule: (specifier: string) =>
+    import(
+      specifier.startsWith(".") || specifier.startsWith("/")
+        ? pathToFileURL(resolve(artifacts, specifier)).href
+        : specifier
+    ),
   screenshotWithAccessibilityLabels: (options: { page: Page }) =>
     screenshotWithAccessibilityLabels(options, artifacts),
   resizeImageForAgent,
@@ -135,8 +174,13 @@ const sandbox = vm.createContext({
   TextEncoder,
   TextDecoder,
   AbortController,
+  AbortSignal,
+  Buffer,
+  crypto: globalThis.crypto,
   setTimeout,
   clearTimeout,
+  setInterval: agentSetInterval,
+  clearInterval,
   structuredClone,
 });
 // `signal` is the calling script's own: aborted once its execution timed out.
