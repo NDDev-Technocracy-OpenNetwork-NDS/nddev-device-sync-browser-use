@@ -186,6 +186,8 @@ beforeAll(async () => {
         // A different site (localhost vs 127.0.0.1) renders out of process.
         "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
         "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
+        // Disclosures inside nested wrappers, one named by its text and one by its label.
+        "/disclosure": `<title>Disclosure</title><main><div><div><details><summary>Where should I start?</summary><p>Here.</p></details><div><details><summary aria-label="Language: EN">EN</summary><p>English</p></details></div></div></div></main>`,
         // Equal buttons in two parts, and a frame of the same site, which shares the process.
         "/refs": `<title>Refs</title><section id="first"><button onclick="out.textContent = 'first'">Save</button></section><section id="second"><button onclick="out.textContent = 'second'">Save</button></section><span id="out"></span><iframe id="same" src="/inner"></iframe>`,
         "/article": `<title>Fixture article</title><style>p { color: black }</style><script>window.unused = 1</script><nav><a href="/">Home</a></nav><article><h1>Fixture heading</h1><p>First. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><p>Second. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><ul><li>One point</li><li>Two points</li></ul><button id="go">Go</button></article>`,
@@ -457,6 +459,45 @@ test("snapshot locators and shown refs reach the element their line shows", asyn
   expect(result.body.value).toBe(
     "true second true first true inside true true 2 second true true true inside",
   );
+});
+
+// A <summary>, which Playwright's role engine has no role for, shows a locator that opens its
+// details; a line is indented only by the lines shown above it.
+test("summary lines show locators that open their details", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/disclosure");
+    const shown = await snapshot({ page });
+    const interactive = await snapshot({ page, interactiveOnly: true, showDiffSinceLastCall: false });
+    const start = shown.match(/- disclosuretriangle (summary >> .*)$/m)?.[1];
+    const language = shown.match(/- disclosuretriangle (summary\\[aria-label=.*)$/m)?.[1];
+    await page.locator(start).click();
+    await page.locator(language).click();
+    const open = await page.evaluate(() => [...document.querySelectorAll("details")].map((details) => details.open));
+    await page.close();
+    return JSON.stringify({ shown, interactive, start, language, open })`,
+    "--timeout",
+    "20000",
+  );
+  const seen = JSON.parse(String(result.body.value ?? "{}")) as {
+    shown: string;
+    interactive: string;
+    start: string;
+    language: string;
+    open: boolean[];
+  };
+  expect(seen.start).toBe('summary >> internal:has-text="Where should I start?"s');
+  expect(seen.language).toBe('summary[aria-label="Language: EN"]');
+  expect(seen.open).toEqual([true, true]);
+  expect(seen.interactive).toContain(seen.start);
+  const depths = seen.shown
+    .split("\n")
+    .filter((line) => line.trimStart().startsWith("- "))
+    .map((line) => line.length - line.trimStart().length);
+  expect(depths[0]).toBe(0);
+  for (const [index, depth] of depths.entries()) {
+    expect(depth).toBeLessThanOrEqual((depths[index - 1] ?? 0) + 2);
+  }
 });
 
 // Only a person passes a bot check: agent code finds it, hands it to the owner through a Chrome
