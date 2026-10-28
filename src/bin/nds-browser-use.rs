@@ -272,15 +272,24 @@ async fn devices() -> ExitCode {
                 .stdin(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
             let answer = tokio::time::timeout(DEVICE_STATUS_TIMEOUT, command.output()).await;
-            let status = match answer {
-                Ok(Ok(output)) if output.status.success() => {
-                    serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()
-                }
+            // A device that answers reports its own state, such as `unavailable` when its browser
+            // has no connected extension; only a device that does not answer is unreachable.
+            let reply = match answer {
+                Ok(Ok(output)) => serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                    .ok()
+                    .filter(serde_json::Value::is_object)
+                    .map(|reply| (output.status.success(), reply)),
                 _ => None,
             };
-            match status {
-                Some(status) => serde_json::json!({ "name": name, "transport": transport.kind(), "status": status }),
-                None => serde_json::json!({ "name": name, "transport": transport.kind(), "error": "device_unreachable" }),
+            let kind = transport.kind();
+            match reply {
+                Some((true, status)) => {
+                    serde_json::json!({ "name": name, "transport": kind, "status": status })
+                }
+                Some((false, refusal)) if refusal["error"].is_string() => {
+                    serde_json::json!({ "name": name, "transport": kind, "error": refusal["error"] })
+                }
+                _ => serde_json::json!({ "name": name, "transport": kind, "error": "device_unreachable" }),
             }
         }
     });
