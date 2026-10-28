@@ -69,15 +69,25 @@ for popups of the pages you keep in `state`.
 
 ### Reading the page
 
-- **`snapshot({ page, locator?, frame?, search?, showDiffSinceLastCall? })`** returns the
-  accessibility snapshot, headed by the URL.
-  - Every element carries a ref such as `[ref=e5]`; use it with
-    `page.locator(refToLocator({ ref: "e5" }))` or `ref({ page, ref: "e5" })` until the next
-    snapshot.
-  - Later calls show only what changed, and a navigation starts over.
-  - `search` shows the first matching lines, and `showDiffSinceLastCall: false` the whole page
-    again.
-  - A `locator` or `frame` limits it to that part.
+- **`snapshot({ page, locator?, frame?, search?, showDiffSinceLastCall?, interactiveOnly? })`**
+  returns the page's accessibility tree, headed by the URL. Unnamed wrappers are left out, and
+  every interactive line ends with a Playwright locator, for example
+  `- button "Save" [id="save"]` or `- role=link[name="Docs"i]`.
+  - **Use the locator as it is:** `state.page.locator('[id="save"]').click()`. Never invent a
+    selector the snapshot does not show. A `>> nth=N` suffix tells equal locators apart.
+  - Visible text can differ from the DOM's through CSS, such as `text-transform`; match names
+    case-insensitively.
+  - Later calls show only what changed, when that is shorter; "No changes since last call" means
+    nothing did. A navigation starts over.
+  - `search` shows the first ten matching lines with five lines around each;
+    `showDiffSinceLastCall: false` shows the whole tree again.
+  - A `locator` (a dialog, a form, `main`) or a `frame` limits it to that part and saves most of
+    the output. Its locators are relative to that part: `part.locator(...)`, `frame.locator(...)`.
+    `interactiveOnly: true` keeps only controls and the labels and landmarks around them.
+  - Refs such as `[ref=e5]` appear in screenshot labels and in the snapshot of a frame of another
+    process. `ref({ page, ref: "e5" })` reaches that element through its frame, and
+    `refToLocator({ ref: "e5", page })` gives its selector, until the next labeled screenshot or
+    such frame snapshot.
   - Prefer it to screenshots.
 - **`getLatestLogs({ page, sinceLastCall?, search?, count? })`** returns the page's console
   messages and errors since the session first saw the page.
