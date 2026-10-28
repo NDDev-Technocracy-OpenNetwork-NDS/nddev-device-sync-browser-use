@@ -580,6 +580,17 @@ impl Host {
             Some("event") => self.on_event(message),
             Some("attached") => self.on_attached(&message),
             Some("detached") => self.on_detached(&message),
+            Some("telemetry") => match crate::protocol::extension_event(&message) {
+                Some(event) => match event.error {
+                    None => tracing::info!(event.name = event.name, outcome = event.outcome),
+                    Some(error) => {
+                        tracing::warn!(event.name = event.name, outcome = event.outcome, error.type = error)
+                    }
+                },
+                None => {
+                    tracing::warn!(event.name = "browser.extension.telemetry", outcome = "rejected", error.type = "invalid_event")
+                }
+            },
             Some("hello") => {
                 let mut state = self.state();
                 state.connected = true;

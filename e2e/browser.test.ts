@@ -894,18 +894,15 @@ async function plain(...args: string[]): Promise<{ code: number; stdout: string;
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
   ]);
-  return {
-    code: await child.exited,
-    stdout,
-    stderr: stderr.replace(/^\{.*"event.name".*\}\n/gm, ""),
-  };
+  return { code: await child.exited, stdout, stderr };
 }
 
 test("agents read plain text, and a stuck action fails with its reason before the deadline", async () => {
   await opened("plain");
   try {
+    // The host records every request; the client's stderr stays empty for the agent.
     const value = await plain("-s", "plain", "-e", "1 + 1");
-    expect(value).toMatchObject({ code: 0, stdout: "[return value] 2\n" });
+    expect(value).toEqual({ code: 0, stdout: "[return value] 2\n", stderr: "" });
     const logged = await plain(
       "-s",
       "plain",
@@ -1208,6 +1205,10 @@ test("host telemetry is schema-valid and carries no page data", () => {
     "browser.extension.reload",
     "browser.execute.cancelled",
     "browser.host.stopped",
+    // The extension's own work, reported through the host: the fixture extension's frame forced a
+    // detach that was restored, and the session of a replaced executor was refreshed.
+    "browser.target.reattached",
+    "browser.session.refreshed",
   ]) {
     expect(names).toContain(name);
   }
@@ -1220,6 +1221,8 @@ test("host telemetry is schema-valid and carries no page data", () => {
     "state.page",
     "Popup target",
     "/owner",
+    "foreign-extension",
+    "chrome-extension://",
   ]) {
     expect(text).not.toContain(secret);
   }

@@ -66,7 +66,10 @@ async function command(target, method, params) {
         return await Promise.race([
             sent,
             new Promise((_, reject) => {
-                timer = setTimeout(() => reject(new Error(`${method} got no answer; the tab may be frozen`)), SETUP_TIMEOUT_MS);
+                timer = setTimeout(() => {
+                    report("browser.cdp.setup_timeout", "timeout");
+                    reject(new Error(`${method} got no answer; the tab may be frozen`));
+                }, SETUP_TIMEOUT_MS);
             }),
         ]);
     }
@@ -89,6 +92,14 @@ async function badge() {
 }
 function send(message) {
     port?.postMessage(message);
+}
+// One event about this worker's own Chrome work for the host's telemetry: a fixed name, an
+// outcome and a fixed error type, never anything of a page.
+function report(event, error) {
+    const outcome = error === undefined ? "ok" : error === "timeout" ? "error" : "rejected";
+    send(error === undefined
+        ? { type: "telemetry", event, outcome }
+        : { type: "telemetry", event, outcome, error });
 }
 function connect() {
     if (port)
@@ -497,12 +508,15 @@ async function removeForeignFrames(tab, life, attachment) {
         .then(() => chrome.scripting.executeScript({
         target: { tabId: tab, allFrames: true },
         func: (own) => {
+            let removed = 0;
             const remove = (root) => {
                 for (const frame of root.querySelectorAll("iframe")) {
                     const source = frame.src || frame.getAttribute("src") || "";
                     if (source.startsWith("chrome-extension://") &&
-                        !source.startsWith(`chrome-extension://${own}/`))
+                        !source.startsWith(`chrome-extension://${own}/`)) {
                         frame.remove();
+                        removed++;
+                    }
                 }
                 for (const element of root.querySelectorAll("*")) {
                     const shadow = element instanceof HTMLElement ? chrome.dom.openOrClosedShadowRoot(element) : null;
@@ -511,9 +525,15 @@ async function removeForeignFrames(tab, life, attachment) {
                 }
             };
             remove(document);
+            return removed;
         },
         args: [chrome.runtime.id],
     }))
+        .then((results) => {
+        const removed = results.reduce((sum, frame) => sum + (Number(frame.result) || 0), 0);
+        if (removed > 0)
+            report("browser.target.foreign_frames_removed");
+    })
         .catch(() => undefined);
 }
 function closeAll() {
@@ -726,6 +746,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
             // session. It is detached on the session that reported it, which also lets it run on.
             const child = String(fields.sessionId);
             ignored.add(child);
+            report("browser.target.restricted");
             void chrome.debugger
                 .sendCommand(source, "Target.detachFromTarget", { sessionId: child })
                 .catch(() => undefined);
@@ -744,12 +765,11 @@ chrome.debugger.onDetach.addListener((source, reason) => {
         return;
     // Chrome detached a live agent tab on its own, most often because another extension's frame
     // navigated in it. The tab is attached again and restored, a few times in a row at most.
-    if (reason === "target_closed" &&
-        usable(tab) &&
-        !reattaching.has(tab) &&
-        restore.mayReattach(tab, Date.now())) {
+    const live = reason === "target_closed" && usable(tab) && !reattaching.has(tab);
+    if (live && restore.mayReattach(tab, Date.now())) {
         const attempt = admitted(attachment.life, reattach(tab, attachment))
-            .then((outcome) => {
+            .then(({ outcome, error }) => {
+            report("browser.target.reattached", error);
             settle(tab, attachment, reason, outcome);
             return outcome === "restored";
         })
@@ -760,6 +780,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
         reattaching.set(tab, attempt);
         return;
     }
+    if (live)
+        report("browser.target.reattached", "reattach_limit");
     lose(tab, attachment, reason);
 });
 function lose(tab, attachment, reason) {
@@ -792,13 +814,14 @@ async function reattach(tab, attachment) {
     await removeForeignFrames(tab, attachment.life, attachment);
     // Frame cleanup admits nothing; the attach itself needs this attachment still current.
     if (!current())
-        return "gone";
+        return { outcome: "gone", error: "attach_failed" };
     try {
         await chrome.debugger.attach({ tabId: tab }, PROTOCOL);
     }
     catch {
-        return "gone";
+        return { outcome: "gone", error: "attach_failed" };
     }
+    let error = "attach_failed";
     // A session of this worker exists from here on. It ends only through a detach that resolved or
     // Chrome's own report, never because a step failed.
     const step = async (work) => {
@@ -811,8 +834,10 @@ async function reattach(tab, attachment) {
     };
     try {
         const info = (await step(() => command({ tabId: tab }, "Target.getTargetInfo")));
-        if (info.targetInfo.targetId !== attachment.target)
+        if (info.targetInfo.targetId !== attachment.target) {
+            error = "target_changed";
             throw new Refusal("target_closed");
+        }
         const { frameTree } = (await step(() => command({ tabId: tab }, "Page.getFrameTree")));
         for (const frameId of restore.takeRemovedFrames(tab, frameTree))
             send({
@@ -823,14 +848,15 @@ async function reattach(tab, attachment) {
             });
         await restore.replay(tab, (method, params) => step(() => command({ tabId: tab }, method, params)));
         await step(() => remember(tab, current));
-        return "restored";
+        return { outcome: "restored" };
     }
     catch {
         // The cleanup acts only for this attachment: once Chrome reported its session ended, or the
         // tab belongs to another attachment, the session is not this worker's to detach.
         if (attachment.ended || attached.get(tab) !== attachment)
-            return "gone";
-        return chrome.debugger.detach({ tabId: tab }).then(() => "gone", () => "held");
+            return { outcome: "gone", error };
+        const outcome = await chrome.debugger.detach({ tabId: tab }).then(() => "gone", () => "held");
+        return { outcome, error };
     }
 }
 // A tab created inside an agent group (for example with the group's "+")

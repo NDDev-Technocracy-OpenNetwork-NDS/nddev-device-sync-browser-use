@@ -180,6 +180,57 @@ pub fn valid_execution(timeout_ms: u64) -> bool {
     (1..=MAX_EXECUTION.as_millis() as u64).contains(&timeout_ms)
 }
 
+/// One event the extension reports about its own Chrome work, as the host emits it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtensionEvent {
+    pub name: &'static str,
+    pub outcome: &'static str,
+    pub error: Option<&'static str>,
+}
+
+const EXTENSION_EVENTS: [&str; 4] = [
+    "browser.target.reattached",
+    "browser.target.restricted",
+    "browser.target.foreign_frames_removed",
+    "browser.cdp.setup_timeout",
+];
+const EXTENSION_OUTCOMES: [&str; 3] = ["ok", "rejected", "error"];
+const EXTENSION_ERRORS: [&str; 4] = [
+    "attach_failed",
+    "target_changed",
+    "reattach_limit",
+    "timeout",
+];
+
+/// Accepts a telemetry message from the extension only when every field is one of the fixed names,
+/// outcomes and error types and nothing else is attached, so no page data passes through.
+pub fn extension_event(message: &serde_json::Value) -> Option<ExtensionEvent> {
+    let fields = message.as_object()?;
+    if fields
+        .keys()
+        .any(|key| !matches!(key.as_str(), "type" | "event" | "outcome" | "error"))
+    {
+        return None;
+    }
+    let pick = |allowed: &[&'static str], value: &serde_json::Value| {
+        value
+            .as_str()
+            .and_then(|value| allowed.iter().copied().find(|allowed| *allowed == value))
+    };
+    let name = pick(&EXTENSION_EVENTS, &message["event"])?;
+    let outcome = pick(&EXTENSION_OUTCOMES, &message["outcome"])?;
+    let error = match &message["error"] {
+        serde_json::Value::Null => None,
+        value => Some(pick(&EXTENSION_ERRORS, value)?),
+    };
+    // A failure names its type; a success names none.
+    ((outcome == "ok") == error.is_none()).then_some(ExtensionEvent {
+        name,
+        outcome,
+        error,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +331,35 @@ mod tests {
         ] {
             let wire = serde_json::to_value(refusal).unwrap();
             assert_eq!(wire, refusal.code());
+        }
+    }
+
+    #[test]
+    fn extension_events_pass_only_with_known_names_and_no_other_fields() {
+        let event = |value: serde_json::Value| extension_event(&value);
+        assert_eq!(
+            event(
+                serde_json::json!({ "type": "telemetry", "event": "browser.target.reattached", "outcome": "ok" })
+            ),
+            Some(ExtensionEvent {
+                name: "browser.target.reattached",
+                outcome: "ok",
+                error: None
+            })
+        );
+        assert_eq!(
+            event(serde_json::json!({ "type": "telemetry", "event": "browser.target.reattached", "outcome": "rejected", "error": "reattach_limit" }))
+                .map(|event| event.error),
+            Some(Some("reattach_limit"))
+        );
+        for refused in [
+            serde_json::json!({ "type": "telemetry", "event": "browser.page.visited", "outcome": "ok" }),
+            serde_json::json!({ "type": "telemetry", "event": "browser.target.reattached", "outcome": "ok", "url": "https://x.test/" }),
+            serde_json::json!({ "type": "telemetry", "event": "browser.target.reattached", "outcome": "rejected", "error": "https://x.test/" }),
+            serde_json::json!({ "type": "telemetry", "event": "browser.target.reattached", "outcome": "rejected" }),
+            serde_json::json!({ "type": "telemetry", "event": "browser.target.reattached", "outcome": "ok", "error": "timeout" }),
+        ] {
+            assert_eq!(event(refused), None);
         }
     }
 }
