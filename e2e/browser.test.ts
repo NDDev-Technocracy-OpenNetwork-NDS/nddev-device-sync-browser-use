@@ -1245,6 +1245,10 @@ test("agents read plain text, and a stuck action fails with its reason before th
     const closed = await plain("-s", "plain", "-e", "await state.page.close()");
     expect(closed.stdout).toStartWith("[WARNING] Page closed");
     expect(closed.stdout).toContain("for state.page");
+    // A deadline beyond the bound is refused here with the usage that names the bound.
+    const long = await plain("-s", "plain", "-e", "1", "--timeout", "30000");
+    expect(long.code).toBe(2);
+    expect(long.stderr).toContain("--timeout <ms, at most 25000>");
     const refused = await plain("-s", "nowhere", "-e", "1");
     expect(refused.code).toBe(2);
     expect(refused.stderr).toStartWith("Error (session_not_found)");

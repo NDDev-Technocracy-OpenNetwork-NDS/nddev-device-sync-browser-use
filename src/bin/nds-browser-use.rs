@@ -4,7 +4,8 @@
 #[cfg(any(unix, windows))]
 use nddev_device_sync_browser_use::{
     BrowserUse, BrowserUseClient, CancellationToken, Error, NativeIo, artifact, device, host,
-    install, protocol::Document,
+    install,
+    protocol::{self, Document},
 };
 use std::process::ExitCode;
 #[cfg(any(unix, windows))]
@@ -18,7 +19,7 @@ const USAGE: &str = "usage:
   nds-browser-use [--device <name>] session new <project>
   nds-browser-use [--device <name>] session list
   nds-browser-use [--device <name>] session close <project> [--keep-tabs]
-  nds-browser-use [--device <name>] -s <project> (-e <code> | -f <file> | -f -) [--timeout <ms>] [--expect <target>:<document>] [--json]
+  nds-browser-use [--device <name>] -s <project> (-e <code> | -f <file> | -f -) [--timeout <ms, at most 25000>] [--expect <target>:<document>] [--json]
   nds-browser-use [--device <name>] -s <project> artifact (list | <path> [--output <file>])
   nds-browser-use [--device <name>] -s <project> recorder (start | stop | status)
   nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)
@@ -479,7 +480,14 @@ impl Execution {
                 "-e" => code = Some(value.to_owned()),
                 "-f" if value == "-" => code = Some(read_stdin()?),
                 "-f" => code = Some(read_code(value)?),
-                "--timeout" => timeout = Duration::from_millis(value.parse().ok()?),
+                // The host refuses a deadline outside its bound; the usage names it here.
+                "--timeout" => {
+                    let ms = value
+                        .parse()
+                        .ok()
+                        .filter(|ms| protocol::valid_execution(*ms))?;
+                    timeout = Duration::from_millis(ms);
+                }
                 "--expect" => {
                     let (target, document) = value.split_once(':')?;
                     expect = Some(Document {
