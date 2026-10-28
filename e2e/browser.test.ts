@@ -914,6 +914,65 @@ test("an aborted script's callbacks never act after its abort, and an ended scri
   }
 });
 
+// A removal takes the latest registration, as Playwright's emitter does, so a newer script that
+// adds and removes a callback leaves an ended script's registration of it in place.
+test("removing a callback leaves an ended script's registration of it, also across an abort", async () => {
+  await opened("removal");
+  try {
+    await run(
+      "removal",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/"); state.hits = 0;
+      state.shared = (message) => { if (message.text() === "removal-trigger") state.hits += 1; };
+      state.page.on("console", state.shared); return "ready"`,
+    );
+    const stopped = await run(
+      "removal",
+      `state.page.on("console", state.shared); state.page.off("console", state.shared); state.page.on("console", state.shared);
+      await new Promise((done) => setTimeout(done, 8000))`,
+      "--timeout",
+      "1000",
+    );
+    expect(stopped.body.failure).toBe("aborted");
+    const hits = await run(
+      "removal",
+      `await state.page.evaluate(() => console.log("removal-trigger")); await state.page.waitForTimeout(300); return state.hits`,
+    );
+    expect(hits.body.value).toBe("1");
+  } finally {
+    await cli("session", "close", "removal");
+  }
+});
+
+// An aborted script that ends after its abort answer leaves the next script's result whole.
+test("a late end of an aborted script leaves the next result its notices", async () => {
+  await opened("notices");
+  try {
+    await run(
+      "notices",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/"); return "ready"`,
+    );
+    const old = await run(
+      "notices",
+      "await new Promise((done) => setTimeout(done, 3000))",
+      "--timeout",
+      "1000",
+    );
+    expect(old.body.failure).toBe("aborted");
+    // The next script's page error comes before the aborted one ends, and its result comes after.
+    const next = await run(
+      "notices",
+      `await state.page.evaluate(() => setTimeout(() => { throw new Error("late-notice") }, 0));
+      await new Promise((done) => setTimeout(done, 3500)); return "next"`,
+      "--timeout",
+      "10000",
+    );
+    expect(next.code).toBe(0);
+    expect(String(next.body.output)).toContain("late-notice");
+  } finally {
+    await cli("session", "close", "notices");
+  }
+});
+
 test("a script that blocks its executor past the deadline is stopped and its state resets", async () => {
   await opened("blocking");
   expect((await run("blocking", "state.kept = 1")).code).toBe(0);
