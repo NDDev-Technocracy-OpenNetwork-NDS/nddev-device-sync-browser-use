@@ -69,6 +69,20 @@ several executions; `state` survives between them.
 - **A script that blocks the executor**, such as `while (true) {}`, cannot be aborted. It is
   stopped, its state is lost, and the refusal reads `timeout` with exit code 2.
 
+## Devices
+
+Tabs can also run in the browser of another of the owner's devices, near its network and region,
+or to spare this one's resources.
+
+- `nds-browser-use devices` lists the configured devices and their status.
+- `--device <name>` before a command, or `NDS_BROWSER_DEVICE=<name>`, runs it there:
+  `nds-browser-use --device pc session new docs`, then `nds-browser-use --device pc -s docs -e '...'`.
+  The code runs on that device, beside its browser, and replies read the same.
+- Artifacts stay on the device. `nds-browser-use --device pc -s docs artifact list` lists them, and
+  `... artifact shot.png --output ./shot.png` copies one here.
+- Each device has its own sessions, tabs and owner. A device that is off or unreachable answers
+  `Error (device_unreachable)`; ask the owner rather than retrying in a loop.
+
 ## The code
 
 Code runs as an async function body. A single expression is returned; otherwise use `return`.
@@ -79,10 +93,14 @@ It has:
 - **`signal`:** this script's AbortSignal, aborted when its execution reaches the deadline.
 - **`artifacts`:** the session's private directory for screenshots, videos and files, removed
   with the session. Write files with absolute paths, for example `` `${artifacts}/shot.png` ``.
-- **`require`, `import()`:** Node.js built-ins, packages and local modules. Relative paths resolve
-  in `artifacts`.
+- **`require`, `import()`, `importModule()`:** Node.js built-ins, packages and local modules.
+  Relative paths resolve in `artifacts`.
 - **`console`:** its output is part of the reply.
-- **Timers and `fetch`:** `fetch` runs in the executor and does not carry the page's cookies.
+- **`process`:** the executor's process. `cwd()` is `artifacts`; `exit`, `abort` and `chdir` are
+  refused, since the session owns the process.
+- **Timers and `fetch`:** `setTimeout`, `setInterval`, `clearTimeout` and `clearInterval`; an
+  interval of an aborted script stops with it. `fetch` runs in the executor and does not carry the page's
+  cookies. `Buffer`, `crypto` and `AbortSignal` are Node.js's.
 - **The helpers below.**
 
 ## The loop: observe, act, observe
@@ -121,7 +139,7 @@ console.log(getLatestLogs({ page: state.page, sinceLastCall: true }));
 - **`snapshot({ page, locator?, frame?, search?, showDiffSinceLastCall?, interactiveOnly? })`**
   returns the page's accessibility tree, headed by the URL. Unnamed wrappers are left out, and
   every interactive line ends with a Playwright locator, for example
-  `- button "Save" [id="save"]` or `- role=link[name="Docs"i]`.
+  `- button "Save" [id="save"]` or `- role=link[name="Docs"i]`. `accessibilitySnapshot` is the same helper.
   - **Use the locator as it is:** `state.page.locator('[id="save"]').click()`. Never invent a
     selector the snapshot does not show. A `>> nth=N` suffix tells equal locators apart.
   - Visible text can differ from the DOM's through CSS, such as `text-transform`; match names
@@ -156,6 +174,9 @@ console.log(getLatestLogs({ page: state.page, sinceLastCall: true }));
 - **`getLocatorStringForElement(locator)`** returns a stable locator string for a script.
 - **`pinnedElements({ page })`** lists the elements the owner pinned with right-click, "Pin this
   element for the NDS agent", as `globalThis.ndsPinnedElemN` and `[data-nds-pin="N"]`.
+- **`inspectPinnedElement(pageUrl, expression)`** gives the outer HTML and React component of a
+  pinned element, such as `inspectPinnedElement(url, "globalThis.ndsPinnedElem1")`, and makes its
+  tab `state.page`.
 
 ### Bot checks and sign-in confirmations
 
@@ -243,9 +264,11 @@ one exists.
 - **Dialogs.** Before the action that opens an alert, confirm or prompt, set
   `state.page.once("dialog", (dialog) => dialog.accept())`.
 - **Uploads.** Use `setInputFiles(path)` on the file input. Clipboard paste can fail silently.
-- **Downloads.** These keep the browser's own settings, and Playwright's download events do not
-  fire in agent tabs. Fetch a file's URL with `fetch` when the download needs no cookies, or ask
-  the owner.
+- **Downloads.** `page.waitForEvent("download")` gives a download's `url()` and
+  `suggestedFilename()`. The file itself keeps the browser's own folder, so `saveAs()` and `path()`
+  fail. To keep the bytes, fetch the URL in the page, which sends the page's cookies:
+  `await page.evaluate(async (url) => (await fetch(url)).text(), download.url())`, then write them
+  into `artifacts`.
 - **Before a destructive action,** such as delete, send or pay, confirm the target with a snapshot
   or a labelled screenshot.
 
@@ -295,5 +318,5 @@ Use these only when locators cannot express the action.
 - **Secrets.** Page content, URLs and screenshots stay on this device. Do not paste them into
   places the owner did not ask for.
 - **Limits.** Outside the agent's reach: `chrome://` pages, the Chrome Web Store, other
-  extensions' pages, browser and OS dialogs, download events, browser-wide cookies, new browser
+  extensions' pages, browser and OS dialogs, a download's file, browser-wide cookies, new browser
   contexts and permission prompts.

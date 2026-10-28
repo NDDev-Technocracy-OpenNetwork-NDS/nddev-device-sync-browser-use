@@ -211,8 +211,13 @@ fn config_home() -> Result<PathBuf, IoError> {
     Ok(path)
 }
 
+/// The per-user configuration directory: the host configuration and the agent's devices.
+pub(crate) fn config_dir() -> Result<PathBuf, IoError> {
+    Ok(config_home()?.join("nds-browser-use"))
+}
+
 fn config_path() -> Result<PathBuf, IoError> {
-    Ok(config_home()?.join("nds-browser-use").join("host.json"))
+    Ok(config_dir()?.join("host.json"))
 }
 
 /// Atomic owner-only replacement.
