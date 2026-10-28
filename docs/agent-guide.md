@@ -20,11 +20,23 @@ nds-browser-use session close docs         # also closes the session's tabs
   when the owner should look at a result. A session that runs nothing for 30 minutes closes by
   itself with its tabs.
 - `--timeout <ms>` bounds one execution, 10 s by default and 25 s at most. Split longer work into
-  several executions; `state` survives between them.
+  several executions; `state` survives between them. Playwright's own waits (clicks, `goto`,
+  locators) end a second before that deadline, so a stuck action fails with Playwright's reason,
+  such as `element is not visible` or `no element matched the locator`, and `state` stays.
 - Wrap `-e` code in single quotes so the shell leaves `$`, backticks and backslashes alone, and use
   double quotes for JavaScript strings. For multi-line code, use a file with `-f` or a quoted
   heredoc.
-- A reply lists the session's tabs with `target` and `document`. Pass
+- A reply is plain text on stdout, in this order:
+  - `[WARNING]` and `[PAGE ERROR]` lines about pages held in `state`: new tabs, closed pages,
+    uncaught errors;
+  - `Console output:` with one `[log]`, `[warn]` or `[error]` line per `console` call;
+  - `[return value] ...` when the code returned something. Playwright objects print as short
+    tags such as `<Page url>`; the Response `goto` returns is not printed.
+  A run with nothing to show says `Code executed successfully (no output)`. Output is cut at
+  10000 characters; narrow it with `search` or a `locator` instead.
+- A failed script prints the same text with `Error: ...` on stderr and exits 1; a refusal by the
+  host prints `Error (code): message` and exits 2.
+- `--json` prints the full answer instead, including each tab's `target` and `document`. Pass
   `--expect <target>:<document>` to refuse running against a replaced document.
 
 ## The code

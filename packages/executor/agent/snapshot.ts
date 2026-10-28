@@ -1,6 +1,7 @@
 // Accessibility snapshots for agents. Playwright's AI mode gives every element a ref, which
 // `page.locator("aria-ref=e5")` resolves until the next snapshot, and includes iframes.
 import type { Frame, Locator, Page } from "playwright-core";
+import { shortUrl } from "./format";
 import { type ViewOptions, Views } from "./text";
 
 export type SnapshotOptions = ViewOptions & {
@@ -38,7 +39,7 @@ export async function snapshot(options: SnapshotOptions | Page | Locator): Promi
     : given.frame
       ? `frame ${given.frame.name()} ${given.frame.url()}`
       : "page";
-  return views.show(page, scope, `URL: ${page.url()}`, view, given);
+  return views.show(page, scope, `URL: ${shortUrl(page.url())}`, view, given);
 }
 
 /** The element that a ref of the page's last snapshot names. */

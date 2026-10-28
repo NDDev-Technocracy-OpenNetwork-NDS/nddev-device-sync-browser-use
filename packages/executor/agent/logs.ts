@@ -1,6 +1,7 @@
 // Console messages and page errors of every page the session sees, kept from the moment the
 // executor first sees the page, so an agent reads what happened before it looked.
 import type { BrowserContext, Page } from "playwright-core";
+import { consoleText, shortSource, shortUrl } from "./format";
 import { matches, type Search } from "./text";
 
 const LIMIT = 5000;
@@ -10,8 +11,9 @@ const logs = new WeakMap<Page, Log>();
 // Errors and new tabs of the pages an agent keeps in `state`, printed with its next result.
 let notices: string[] = [];
 
-/** Starts recording a page; `watched` names the pages whose errors and popups are reported. */
-export function attach(page: Page, context: BrowserContext, watched: () => Set<Page>): void {
+/** Starts recording a page; `keys` names the `state` keys that hold a page, whose errors, popups
+ * and closing an agent's results report. */
+export function attach(page: Page, context: BrowserContext, keys: (page: Page) => string[]): void {
   if (logs.has(page)) return;
   const log: Log = { entries: [], read: 0 };
   logs.set(page, log);
@@ -23,18 +25,33 @@ export function attach(page: Page, context: BrowserContext, watched: () => Set<P
     }
   };
   page.on("console", (message) => {
+    const type = message.type();
+    const previews = message.args().map(String);
+    const text = previews.length > 0 ? consoleText(previews) : consoleText([message.text()]);
+    // Only errors and warnings say where they came from; that is where an agent looks next.
     const { url, lineNumber } = message.location();
-    push(`[${message.type()}] ${message.text()}${url ? ` (${url}:${lineNumber})` : ""}`);
+    const source =
+      (type === "error" || type === "warning") && url ? ` (${shortSource(url, lineNumber)})` : "";
+    push(`[${type}] ${text}${source}`);
   });
   page.on("pageerror", (error) => {
-    push(`[pageerror] ${error.stack ?? error.message}`);
-    if (watched().has(page)) notices.push(`[PAGE ERROR] ${page.url()}: ${error.message}`);
+    push(`[pageerror] ${consoleText([error.message])}`);
+    if (keys(page).length > 0)
+      notices.push(`[PAGE ERROR] ${shortUrl(page.url())}: ${error.message}`);
   });
   page.on("popup", (popup) => {
-    if (!watched().has(page)) return;
+    if (keys(page).length === 0) return;
     const index = context.pages().indexOf(popup);
     notices.push(
-      `[WARNING] New page opened from ${page.url()} (index ${index}, initial url: ${popup.url()}); it is context.pages()[${index}]`,
+      `[WARNING] New page opened from ${shortUrl(page.url())} (index ${index}, initial url: ${shortUrl(popup.url())}); it is context.pages()[${index}]`,
+    );
+  });
+  page.on("close", () => {
+    const held = keys(page);
+    if (held.length === 0) return;
+    const names = held.map((key) => `state.${key}`).join(", ");
+    notices.push(
+      `[WARNING] Page closed (url: ${shortUrl(page.url())}) for ${names}. Assign an open page to ${names.split(", ")[0]} before using it again, for example with await context.newPage().`,
     );
   });
 }
