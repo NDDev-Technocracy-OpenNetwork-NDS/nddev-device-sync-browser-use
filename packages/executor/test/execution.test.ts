@@ -5,7 +5,8 @@ import { bindEmitter, bindPage, type Execution, scope, withdraw } from "../execu
 
 type Listener = (...args: unknown[]) => unknown;
 
-// Playwright's emitter keeps `once` listeners in a wrapper that names the listener.
+// Playwright's emitter keeps `once` listeners in a wrapper that names the listener, prepends at the
+// front, and removes the last matching entry, as Node's does.
 class Emitter {
   registered = new Map<string, Listener[]>();
   on(event: string, listener: Listener): this {
@@ -16,7 +17,8 @@ class Emitter {
     return this.on(event, listener);
   }
   prependListener(event: string, listener: Listener): this {
-    return this.on(event, listener);
+    this.registered.set(event, [listener, ...(this.registered.get(event) ?? [])]);
+    return this;
   }
   once(event: string, listener: Listener): this {
     const wrapper = Object.assign(
@@ -35,11 +37,15 @@ class Emitter {
     return this.removeListener(event, listener);
   }
   removeListener(event: string, listener: Listener): this {
-    const kept = (this.registered.get(event) ?? []).filter(
-      (candidate) =>
-        candidate !== listener && (candidate as { listener?: unknown }).listener !== listener,
-    );
-    this.registered.set(event, kept);
+    const entries = [...(this.registered.get(event) ?? [])];
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index] as Listener & { listener?: unknown };
+      if (entry === listener || entry.listener === listener) {
+        entries.splice(index, 1);
+        break;
+      }
+    }
+    this.registered.set(event, entries);
     return this;
   }
   listeners(event: string): Listener[] {
@@ -114,17 +120,32 @@ test("a listener is removed by the callback it was registered with, once listene
   expect(page.routes).toEqual([]);
 });
 
-test("a listener registered twice is removed once per removal", async () => {
+test("a removal takes the latest registration in the emitter's order, as without wrappers", () => {
   const page = new Page();
-  const first = execution();
-  const second = execution();
+  const ended = execution();
+  const aborted = execution();
   const listener = () => scope.getStore();
-  scope.run(first, () => page.on("a", listener));
-  scope.run(second, () => page.on("a", listener));
+  scope.run(ended, () => page.on("a", listener));
+  scope.run(aborted, () => page.on("a", listener));
+  // The latest registration goes first, so the ended execution's stays, also after the abort.
   page.off("a", listener);
-  expect(page.emit("a")).toHaveLength(1);
+  expect(page.emit("a")).toEqual([ended]);
+  scope.run(aborted, () => page.on("a", listener));
+  aborted.abort();
+  withdraw(aborted);
+  expect(page.emit("a")).toEqual([ended]);
   page.off("a", listener);
   expect(page.emit("a")).toEqual([]);
+  // A prepended registration is first in order, so a removal takes the one behind it.
+  const front = execution();
+  scope.run(ended, () => page.on("b", listener));
+  scope.run(front, () => page.prependListener("b", listener));
+  page.removeListener("b", listener);
+  expect(page.emit("b")).toEqual([front]);
+  // A registration outside any execution counts in the same order.
+  page.on("b", listener);
+  page.off("b", listener);
+  expect(page.emit("b")).toEqual([front]);
 });
 
 test("an aborted execution's listeners and routes are withdrawn; an ended one's stay", async () => {
