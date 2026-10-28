@@ -51,12 +51,20 @@ function wrappersFor(callback: unknown): Callback[] {
   return typeof callback === "function" ? (wrappersOf.get(callback) ?? []) : [];
 }
 
-// The wrapper of `callback` that the emitter holds for `event`, or the callback itself. Playwright's
-// emitter lists a once-listener by the listener it wraps.
+// What a removal of `callback` from `event` removes: like the emitter's own removal, the last entry
+// in the emitter's current order that is the callback or one of its wrappers, so prepended and
+// repeated registrations go as they would without wrappers. Playwright's emitter lists a
+// once-listener by the listener it wraps.
 function held(self: object, event: unknown, callback: unknown): unknown {
+  const wrapped: unknown[] = wrappersFor(callback);
+  if (wrapped.length === 0) return callback;
   const listeners = Reflect.get(self, "listeners");
   const current: unknown[] = typeof listeners === "function" ? listeners.call(self, event) : [];
-  return wrappersFor(callback).find((wrapper) => current.includes(wrapper)) ?? callback;
+  for (let index = current.length - 1; index >= 0; index--) {
+    const entry = current[index];
+    if (entry === callback || wrapped.includes(entry)) return entry;
+  }
+  return callback;
 }
 
 // Replaces a method of `prototype` with one that lets `change` rewrite its arguments: inside an
