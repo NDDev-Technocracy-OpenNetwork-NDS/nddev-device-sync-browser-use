@@ -3,8 +3,8 @@
 
 #[cfg(any(unix, windows))]
 use nddev_device_sync_browser_use::{
-    BrowserUse, BrowserUseClient, CancellationToken, Error, NativeIo, host, install,
-    protocol::Document,
+    BrowserUse, BrowserUseClient, CancellationToken, Error, NativeIo, artifact, device, host,
+    install, protocol::Document,
 };
 use std::process::ExitCode;
 #[cfg(any(unix, windows))]
@@ -12,13 +12,16 @@ use std::{path::PathBuf, time::Duration};
 
 const USAGE: &str = "usage:
   nds-browser-use skill
-  nds-browser-use status
-  nds-browser-use update
-  nds-browser-use session new <project>
-  nds-browser-use session list
-  nds-browser-use session close <project> [--keep-tabs]
-  nds-browser-use -s <project> (-e <code> | -f <file>) [--timeout <ms>] [--expect <target>:<document>] [--json]
-  nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)";
+  nds-browser-use devices
+  nds-browser-use [--device <name>] status
+  nds-browser-use [--device <name>] update
+  nds-browser-use [--device <name>] session new <project>
+  nds-browser-use [--device <name>] session list
+  nds-browser-use [--device <name>] session close <project> [--keep-tabs]
+  nds-browser-use [--device <name>] -s <project> (-e <code> | -f <file> | -f -) [--timeout <ms>] [--expect <target>:<document>] [--json]
+  nds-browser-use [--device <name>] -s <project> artifact (list | <path> [--output <file>])
+  nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)
+NDS_BROWSER_DEVICE names the default device.";
 /// How agents use the tool, printed by `nds-browser-use skill`.
 const AGENT_GUIDE: &str = include_str!("../../docs/agent-guide.md");
 const ARGUMENT_LIMIT: usize = 16;
@@ -77,14 +80,261 @@ async fn main() -> ExitCode {
         };
     }
     let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    // A device runs the command with its own CLI; the guide, the device list and installing stay
+    // here.
+    let chosen = std::env::var(DEVICE_VARIABLE)
+        .ok()
+        .filter(|name| !name.is_empty());
+    let (device, words) = match words.as_slice() {
+        ["--device", name, rest @ ..] => (Some((*name).to_owned()), rest.to_vec()),
+        _ => (chosen, words),
+    };
     match words.as_slice() {
+        ["install", ..] if device.is_some() => usage(),
         ["install", rest @ ..] => install_host(rest),
         ["skill"] => {
             print!("{AGENT_GUIDE}");
             ExitCode::SUCCESS
         }
+        ["devices"] => devices().await,
         [] => usage(),
+        _ if device.is_some() => remote(device.as_deref().unwrap_or_default(), &words).await,
+        ["-s", project, "artifact", rest @ ..] => artifact_command(project, rest),
         _ => client(&words).await,
+    }
+}
+
+#[cfg(any(unix, windows))]
+const DEVICE_VARIABLE: &str = "NDS_BROWSER_DEVICE";
+/// How long `devices` waits for each device's status.
+#[cfg(any(unix, windows))]
+const DEVICE_STATUS_TIMEOUT: Duration = Duration::from_secs(20);
+
+// A refusal of this CLI in the protocol's form: JSON on stdout and exit code 2.
+#[cfg(any(unix, windows))]
+fn refused(code: &str, message: &str) -> ExitCode {
+    print(&serde_json::json!({ "error": code, "message": message }));
+    ExitCode::from(2)
+}
+
+#[cfg(any(unix, windows))]
+fn transport(name: &str) -> Result<device::Transport, ExitCode> {
+    let devices = device::Devices::load().map_err(|error| {
+        refused(
+            error.code(),
+            "devices.json in the nds-browser-use configuration directory is not a valid private device list",
+        )
+    })?;
+    devices
+        .get(name)
+        .cloned()
+        .ok_or_else(|| refused("device_unknown", "no device of that name is configured"))
+}
+
+// The device's CLI with these arguments, without the default device, so it never sends the
+// command on again.
+#[cfg(any(unix, windows))]
+fn spawn(transport: &device::Transport, args: &[&str]) -> tokio::process::Command {
+    let (program, argv) = transport.invocation(args);
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(argv)
+        .env_remove(DEVICE_VARIABLE)
+        .kill_on_drop(true);
+    command
+}
+
+/// Runs a command with the CLI of a configured device. Code goes to it on stdin; output, errors
+/// and the exit code come back as that CLI gives them. An artifact asked into a file is written
+/// here.
+#[cfg(any(unix, windows))]
+async fn remote(name: &str, words: &[&str]) -> ExitCode {
+    use std::process::Stdio;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let transport = match transport(name) {
+        Ok(transport) => transport,
+        Err(code) => return code,
+    };
+    let mut args: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+    let mut input = None;
+    let mut output = None;
+    // An execution read as text refuses as one: `Error (code): message` on stderr.
+    let mut text = false;
+    match words {
+        ["-s", project, "artifact", path, "--output", file] => {
+            args = ["-s", project, "artifact", path].map(String::from).to_vec();
+            output = Some(PathBuf::from(file));
+        }
+        ["-s", _, "artifact", ..] => {}
+        ["-s", project, rest @ ..] => {
+            let Some(execution) = Execution::parse(rest) else {
+                return usage();
+            };
+            args = execution.forwarded(project);
+            text = !execution.json;
+            input = Some(execution.code);
+        }
+        _ => {}
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut command = spawn(&transport, &refs);
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(if output.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        })
+        .stderr(Stdio::inherit());
+    let unreachable = |message: &str| {
+        if text {
+            eprintln!("Error (device_unreachable): {message}");
+            ExitCode::from(2)
+        } else {
+            refused("device_unreachable", message)
+        }
+    };
+    let Ok(mut child) = command.spawn() else {
+        return unreachable("the device's transport did not start");
+    };
+    // The code is written whole and stdin closed, so the device's CLI reads it to its end.
+    if let (Some(code), Some(mut stdin)) = (input, child.stdin.take())
+        && stdin.write_all(code.as_bytes()).await.is_err()
+    {
+        return unreachable("the device did not take the code");
+    }
+    let mut bytes = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let limit = artifact::READ_LIMIT + 1;
+        if (&mut stdout)
+            .take(limit)
+            .read_to_end(&mut bytes)
+            .await
+            .is_err()
+        {
+            return unreachable("the device's answer was cut off");
+        }
+    }
+    let Ok(status) = child.wait().await else {
+        return unreachable("the device's transport failed");
+    };
+    // ssh answers 255 for its own failures, never the CLI's.
+    if transport.kind() == "ssh" && status.code() == Some(255) {
+        return unreachable("ssh could not reach the device");
+    }
+    if let Some(file) = output {
+        if !status.success() {
+            std::io::Write::write_all(&mut std::io::stdout(), &bytes).ok();
+        } else if bytes.len() as u64 > artifact::READ_LIMIT
+            || std::fs::write(&file, &bytes).is_err()
+        {
+            return refused(
+                "unavailable",
+                "the artifact could not be written to the file",
+            );
+        } else {
+            print(&serde_json::json!({ "written": file, "bytes": bytes.len() }));
+        }
+    }
+    exit_code(status)
+}
+
+#[cfg(any(unix, windows))]
+fn exit_code(status: std::process::ExitStatus) -> ExitCode {
+    match status.code() {
+        Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(2)),
+        None => ExitCode::from(2),
+    }
+}
+
+/// Every configured device and its status, asked of all of them at once.
+#[cfg(any(unix, windows))]
+async fn devices() -> ExitCode {
+    let devices = match device::Devices::load() {
+        Ok(devices) => devices,
+        Err(error) => {
+            return refused(
+                error.code(),
+                "devices.json in the nds-browser-use configuration directory is not a valid private device list",
+            );
+        }
+    };
+    let probes = devices.iter().map(|(name, transport)| {
+        let (name, transport) = (name.clone(), transport.clone());
+        async move {
+            let mut command = spawn(&transport, &["status"]);
+            command
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let answer = tokio::time::timeout(DEVICE_STATUS_TIMEOUT, command.output()).await;
+            let status = match answer {
+                Ok(Ok(output)) if output.status.success() => {
+                    serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()
+                }
+                _ => None,
+            };
+            match status {
+                Some(status) => serde_json::json!({ "name": name, "transport": transport.kind(), "status": status }),
+                None => serde_json::json!({ "name": name, "transport": transport.kind(), "error": "device_unreachable" }),
+            }
+        }
+    });
+    print(&concurrently(probes.collect()).await);
+    ExitCode::SUCCESS
+}
+
+// Runs the probes concurrently and keeps their order.
+#[cfg(any(unix, windows))]
+async fn concurrently<F: std::future::Future<Output = serde_json::Value> + Send + 'static>(
+    futures: Vec<F>,
+) -> Vec<serde_json::Value> {
+    let handles: Vec<_> = futures.into_iter().map(tokio::spawn).collect();
+    let mut answers = Vec::with_capacity(handles.len());
+    for handle in handles {
+        answers.push(
+            handle
+                .await
+                .unwrap_or_else(|_| serde_json::json!({ "error": "device_unreachable" })),
+        );
+    }
+    answers
+}
+
+/// A session's artifacts on this device: their list, or one file's bytes on stdout or into a file.
+#[cfg(any(unix, windows))]
+fn artifact_command(project: &str, words: &[&str]) -> ExitCode {
+    match words {
+        ["list"] => match artifact::list(project) {
+            Ok(entries) => {
+                print(&entries);
+                ExitCode::SUCCESS
+            }
+            Err(error) => failed(&Error::Io(error)),
+        },
+        [path] | [path, "--output", _] => match artifact::read(project, path) {
+            Ok(bytes) => match words {
+                [_, "--output", file] => match std::fs::write(file, &bytes) {
+                    Ok(()) => {
+                        print(&serde_json::json!({ "written": file, "bytes": bytes.len() }));
+                        ExitCode::SUCCESS
+                    }
+                    Err(_) => refused(
+                        "unavailable",
+                        "the artifact could not be written to the file",
+                    ),
+                },
+                _ => match std::io::Write::write_all(&mut std::io::stdout(), &bytes) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(_) => ExitCode::from(2),
+                },
+            },
+            Err(error) => failed(&Error::Io(error)),
+        },
+        _ => usage(),
     }
 }
 
@@ -206,6 +456,7 @@ impl Execution {
             };
             match flag {
                 "-e" => code = Some(value.to_owned()),
+                "-f" if value == "-" => code = Some(read_stdin()?),
                 "-f" => code = Some(read_code(value)?),
                 "--timeout" => timeout = Duration::from_millis(value.parse().ok()?),
                 "--expect" => {
@@ -227,6 +478,37 @@ impl Execution {
             json,
         })
     }
+}
+
+#[cfg(any(unix, windows))]
+impl Execution {
+    /// The arguments that run this execution on a device, its code coming on stdin.
+    fn forwarded(&self, project: &str) -> Vec<String> {
+        let mut args: Vec<String> = ["-s", project, "-f", "-"].map(String::from).to_vec();
+        args.extend(["--timeout".into(), self.timeout.as_millis().to_string()]);
+        if let Some(expect) = &self.expect {
+            args.extend([
+                "--expect".into(),
+                format!("{}:{}", expect.target, expect.document),
+            ]);
+        }
+        if self.json {
+            args.push("--json".into());
+        }
+        args
+    }
+}
+
+// Code given on stdin, as a device's CLI receives it.
+#[cfg(any(unix, windows))]
+fn read_stdin() -> Option<String> {
+    use std::io::Read;
+    let mut code = String::new();
+    std::io::stdin()
+        .take(CODE_LIMIT as u64 + 1)
+        .read_to_string(&mut code)
+        .ok()?;
+    (code.len() <= CODE_LIMIT).then_some(code)
 }
 
 #[cfg(any(unix, windows))]

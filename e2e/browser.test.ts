@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { type BrowserContext, chromium, type Page } from "playwright-core";
 
 const windows = process.platform === "win32";
@@ -54,6 +54,8 @@ const env: Record<string, string> = {
 };
 
 let observer: BrowserContext;
+// The CLI's configuration directory, beside the host configuration that `install` wrote.
+let configuration: string;
 let fixture: ReturnType<typeof Bun.serve>;
 let origin: string;
 let requests = 0;
@@ -237,6 +239,7 @@ beforeAll(async () => {
       : ["--host-dir", join(profile, "NativeMessagingHosts")]),
   );
   expect(registration.code).toBe(0);
+  configuration = dirname(String(registration.body.config));
   const manifest = String(registration.body.manifest);
   const registered = JSON.parse(readFileSync(manifest, "utf8"));
   expect(registered.allowed_origins).toEqual([
@@ -1033,6 +1036,93 @@ async function plain(...args: string[]): Promise<{ code: number; stdout: string;
   ]);
   return { code: await child.exited, stdout, stderr };
 }
+
+// Another device's browser is driven through that device's own CLI: here a device whose transport
+// runs this CLI again, so the whole path is exercised without a second machine.
+test("a device's CLI runs a session's code there and hands its artifacts back", async () => {
+  const devices = join(configuration, "devices.json");
+  const missing = join(root, "missing", "nds-browser-use");
+  const configured = { self: { command: [binary] }, broken: { command: [missing] } };
+  writeFileSync(devices, JSON.stringify({ schema: 1, devices: configured }), { mode: 0o600 });
+  const scratch = mkdtempSync(join(tmpdir(), "nds-bu-device-"));
+  try {
+    const listed = (await cli("devices")).body as unknown as Record<string, unknown>[];
+    expect(listed).toEqual([
+      { name: "broken", transport: "command", error: "device_unreachable" },
+      { name: "self", transport: "command", status: expect.objectContaining({ enabled: true }) },
+    ]);
+    const unreachable = await plain("--device", "broken", "-s", "device", "-e", "1");
+    expect(unreachable.code).toBe(2);
+    expect(unreachable.stderr).toStartWith("Error (device_unreachable)");
+    expect((await cli("--device", "self", "session", "new", "device")).code).toBe(0);
+    const ran = await plain(
+      "--device",
+      "self",
+      "-s",
+      "device",
+      "-e",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/"); await state.page.screenshot({ path: \`\${artifacts}/shot.png\` }); return "on the device"`,
+      "--timeout",
+      "20000",
+    );
+    expect(ran).toEqual({ code: 0, stdout: "[return value] on the device\n", stderr: "" });
+    // A file's code travels on stdin, and the default device needs no flag.
+    const script = join(scratch, "count.js");
+    writeFileSync(script, 'return await state.page.locator("#c").textContent()');
+    const chosen = Bun.spawn([binary, "-s", "device", "-f", script], {
+      env: { ...env, NDS_BROWSER_DEVICE: "self" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await new Response(chosen.stdout).text()).toBe("[return value] 0\n");
+    expect(await chosen.exited).toBe(0);
+    const artifacts: unknown = (await cli("--device", "self", "-s", "device", "artifact", "list"))
+      .body;
+    expect(artifacts).toEqual([{ path: "shot.png", bytes: expect.any(Number) }]);
+    const local = join(scratch, "shot.png");
+    const pulled = await cli(
+      "--device",
+      "self",
+      "-s",
+      "device",
+      "artifact",
+      "shot.png",
+      "--output",
+      local,
+    );
+    expect(pulled.body).toMatchObject({ written: local });
+    expect([...readFileSync(local).subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    // Nothing outside the session's own area is read, also through a link agent code made there,
+    // and only configured devices are reached.
+    const host = join(configuration, "host.json");
+    const linked = await plain(
+      "--device",
+      "self",
+      "-s",
+      "device",
+      "-e",
+      `require("node:fs").symlinkSync(${JSON.stringify(host)}, \`\${artifacts}/link.json\`); return "linked"`,
+    );
+    expect(linked.stdout).toBe("[return value] linked\n");
+    const remaining: unknown = (await cli("--device", "self", "-s", "device", "artifact", "list"))
+      .body;
+    expect(remaining).toEqual([{ path: "shot.png", bytes: expect.any(Number) }]);
+    for (const outside of ["link.json", "../device/shot.png", "../../host.json", "/etc/passwd"]) {
+      expect(await cli("--device", "self", "-s", "device", "artifact", outside)).toEqual({
+        code: 2,
+        body: expect.objectContaining({ error: "invalid_configuration" }),
+      });
+    }
+    expect(await cli("--device", "elsewhere", "status")).toEqual({
+      code: 2,
+      body: expect.objectContaining({ error: "device_unknown" }),
+    });
+  } finally {
+    await cli("--device", "self", "session", "close", "device");
+    rmSync(devices, { force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
 
 test("agents read plain text, and a stuck action fails with its reason before the deadline", async () => {
   await opened("plain");

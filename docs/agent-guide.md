@@ -69,6 +69,20 @@ several executions; `state` survives between them.
 - **A script that blocks the executor**, such as `while (true) {}`, cannot be aborted. It is
   stopped, its state is lost, and the refusal reads `timeout` with exit code 2.
 
+## Devices
+
+Tabs can also run in the browser of another of the owner's devices, near its network and region,
+or to spare this one's resources.
+
+- `nds-browser-use devices` lists the configured devices and their status.
+- `--device <name>` before a command, or `NDS_BROWSER_DEVICE=<name>`, runs it there:
+  `nds-browser-use --device pc session new docs`, then `nds-browser-use --device pc -s docs -e '...'`.
+  The code runs on that device, beside its browser, and replies read the same.
+- Artifacts stay on the device. `nds-browser-use --device pc -s docs artifact list` lists them, and
+  `... artifact shot.png --output ./shot.png` copies one here.
+- Each device has its own sessions, tabs and owner. A device that is off or unreachable answers
+  `Error (device_unreachable)`; ask the owner rather than retrying in a loop.
+
 ## The code
 
 Code runs as an async function body. A single expression is returned; otherwise use `return`.

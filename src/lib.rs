@@ -13,6 +13,10 @@ pub use protocol::OwnedSession;
 #[cfg(any(unix, windows))]
 mod adapter;
 #[cfg(any(unix, windows))]
+pub mod artifact;
+#[cfg(any(unix, windows))]
+pub mod device;
+#[cfg(any(unix, windows))]
 pub mod host;
 #[cfg(any(unix, windows))]
 pub mod install;

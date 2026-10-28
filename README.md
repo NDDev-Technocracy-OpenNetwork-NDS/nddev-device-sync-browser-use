@@ -145,6 +145,28 @@ and OS dialogs, real authenticators' user verification, downloads events,
 browser-wide cookies, new browser contexts and permission grants are outside
 `chrome.debugger`.
 
+## Devices
+
+An agent can drive the browser of another of the owner's devices: `nds-browser-use --device <name>
+...` (or `NDS_BROWSER_DEVICE`) runs the command with that device's own CLI over the owner's existing
+ssh, so agent code runs beside that browser. Nothing listens, forwards a port or opens a tunnel;
+each device keeps its own host, extension, tab groups and owner. `nds-browser-use devices` lists the
+devices with their status, and `-s <project> artifact (list | <path> [--output <file>])` lists a
+session's artifacts or copies one, here or from a device; only regular files inside the session's
+own area are read.
+
+Devices are named in `devices.json` beside `host.json` in the configuration directory, a regular
+file only its owner can write:
+
+```json
+{ "schema": 1, "devices": { "pc": { "ssh": "pc" } } }
+```
+
+`ssh` is an ssh host or alias, reached with `BatchMode=yes`; `cli` sets the CLI's path on the device
+(default `~/.local/share/nds-browser-use/bin/nds-browser-use`, where `just install` puts it); or
+`command` gives an absolute program and its arguments instead. Code goes to the device on stdin,
+never on a command line.
+
 ## Owned NDS sessions
 
 Native NDS composition uses `BrowserUse::create_owned` to reserve a fresh
