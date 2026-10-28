@@ -42,7 +42,8 @@ tabs, and `context.newCDPSession(page)` gives raw CDP for those tabs.
   objects print as tags. `--json` gives the protocol answer with each tab's `target` and
   `document`; `--expect <target>:<document>` refuses to run against a replaced document.
 - **Timeouts.** A script still running at its deadline is aborted: its later Playwright calls
-  throw, and the session keeps its executor and state. A script that cannot be aborted is stopped,
+  throw, also from callbacks it registered, and its listeners, routes and locator handlers are
+  removed. The session keeps its executor and state. A script that cannot be aborted is stopped,
   and its state is reset. Playwright's default waits end before the deadline, so a stuck action
   fails with its reason first.
 

@@ -60,7 +60,10 @@ several executions; `state` survives between them.
   locator`.
 - **A script still running at the deadline is aborted**, and the session keeps its state and its
   console output so far.
-  - Its later Playwright calls throw, and `signal` is aborted for its own timers.
+  - Its later Playwright calls throw, also from callbacks it registered, and `signal` is aborted
+    for its own timers.
+  - Its event listeners, routes and locator handlers are removed, so pages behave as without
+    them. Callbacks of scripts that ended on their own keep working.
   - An action already sent may still complete, so look at the page before you retry.
   - The failure reads `aborted`, and the exit code is 1.
 - **A script that blocks the executor**, such as `while (true) {}`, cannot be aborted. It is
