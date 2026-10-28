@@ -48,6 +48,9 @@ pub enum ScriptFailure {
     ScriptError,
     TargetClosed,
     BrowserDisconnected,
+    /// The script outlived its deadline and was aborted: its later Playwright calls throw, and
+    /// the session keeps its executor and state. An action already sent may still complete.
+    Aborted,
 }
 
 impl ScriptFailure {
@@ -56,6 +59,7 @@ impl ScriptFailure {
             Self::ScriptError => "script_error",
             Self::TargetClosed => "target_closed",
             Self::BrowserDisconnected => "browser_disconnected",
+            Self::Aborted => "aborted",
         }
     }
 }

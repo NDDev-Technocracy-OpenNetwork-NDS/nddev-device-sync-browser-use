@@ -831,19 +831,155 @@ test("concurrent execution in one session is refused as busy", async () => {
   expect((await slow).body.value).toBe("slow");
 });
 
-test("a timeout stops the run before its later action and resets state", async () => {
+test("a timeout aborts the script: its later action never happens and the state stays", async () => {
   const page = await observed("/");
   const before = await page?.locator("#c").textContent();
+  expect((await run("acceptance", "state.kept = 7")).code).toBe(0);
   const result = await run(
     "acceptance",
-    `await new Promise((done) => setTimeout(done, 3000)); await state.page.click("#inc")`,
+    `console.log("started"); await new Promise((done) => setTimeout(done, 3000)); await state.page.click("#inc")`,
     "--timeout",
     "1000",
   );
-  expect(result).toEqual({ code: 2, body: expect.objectContaining({ error: "timeout" }) });
+  expect(result.code).toBe(1);
+  expect(result.body.failure).toBe("aborted");
+  expect(String(result.body.output)).toContain("[log] started");
+  expect(String(result.body.output)).toContain("reached its deadline and was aborted");
   await Bun.sleep(3500);
   expect(await page?.locator("#c").textContent()).toBe(before ?? "");
-  expect((await run("acceptance", "state.value === undefined")).body.value).toBe("true");
+  expect((await run("acceptance", "state.kept")).body.value).toBe("7");
+});
+
+// Callbacks a script handed to Playwright act in later scripts only if that script ended on its
+// own: an aborted script's listeners and routes are removed, so the page behaves as without them,
+// and its bindings can no longer act.
+test("an aborted script's callbacks never act after its abort, and an ended script's still do", async () => {
+  await opened("callbacks");
+  try {
+    const kept = await run(
+      "callbacks",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/");
+      state.page.on("console", async (message) => { if (message.text() === "kept") await state.page.click("#inc"); });
+      return "kept"`,
+    );
+    expect(kept.body.value).toBe("kept");
+    const aborted = await run(
+      "callbacks",
+      `state.page.once("console", async () => {
+        try { await state.page.click("#inc"); state.acted = true; } catch { state.denied = true; }
+      });
+      state.page.on("dialog", () => {});
+      await state.page.route("**/linked", (route) => route.fulfill({ contentType: "text/html", body: "aborted route" }));
+      await state.page.exposeBinding("abortedClick", async () => { await state.page.click("#inc"); });
+      await new Promise((done) => setTimeout(done, 8000));`,
+      "--timeout",
+      "1500",
+    );
+    expect(aborted.body.failure).toBe("aborted");
+    const after = await run(
+      "callbacks",
+      `const page = state.page;
+      const count = () => page.locator("#c").textContent();
+      const seen = { start: await count() };
+      await page.evaluate(() => console.log("after abort"));
+      await page.waitForTimeout(500);
+      seen.afterEvent = await count();
+      seen.binding = await page.evaluate(() => window.abortedClick().then(() => "resolved", () => "rejected"));
+      seen.afterBinding = await count();
+      seen.dialog = await page.evaluate(() => { alert("left alone"); return "dismissed"; });
+      seen.acted = state.acted === true;
+      await page.goto("${origin}/linked");
+      seen.routed = await page.locator("body").textContent();
+      await page.goto("${origin}/");
+      await page.evaluate(() => console.log("kept"));
+      await page.waitForFunction(() => document.getElementById("c")?.textContent === "1");
+      seen.kept = await count();
+      await page.close();
+      return JSON.stringify(seen)`,
+      "--timeout",
+      "15000",
+    );
+    expect(JSON.parse(String(after.body.value))).toEqual({
+      start: "0",
+      afterEvent: "0",
+      binding: "rejected",
+      afterBinding: "0",
+      dialog: "dismissed",
+      acted: false,
+      routed: "linked",
+      kept: "1",
+    });
+  } finally {
+    await cli("session", "close", "callbacks");
+  }
+});
+
+// A removal takes the latest registration, as Playwright's emitter does, so a newer script that
+// adds and removes a callback leaves an ended script's registration of it in place.
+test("removing a callback leaves an ended script's registration of it, also across an abort", async () => {
+  await opened("removal");
+  try {
+    await run(
+      "removal",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/"); state.hits = 0;
+      state.shared = (message) => { if (message.text() === "removal-trigger") state.hits += 1; };
+      state.page.on("console", state.shared); return "ready"`,
+    );
+    const stopped = await run(
+      "removal",
+      `state.page.on("console", state.shared); state.page.off("console", state.shared); state.page.on("console", state.shared);
+      await new Promise((done) => setTimeout(done, 8000))`,
+      "--timeout",
+      "1000",
+    );
+    expect(stopped.body.failure).toBe("aborted");
+    const hits = await run(
+      "removal",
+      `await state.page.evaluate(() => console.log("removal-trigger")); await state.page.waitForTimeout(300); return state.hits`,
+    );
+    expect(hits.body.value).toBe("1");
+  } finally {
+    await cli("session", "close", "removal");
+  }
+});
+
+// An aborted script that ends after its abort answer leaves the next script's result whole.
+test("a late end of an aborted script leaves the next result its notices", async () => {
+  await opened("notices");
+  try {
+    await run(
+      "notices",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/"); return "ready"`,
+    );
+    const old = await run(
+      "notices",
+      "await new Promise((done) => setTimeout(done, 3000))",
+      "--timeout",
+      "1000",
+    );
+    expect(old.body.failure).toBe("aborted");
+    // The next script's page error comes before the aborted one ends, and its result comes after.
+    const next = await run(
+      "notices",
+      `await state.page.evaluate(() => setTimeout(() => { throw new Error("late-notice") }, 0));
+      await new Promise((done) => setTimeout(done, 3500)); return "next"`,
+      "--timeout",
+      "10000",
+    );
+    expect(next.code).toBe(0);
+    expect(String(next.body.output)).toContain("late-notice");
+  } finally {
+    await cli("session", "close", "notices");
+  }
+});
+
+test("a script that blocks its executor past the deadline is stopped and its state resets", async () => {
+  await opened("blocking");
+  expect((await run("blocking", "state.kept = 1")).code).toBe(0);
+  const blocked = await run("blocking", "while (true) {}", "--timeout", "1000");
+  expect(blocked).toEqual({ code: 2, body: expect.objectContaining({ error: "timeout" }) });
+  expect((await run("blocking", "state.kept === undefined")).body.value).toBe("true");
+  expect((await cli("session", "close", "blocking")).code).toBe(0);
 });
 
 test("a replacement executor sees its page and none of the old executor's interception", async () => {
@@ -852,10 +988,11 @@ test("a replacement executor sees its page and none of the old executor's interc
   // outlives its deadline.
   const first = await run(
     "replaced",
-    `state.page = await context.newPage(); await state.page.goto("${origin}/"); await state.page.route("**/*", () => {}); await new Promise((done) => setTimeout(done, 3000))`,
+    `state.page = await context.newPage(); await state.page.goto("${origin}/"); await state.page.route("**/*", () => {}); while (true) {}`,
     "--timeout",
     "1500",
   );
+  // A script that blocks its executor cannot confirm an abort, so the executor is replaced.
   expect(first.body.error).toBe("timeout");
   // Its replacement evaluates in the same tab and loads it again.
   const replaced = await run(
@@ -1088,7 +1225,7 @@ test("a session whose execution timed out during a long wait closes and opens ag
     "--timeout",
     "3000",
   );
-  expect(waited.body.error).toBe("timeout");
+  expect(waited.body.failure).toBe("aborted");
   // The extension answers or drops the abandoned call within its 30 s reply deadline.
   await Bun.sleep(32_000);
   expect((await cli("session", "close", "waiting", "--close-tabs")).code).toBe(0);
