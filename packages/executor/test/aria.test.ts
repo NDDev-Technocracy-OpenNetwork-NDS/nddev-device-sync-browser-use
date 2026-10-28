@@ -329,7 +329,6 @@ describe("aria-snapshot tree filters", () => {
                 "backendNodeId": 3,
                 "baseLocator": "[id="ignored-action"]",
                 "children": [],
-                "indentOffset": 1,
                 "name": "Ignored Action",
                 "ref": "button-Ignored Action-3",
                 "role": "button",
