@@ -26,8 +26,20 @@ const CHECKS = [
   },
 ];
 
+// Sign-in verification pages of identity providers, which ask a person to confirm on another
+// device or with a code. Only pages seen in real use are listed; the page itself is the check, and
+// it is unsolved while the tab still shows it.
+const VERIFICATIONS = [
+  {
+    vendor: "google-signin",
+    page: /^https:\/\/accounts\.google\.com\/(v3\/)?signin\/(v2\/)?challenge\//,
+  },
+];
+
 export async function checks(page: Page): Promise<Check[]> {
   const found = new Map<string, boolean>();
+  for (const verification of VERIFICATIONS)
+    if (verification.page.test(page.url())) found.set(verification.vendor, false);
   for (const frame of page.frames()) {
     const check = CHECKS.find((candidate) => candidate.frame.test(frame.url()));
     const parent = frame.parentFrame();

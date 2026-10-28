@@ -1,7 +1,8 @@
 # nds-browser-use agent guide
 
-`nds-browser-use` lets an agent drive tabs in the owner's own Chrome, inside a tab group of its
-own, with Playwright code. Read this guide once per task before the first browser command.
+`nds-browser-use` lets an agent drive tabs in the owner's own Chrome with Playwright code. The
+agent's tabs live in a tab group of their own. Read this guide once per task, before the first
+browser command.
 
 ## Sessions
 
@@ -13,31 +14,60 @@ nds-browser-use session list
 nds-browser-use session close docs         # also closes the session's tabs
 ```
 
-- One session per task, named with a short word for the task or site: `docs`, `shop`, `github`.
-- Its tabs live in a Chrome tab group of that name. `context.pages()` lists only these tabs, never
-  the owner's other tabs.
-- **Close the session when the task is done.** That closes its tabs too. Pass `--keep-tabs` only
-  when the owner should look at a result. A session that runs nothing for 30 minutes closes by
-  itself with its tabs.
-- `--timeout <ms>` bounds one execution, 10 s by default and 25 s at most. Split longer work into
-  several executions; `state` survives between them. Playwright's own waits (clicks, `goto`,
-  locators) end a second before that deadline, so a stuck action fails with Playwright's reason,
-  such as `element is not visible` or `no element matched the locator`, and `state` stays.
-- Wrap `-e` code in single quotes so the shell leaves `$`, backticks and backslashes alone, and use
-  double quotes for JavaScript strings. For multi-line code, use a file with `-f` or a quoted
-  heredoc.
-- A reply is plain text on stdout, in this order:
-  - `[WARNING]` and `[PAGE ERROR]` lines about pages held in `state`: new tabs, closed pages,
-    uncaught errors;
-  - `Console output:` with one `[log]`, `[warn]` or `[error]` line per `console` call;
-  - `[return value] ...` when the code returned something. Playwright objects print as short
-    tags such as `<Page url>`; the Response `goto` returns is not printed.
-  A run with nothing to show says `Code executed successfully (no output)`. Output is cut at
-  10000 characters; narrow it with `search` or a `locator` instead.
-- A failed script prints the same text with `Error: ...` on stderr and exits 1; a refusal by the
-  host prints `Error (code): message` and exits 2.
-- `--json` prints the full answer instead, including each tab's `target` and `document`. Pass
-  `--expect <target>:<document>` to refuse running against a replaced document.
+- **One session per task.** Name it with a short word for the task or site, such as `docs`,
+  `shop` or `github`. Its tabs live in a Chrome tab group of that name. `context.pages()` lists
+  only these tabs, never the owner's other tabs.
+- **Close the session when the task is done.** That closes its tabs too.
+  - Pass `--keep-tabs` only when the owner should look at a result.
+  - A session that runs nothing for 30 minutes closes by itself, with its tabs.
+- **Quoting.** Wrap `-e` code in single quotes, so the shell leaves `$`, backticks and backslashes
+  alone, and use double quotes for JavaScript strings. For multi-line code, use a file with `-f`
+  or a quoted heredoc:
+
+  ```bash
+  nds-browser-use -s docs -f /dev/stdin <<'EOF'
+  const rows = await state.page.locator("table tr").allTextContents();
+  console.log(rows.join("\n"));
+  EOF
+  ```
+
+### Replies
+
+A reply is plain text on stdout, in this order:
+
+- `[WARNING]` and `[PAGE ERROR]` lines about pages held in `state`: new tabs, closed pages and
+  uncaught errors;
+- `Console output:`, with one `[log]`, `[warn]` or `[error]` line per `console` call;
+- `[return value] ...`, when the code returned something. Playwright objects print as short tags
+  such as `<Page url>`. The Response that `goto` returns is not printed.
+
+Other cases:
+
+- A run with nothing to show says `Code executed successfully (no output)`.
+- Output is cut at 10000 characters; narrow it with `search` or a `locator` instead.
+- A failed script prints the same text with `Error: ...` on stderr and exits 1.
+- A refusal by the host prints `Error (code): message` and exits 2.
+- `--json` prints the full answer instead, including each tab's `target` and `document`.
+- `--expect <target>:<document>` refuses to run against a replaced document.
+
+### Time limits
+
+`--timeout <ms>` bounds one execution: 10 s by default, 25 s at most. Split longer work into
+several executions; `state` survives between them.
+
+- **Playwright's own waits** (clicks, `goto`, locators) end before that deadline, so a stuck action
+  fails with Playwright's reason, such as `element is not visible` or `no element matched the
+  locator`.
+- **A script still running at the deadline is aborted**, and the session keeps its state and its
+  console output so far.
+  - Its later Playwright calls throw, also from callbacks it registered, and `signal` is aborted
+    for its own timers.
+  - Its event listeners, routes and locator handlers are removed, so pages behave as without
+    them. Callbacks of scripts that ended on their own keep working.
+  - An action already sent may still complete, so look at the page before you retry.
+  - The failure reads `aborted`, and the exit code is 1.
+- **A script that blocks the executor**, such as `while (true) {}`, cannot be aborted. It is
+  stopped, its state is lost, and the refusal reads `timeout` with exit code 2.
 
 ## The code
 
@@ -46,6 +76,7 @@ It has:
 
 - **`context`, `browser`:** Playwright objects for the session's tabs.
 - **`state`:** an object kept between executions of the session.
+- **`signal`:** this script's AbortSignal, aborted when its execution reaches the deadline.
 - **`artifacts`:** the session's private directory for screenshots, videos and files, removed
   with the session. Write files with absolute paths, for example `` `${artifacts}/shot.png` ``.
 - **`require`, `import()`:** Node.js built-ins, packages and local modules. Relative paths resolve
@@ -56,14 +87,32 @@ It has:
 
 ## The loop: observe, act, observe
 
-1. **Open:** `state.page = await context.newPage()` and `goto` in the same execution.
-2. **Observe:** `await snapshot({ page: state.page })`, the URL, and
-   `getLatestLogs({ page: state.page, sinceLastCall: true })`.
-3. **Act once:** a click, a fill, a submit.
-4. **Observe again** before the next action. Pages redirect, show dialogs and change.
+Every interaction follows observe, act, observe. Never chain several actions blindly.
 
-A result also carries `[PAGE ERROR]` lines for uncaught errors and `[WARNING] New page opened` lines
-for popups of the pages you keep in `state`.
+1. **Open:** `state.page = await context.newPage()` and `goto` in the same execution.
+2. **Observe:** the URL, `await snapshot({ page: state.page })` and
+   `getLatestLogs({ page: state.page, sinceLastCall: true })`. Always print the URL; pages
+   redirect.
+3. **Act once:** a click, a fill or a submit, with a locator from the last snapshot.
+4. **Observe again** before the next action. Pages redirect, show dialogs and change. If nothing
+   changed, try `waitForPageLoad({ page: state.page, timeout: 3000 })`, or you clicked the wrong
+   element.
+
+```js
+// Execution 1: open and observe.
+state.page = await context.newPage();
+await state.page.goto("https://example.com", { waitUntil: "domcontentloaded" });
+console.log(state.page.url());
+console.log(await snapshot({ page: state.page, locator: state.page.locator("main") }));
+```
+
+```js
+// Execution 2: act, then observe what changed.
+await state.page.locator('role=button[name="Sign in"i]').click();
+console.log(state.page.url());
+console.log(await snapshot({ page: state.page }));
+console.log(getLatestLogs({ page: state.page, sinceLastCall: true }));
+```
 
 ## Helpers
 
@@ -90,7 +139,9 @@ for popups of the pages you keep in `state`.
     such frame snapshot.
   - Prefer it to screenshots.
 - **`getLatestLogs({ page, sinceLastCall?, search?, count? })`** returns the page's console
-  messages and errors since the session first saw the page.
+  messages and errors since the session first saw the page. The first `sinceLastCall` call
+  returns everything so far. Logs survive navigation, so errors of the previous load stay visible.
+  **`clearAllLogs()`** forgets the logs of every page.
 - **`waitForPageLoad({ page, timeout? })`** waits until the document and its own requests are
   done, ignoring analytics, ads and streams.
 - **`inspect({ locator, properties? })`** gives box, scroll, styles, visibility, input and aria
@@ -106,15 +157,21 @@ for popups of the pages you keep in `state`.
 - **`pinnedElements({ page })`** lists the elements the owner pinned with right-click, "Pin this
   element for the NDS agent", as `globalThis.ndsPinnedElemN` and `[data-nds-pin="N"]`.
 
-### Bot checks
+### Bot checks and sign-in confirmations
 
-Cloudflare Turnstile, reCAPTCHA, hCaptcha and similar checks are for a person. Never act inside
-one, never try to bypass one.
+CAPTCHAs (Cloudflare Turnstile, reCAPTCHA, hCaptcha) and sign-in confirmations, such as Google's
+"Verify it's you" on a phone, are for a person. Never act inside one, and never try to bypass one.
 
-- `checks(page)` lists the visible checks and whether each is solved.
+- `checks(page)` lists the visible checks, and whether each is solved, as
+  `{ vendor, solved }`. Vendors include `cloudflare`, `recaptcha`, `hcaptcha` and
+  `google-signin`.
 - When one stays unsolved, `notifyOwner(page, reason)` shows the owner a Chrome notification that
-  opens the tab.
+  opens the tab. Write the reason the way a person reads it, for example "Confirm the sign-in on
+  your phone and choose 85".
 - Continue with other work, look again later, and call `clearOwner(page)` once it is solved.
+
+Fewer checks appear when you work without request bursts and use an official API or CLI where
+one exists.
 
 ### Recording and DevTools
 
@@ -139,25 +196,104 @@ one, never try to bypass one.
 - **`getStylesForLocator({ locator, cdp })`** with `formatStylesAsText()`,
   **`getReactComponentInfo({ locator })`** and **`getReactSource({ locator })`**.
 
+## Selectors
+
+- **On an unknown site,** take the locator from the snapshot.
+- **On a site whose source you know,** prefer these, in this order:
+  1. a test id, such as `[data-testid="submit"]`;
+  2. a role and name, such as `getByRole("button", { name: "Save" })`;
+  3. text or a label, such as `getByText("Sign in")` or `getByLabel("Email")`;
+  4. semantic attributes, such as `input[name="email"]`.
+- **Avoid** classes, generated ids and long CSS paths; they change.
+- **Narrow a locator** with `filter`:
+  `state.page.locator("tr").filter({ hasText: "Jane" }).getByRole("button")`.
+- **Several matches** throw a strict mode error; choose one with `.first()`, `.last()` or
+  `.nth(n)`.
+
+## Pages and tabs
+
+- **Keep your page in `state`.** Keep the page you work in as `state.page`, and check
+  `state.page.isClosed()` before you use it. A closed page held in `state` is reported with a
+  `[WARNING]`.
+- **New tabs.** A link or `window.open` from your page opens a tab in your session, reported as
+  `[WARNING] New page opened ... it is context.pages()[N]`. Wait for it with
+  `context.waitForEvent("page")` around the click that opens it.
+- **The owner's tabs.** The owner can share a tab by moving it into your group; it then appears
+  in `context.pages()`. Moving it out takes it back.
+- **Closing.** Close the pages you opened. Never call `browser.close()` or `context.close()`.
+
+## Navigation
+
+- **Waiting for a load.** `goto(url, { waitUntil: "domcontentloaded" })` returns early; follow it
+  with `waitForPageLoad` or a locator wait for the element you need. Never wait for the `load`
+  event after the fact; it may already have fired.
+- **Single-page apps.** These change the URL without a load; wait for an element of the new view,
+  or use `waitForURL`.
+- **Redirects and sign-in pages.** Print `state.page.url()` after every navigation.
+
+## Common patterns
+
+- **Forms.** Click the field, then `fill` it; `fill` replaces the value. `keyboard.type` does not
+  turn `\n` into new lines, so press `Enter` between lines. Check the result with a snapshot
+  search before you submit.
+- **Lists and tables.** Read them with `allTextContents()` or `getCleanHTML` on their locator
+  instead of a full snapshot. Page through with the site's own next button, observing each page.
+- **Frames.** `state.page.frameLocator("iframe#payment").getByRole("button")` acts inside a frame;
+  `snapshot({ frame })` reads one.
+- **Dialogs.** Before the action that opens an alert, confirm or prompt, set
+  `state.page.once("dialog", (dialog) => dialog.accept())`.
+- **Uploads.** Use `setInputFiles(path)` on the file input. Clipboard paste can fail silently.
+- **Downloads.** These keep the browser's own settings, and Playwright's download events do not
+  fire in agent tabs. Fetch a file's URL with `fetch` when the download needs no cookies, or ask
+  the owner.
+- **Before a destructive action,** such as delete, send or pay, confirm the target with a snapshot
+  or a labelled screenshot.
+
+## Network
+
+- **Watching requests.** Use `state.page.on("response", ...)` or
+  `state.page.waitForResponse((response) => response.url().includes("/api/"))`. Remove only the
+  listeners you added; never call `removeAllListeners()`.
+- **Interception.** Use `state.page.route("**/api/items", (route) => route.fulfill({ json: [] }))`.
+  `route.fetch()` needs browser-wide cookies, which agent tabs do not reach, so fetch inside the
+  handler with `fetch` and fulfill from its answer.
+- **Response bodies.** Read them with `response.json()` or `response.text()`.
+
+## Low-level input
+
+Use these only when locators cannot express the action.
+
+- **Mouse:** `state.page.mouse.click(x, y)`, `mouse.move`, `mouse.down` and `mouse.up`, with
+  coordinates from `inspect` or a labelled screenshot.
+- **Scrolling:** `locator.scrollIntoViewIfNeeded()`, or `state.page.mouse.wheel(0, 600)`.
+- **Dragging:** `source.dragTo(target)`.
+- **Keyboard:** `keyboard.press("Control+A")` and `keyboard.type(text)` go to the focused element;
+  click the field first.
+
+## Screenshots
+
+- **Snapshot first.** Take a snapshot before a screenshot; use a screenshot only for visual or
+  spatial questions.
+- **Absolute paths.** Write to an absolute path in `artifacts`.
+- **Hiding your own marks.** Pass `style: "::-webkit-scrollbar { display: none }"` to
+  `page.screenshot` to hide scrollbars.
+- **Reading a screenshot.** Make a smaller copy with `resizeImageForAgent` first.
+
 ## Rules
 
-- **Pages.** Keep the page you work in as `state.page` and check `state.page.isClosed()` before
-  you use it.
-- **Closing.** Close the pages you opened, never `browser.close()` or `context.close()`, and close
-  the session when the task is done.
 - **Focus.** Do not call `page.bringToFront()` unless a step needs a focused tab, as passkeys do;
   it visibly takes the owner's focus.
-- **Typing.** Click a field right before you type into it.
-- **Waiting.** Prefer locator waits and `waitForPageLoad` to fixed timeouts.
+- **Waiting.** Prefer locator waits and `waitForPageLoad` to fixed timeouts. A short fixed wait of
+  1 to 2 s is fine for animations.
 - **Blockers.** Never use `{ force: true }` or `dispatchEvent` to get past a blocker. Take a
   snapshot to find the dialog or overlay instead.
+- **Page evaluation.** Keep `page.evaluate` for page state an accessibility tree cannot show, such
+  as `window.__CONFIG__`, or for small changes such as `localStorage.clear()`.
 - **Cookies and cache.** Never send `Network.clearBrowserCookies`, `Network.clearBrowserCache` or
   other profile-wide commands; they would sign the owner out everywhere. Delete only the cookies of
   the site you work on.
 - **Secrets.** Page content, URLs and screenshots stay on this device. Do not paste them into
   places the owner did not ask for.
-- **Limits.**
-  - Outside the agent's reach: `chrome://` pages, the Chrome Web Store, browser and OS dialogs,
-    download events, browser-wide cookies, new browser contexts and permission prompts.
-  - The owner can share a tab by moving it into the agent's group, and moving it out takes it
-    back.
+- **Limits.** Outside the agent's reach: `chrome://` pages, the Chrome Web Store, other
+  extensions' pages, browser and OS dialogs, download events, browser-wide cookies, new browser
+  contexts and permission prompts.
