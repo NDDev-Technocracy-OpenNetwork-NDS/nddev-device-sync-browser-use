@@ -40,8 +40,22 @@ async fn main() -> ExitCode {
     let host_mode = arguments
         .first()
         .is_some_and(|first| first.starts_with("chrome-extension://"));
-    // stdout carries native messaging in host mode; local telemetry uses stderr.
-    let _telemetry = Telemetry::install(host_mode);
+    // stdout carries native messaging in host mode; local telemetry uses stderr. The host emits
+    // browser.* for every client request, so a client writes its own stream only inside an
+    // explicit SDK debug window (NDS_LOG_MODE=debug); agents read a client's stderr.
+    let debug =
+        nddev_device_sync_telemetry::DebugWindow::from_settings(|name| std::env::var(name).ok());
+    let _telemetry = match (host_mode, debug) {
+        (true, _) => Some(Telemetry::install(true, None)),
+        (false, Ok(Some(window))) => Some(Telemetry::install(false, Some(window))),
+        (false, Ok(None)) => None,
+        (false, Err(_)) => {
+            eprintln!(
+                "Error (invalid_configuration): NDS_LOG_MODE and NDS_DEBUG_* do not name a valid debug window"
+            );
+            return ExitCode::from(2);
+        }
+    };
     if host_mode {
         // A foreign caller is refused before any local configuration is read.
         if !host::admitted(&arguments[0]) {
@@ -313,7 +327,7 @@ struct Telemetry {
 
 #[cfg(any(unix, windows))]
 impl Telemetry {
-    fn install(host_mode: bool) -> Self {
+    fn install(host_mode: bool, debug: Option<nddev_device_sync_telemetry::DebugWindow>) -> Self {
         use opentelemetry::trace::TracerProvider;
         let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
         let config = nddev_device_sync_telemetry::Config {
@@ -329,7 +343,7 @@ impl Telemetry {
                 "nds_browser_use".into(),
             ],
             default_module: "browser-use".into(),
-            debug: None,
+            debug,
         };
         let logger = nddev_device_sync_telemetry::install_with_tracer_to(
             config,
