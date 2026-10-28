@@ -1123,13 +1123,22 @@ test("an agent tab's download reaches the agent's code", async () => {
 test("a device's CLI runs a session's code there and hands its artifacts back", async () => {
   const devices = join(configuration, "devices.json");
   const missing = join(root, "missing", "nds-browser-use");
-  const configured = { self: { command: [binary] }, broken: { command: [missing] } };
+  // A device whose CLI answers, though no browser is connected there.
+  const idle = windows
+    ? {}
+    : {
+        idle: {
+          command: ["/usr/bin/env", `NDS_BROWSER_USE_RUNTIME_DIR=${join(root, "no-host")}`, binary],
+        },
+      };
+  const configured = { self: { command: [binary] }, broken: { command: [missing] }, ...idle };
   writeFileSync(devices, JSON.stringify({ schema: 1, devices: configured }), { mode: 0o600 });
   const scratch = mkdtempSync(join(tmpdir(), "nds-bu-device-"));
   try {
     const listed = (await cli("devices")).body as unknown as Record<string, unknown>[];
     expect(listed).toEqual([
       { name: "broken", transport: "command", error: "device_unreachable" },
+      ...(windows ? [] : [{ name: "idle", transport: "command", error: "unavailable" }]),
       { name: "self", transport: "command", status: expect.objectContaining({ enabled: true }) },
     ]);
     const unreachable = await plain("--device", "broken", "-s", "device", "-e", "1");
