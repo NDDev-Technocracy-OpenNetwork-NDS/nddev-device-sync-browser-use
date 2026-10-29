@@ -3,7 +3,7 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { Page } from "playwright-core";
+import type { Locator, Page } from "playwright-core";
 import { useAriaRefs } from "./snapshot";
 
 // Interactive roles and their label colors: links, buttons, inputs, checks, sliders, menus, tabs.
@@ -26,17 +26,26 @@ const COLORS: Record<string, string> = {
   treeitem: "#ffbf00",
 };
 
+/** The label color of an element that is not interactive, shown with `interactiveOnly: false`. */
+const OTHER = "#d9d9d9";
+
 type Label = { ref: string; color: string; x: number; y: number };
 
 const ELEMENT =
   /^\s*- (\w+)\b.*?\[ref=([^\]]+)\].*?\[box=(-?[\d.]+),(-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\]/;
 
-/** The interactive elements of an AI-mode snapshot with boxes that lie in the viewport. */
-export function labels(view: string, width: number, height: number): Label[] {
+/** The elements of an AI-mode snapshot with boxes that lie in the viewport: the interactive ones,
+ * or every element with a ref when `interactiveOnly` is false. */
+export function labels(
+  view: string,
+  width: number,
+  height: number,
+  interactiveOnly = true,
+): Label[] {
   const found: Label[] = [];
   for (const line of view.split("\n")) {
     const match = ELEMENT.exec(line);
-    const color = match && COLORS[match[1] ?? ""];
+    const color = match && (COLORS[match[1] ?? ""] ?? (interactiveOnly ? undefined : OTHER));
     if (!match || !color) continue;
     const [x, y, w, h] = match.slice(3, 7).map(Number) as [number, number, number, number];
     if (w <= 0 || h <= 0 || x + w < 0 || y + h < 0 || x > width || y > height) continue;
@@ -51,16 +60,28 @@ export function labels(view: string, width: number, height: number): Label[] {
  * screenshot is taken.
  */
 export async function screenshotWithAccessibilityLabels(
-  { page }: { page: Page },
+  options: {
+    page?: Page | undefined;
+    /** Labels only this part of the page; the screenshot still shows the viewport. */
+    locator?: Locator | undefined;
+    /** False labels every element with a ref, not only the interactive ones. */
+    interactiveOnly?: boolean | undefined;
+  },
   artifacts: string,
 ): Promise<string> {
-  const view = await page.ariaSnapshot({ mode: "ai", boxes: true });
+  const page = options.page ?? options.locator?.page();
+  if (!page) {
+    throw new Error(
+      "screenshotWithAccessibilityLabels needs { page: state.page } or a locator of that page",
+    );
+  }
+  const view = await (options.locator ?? page).ariaSnapshot({ mode: "ai", boxes: true });
   // Its labels name Playwright's refs, which now are the page's refs.
   useAriaRefs(page);
   const size =
     page.viewportSize() ??
     (await page.evaluate(() => ({ width: innerWidth, height: innerHeight })));
-  const found = labels(view, size.width, size.height);
+  const found = labels(view, size.width, size.height, options.interactiveOnly ?? true);
   const id = `nds-labels-${Date.now()}`;
   await page.evaluate(
     ({ id, found }) => {

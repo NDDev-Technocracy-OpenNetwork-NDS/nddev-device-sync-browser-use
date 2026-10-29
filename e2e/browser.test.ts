@@ -85,6 +85,14 @@ function present(path: string): boolean {
 
 type Result = { code: number; body: Record<string, unknown> };
 
+// The part of the extension API the popup page's evaluations use.
+type ChromeTabs = {
+  tabs: {
+    query(info: object): Promise<{ id?: number; url?: string }[]>;
+    getCurrent(): Promise<{ id?: number } | undefined>;
+  };
+};
+
 async function cli(...args: string[]): Promise<Result> {
   const child = Bun.spawn([binary, ...args], { env, stdout: "pipe", stderr: "ignore" });
   const text = await new Response(child.stdout).text();
@@ -230,7 +238,7 @@ beforeAll(async () => {
           : new Response("post only", { status: 405 });
       }
       const page: Record<string, string> = {
-        "/": `<title>Fixture</title><button id="inc" onclick="c.textContent = Number(c.textContent) + 1">Increment</button><span id="c">0</span><button id="open" onclick="window.open('/target')">Open</button><a id="link" href="/linked" target="_blank">Linked</a>`,
+        "/": `<title>Fixture</title><button id="inc" onclick="c.textContent = Number(c.textContent) + 1">Increment</button><span id="c">0</span><button id="open" onclick="window.open('/target')">Open</button><a id="link" href="/linked" target="_blank">Linked</a><button id="window" onclick="window.open('/target?window', 'signin', 'width=480,height=600')">Window</button>`,
         "/linked": "<title>Linked</title><p>linked</p>",
         "/target": "<title>Popup target</title><p>popup</p>",
         "/owner": "<title>Owner</title><p>owner work</p>",
@@ -449,6 +457,34 @@ test("popups opened by an agent page join the agent session", async () => {
   expect(popup?.document).toBeString();
 });
 
+// A sign-in button opens its own popup window, which can hold no tab group; it joins the agent's
+// group as a tab of its opener's window, as Playwriter relocates such windows.
+test("a popup window an agent page opens becomes an agent tab", async () => {
+  const result = await run(
+    "acceptance",
+    `const [popup] = await Promise.all([context.waitForEvent("page"), state.page.click("#window")]); await popup.waitForLoadState(); state.signin = popup; return JSON.stringify({ url: popup.url(), opener: await popup.evaluate(() => window.opener !== null) })`,
+    "--timeout",
+    "20000",
+  );
+  expect(JSON.parse(String(result.body.value))).toEqual({
+    url: `${origin}/target?window`,
+    opener: true,
+  });
+  // The owner's browser shows it as a tab in the opener's window.
+  const windowOf = async (path: string) => {
+    const page = await observed(path);
+    if (!page) return undefined;
+    const cdp = await observer.newCDPSession(page);
+    const { windowId } = await cdp.send("Browser.getWindowForTarget");
+    await cdp.detach();
+    return windowId;
+  };
+  const popupWindow = await windowOf("/target?window");
+  expect(popupWindow).toBeNumber();
+  expect(popupWindow).toBe(await windowOf("/"));
+  expect((await run("acceptance", "await state.signin.close(); delete state.signin")).code).toBe(0);
+});
+
 test("the agent answers JavaScript dialogs", async () => {
   const result = await run(
     "acceptance",
@@ -662,7 +698,8 @@ async function helpers(): Promise<void> {
   expect(seen.changed).toContain("+ ");
   expect(seen.changed).toContain('"Saved"');
   expect(seen.logs).toContain("[log] loaded helpers");
-  expect(seen.none).toBe("No new logs since last call");
+  // As in Playwriter: an array, empty when nothing is new.
+  expect(JSON.stringify(seen.none)).toBe("[]");
   expect(seen.box).toMatch(/Scroll Y: size=\d+ client=50 overflowing=true/);
   expect(seen.input).toContain('Input: value="x"');
   expect(seen.input).toContain("Aria: aria-label=Name");
@@ -1101,6 +1138,57 @@ test("the recorder turns a person's actions in an agent tab into events and fram
   }
 });
 
+// The owner starts and stops the recorder from the extension's popup, as from Playwriter's
+// toolbar, for the agent group of their tab; the agent then reads the steps.
+test("the owner records their actions for the agent from the popup", async () => {
+  await opened("showme");
+  try {
+    const opened = await run(
+      "showme",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/record?owner"); return "ok"`,
+    );
+    expect(opened.body.value).toBe("ok");
+    const popup = await observer.newPage();
+    await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+    const tab = await popup.evaluate(async (url) => {
+      const tabs = (globalThis as unknown as { chrome: ChromeTabs }).chrome.tabs;
+      return (await tabs.query({})).find((each) => each.url === url)?.id;
+    }, `${origin}/record?owner`);
+    await popup.goto(`chrome-extension://${extensionId}/popup.html?tab=${tab}`);
+    await popup.waitForFunction(() => document.body.dataset.recording === "false");
+    await popup.locator("#record").click();
+    await popup.waitForFunction(() => document.body.dataset.recording === "true");
+    const page = await observed("/record?owner");
+    await page?.fill("#name", "Grace");
+    await page?.click("#save");
+    await Bun.sleep(1000);
+    await popup.locator("#record").click();
+    await popup.waitForFunction(() => document.body.dataset.recording === "false");
+    expect(await popup.locator("#recording").textContent()).toStartWith("Recorded 2 actions");
+    // Another tab of the owner is not an agent tab: the button says so.
+    const own = await popup.evaluate(async () => {
+      const tabs = (globalThis as unknown as { chrome: ChromeTabs }).chrome.tabs;
+      return (await tabs.getCurrent())?.id;
+    });
+    await popup.goto(`chrome-extension://${extensionId}/popup.html?tab=${own}`);
+    await popup.waitForFunction(() => document.body.dataset.recording === "error");
+    expect(await popup.locator("#record").isDisabled()).toBe(true);
+    await popup.close();
+    const listed = await plain("-s", "showme", "recorder", "events");
+    const actions = listed.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((event) => event.type === "person-action");
+    expect(actions.map((event) => [event.action, event.value ?? null])).toEqual([
+      ["fill", "Grace"],
+      ["click", null],
+    ]);
+  } finally {
+    await cli("session", "close", "showme", "--close-tabs");
+  }
+});
+
 // A screenshot shows the page, not this module's ghost cursor; a labelled screenshot keeps its
 // labels. A bare `page` says how to get one.
 test("screenshots leave the ghost cursor out and a bare page says how to get one", async () => {
@@ -1131,6 +1219,37 @@ test("screenshots leave the ghost cursor out and a bare page says how to get one
   });
   const bare = await run("acceptance", "page.url()");
   expect(String(bare.body.output)).toContain("There is no global `page`");
+});
+
+// As in Playwriter, the ghost cursor shows each agent mouse action without a show(); it is the
+// extension's, moved only by the agent's own input, and ghostCursor.hide turns it off.
+test("the ghost cursor shows agent mouse actions until the agent hides it", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/");
+     const cursor = () => page.evaluate(() => { const host = document.getElementById("nds-ghost-cursor"); return host === null ? "none" : typeof host.__ndsMove === "function" ? "extension" : "executor"; });
+     const before = await cursor();
+     await page.click("#inc");
+     await page.waitForTimeout(300);
+     const clicked = await cursor();
+     await ghostCursor.hide({ page });
+     await page.click("#inc");
+     await page.waitForTimeout(300);
+     const hidden = await cursor();
+     await ghostCursor.show({ page });
+     await page.mouse.move(20, 20);
+     const shown = await cursor();
+     await page.close();
+     return JSON.stringify({ before, clicked, hidden, shown })`,
+    "--timeout",
+    "20000",
+  );
+  expect(JSON.parse(String(result.body.value))).toEqual({
+    before: "none",
+    clicked: "extension",
+    hidden: "none",
+    shown: "executor",
+  });
 });
 
 // The guide's performance recipes work through the extension: buffered web vitals, CDP counters,
@@ -1544,6 +1663,44 @@ async function plain(...args: string[]): Promise<{ code: number; stdout: string;
 // a file only the page's cookie opens, a redirect to another site, a blob the page revoked at once,
 // a form's POST, a link that works once, a frame of another site, and a file that opens in a new
 // tab, which is reported on the tab that opened it. The browser's own copies are gone afterwards.
+// The owner's folder often holds a file of the same name already: the browser saves the agent's
+// download as "name (1)", and that copy is still the agent's and still removed; the owner's file
+// stays as it was.
+test("a download whose name the owner's folder already holds is still kept and removed", async () => {
+  writeFileSync(join(downloadsFolder, "moved.txt"), "the owner's own");
+  try {
+    const result = await run(
+      "acceptance",
+      `const page = await context.newPage(); await page.goto("${origin}/files");
+       await page.evaluate(() => { const link = document.createElement("a"); link.id = "plain"; link.href = "/files/plain"; link.textContent = "Plain"; document.body.append(link); });
+       const [download] = await Promise.all([page.waitForEvent("download"), page.click("#plain")]);
+       const file = await download.path();
+       const { basename, dirname } = require("node:path");
+       // The host's copy lies in the session's .downloads/<token>/ under the site's name.
+       const kept = basename(dirname(dirname(file))) === ".downloads" && /^[0-9a-f]{32}$/.test(basename(dirname(file))) && basename(file) === "moved.txt";
+       const result = JSON.stringify({ kept, body: require("node:fs").readFileSync(file, "utf8") });
+       await page.close();
+       return result`,
+      "--timeout",
+      "20000",
+    );
+    expect(JSON.parse(String(result.body.value))).toEqual({ kept: true, body: "moved body" });
+    const deadline = Date.now() + 5000;
+    while (
+      readdirSync(downloadsFolder).some((name) => name.startsWith("moved (")) &&
+      Date.now() < deadline
+    )
+      await Bun.sleep(100);
+    expect(readdirSync(downloadsFolder).filter((name) => name.startsWith("moved"))).toEqual([
+      "moved.txt",
+    ]);
+    expect(readFileSync(join(downloadsFolder, "moved.txt"), "utf8")).toBe("the owner's own");
+  } finally {
+    for (const name of readdirSync(downloadsFolder).filter((name) => name.startsWith("moved")))
+      rmSync(join(downloadsFolder, name));
+  }
+});
+
 test("an agent tab's download is the agent's file", async () => {
   served.once = 0;
   const get = `const get = async (selector, frame) => (await Promise.all([page.waitForEvent("download"), (frame ? page.frameLocator("iframe").locator(selector) : page.locator(selector)).click()]))[0];

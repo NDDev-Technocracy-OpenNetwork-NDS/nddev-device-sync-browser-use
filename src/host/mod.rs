@@ -44,6 +44,8 @@ const IDLE_CLOSE: Duration = Duration::from_secs(30 * 60);
 const CONTROL_CONNECTIONS: usize = 16;
 const CONTROL_IO: Duration = Duration::from_secs(5);
 const URL_LIMIT: usize = 2048;
+/// The owner's recorder button runs one short execution; an agent's runs make it wait no longer.
+const RECORD_MS: u64 = 10_000;
 const TITLE_LIMIT: usize = 256;
 const CDP_UNCERTAIN: u8 = 1;
 const CDP_RELEASED: u8 = 2;
@@ -418,6 +420,44 @@ fn reload_target(running: &str, installed: Option<String>) -> Option<String> {
     installed.filter(|installed| !running.is_empty() && installed != running)
 }
 
+/// The owner's recorder answer for the popup from the execution that ran `recorder.<action>()`:
+/// `{ recording, id?, events? }`, or `{ error, message? }` with the refusal's code or the
+/// executor's own reason (the recorder needs the full observation profile, for one).
+fn owner_recording(reply: &Reply) -> Value {
+    match reply {
+        Reply::Executed(outcome) if outcome.failure.is_none() => {
+            let value = outcome
+                .output
+                .rfind("[return value] ")
+                .and_then(|at| {
+                    serde_json::from_str::<Value>(&outcome.output[at + "[return value] ".len()..])
+                        .ok()
+                })
+                .unwrap_or(Value::Null);
+            let stopped = value["reason"].is_string();
+            let mut answer = json!({ "recording": value["id"].is_string() && !stopped });
+            if let Some(id) = value["id"].as_str() {
+                answer["id"] = bounded(id, 32).into();
+            }
+            if let Some(events) = value["events"].as_u64() {
+                answer["events"] = events.into();
+            }
+            answer
+        }
+        Reply::Executed(outcome) => {
+            let reason = outcome
+                .output
+                .lines()
+                .rev()
+                .find_map(|line| line.strip_prefix("Error: "))
+                .unwrap_or_default();
+            json!({ "error": "script_error", "message": bounded(reason, 300) })
+        }
+        Reply::Refused { refusal } => json!({ "error": refusal.code() }),
+        _ => json!({ "error": "invalid_response" }),
+    }
+}
+
 fn tab_session(tab: i64) -> String {
     format!("nds-tab-{tab}")
 }
@@ -665,6 +705,10 @@ impl Host {
                 self.observe(observation::Observation::parse(&message["profile"]))
             }
             Some("control") => self.on_control(message["enabled"].as_bool() == Some(true)),
+            Some("record") => {
+                let host = self.clone();
+                tokio::spawn(async move { host.record(&message).await });
+            }
             // The extension gave up adopting a new agent tab after its retries.
             Some("adoption") => {
                 let class = match message["failure"].as_str() {
@@ -679,6 +723,41 @@ impl Host {
                 tracing::warn!(event.name = "browser.extension.message", outcome = "rejected", error.type = "invalid_frame")
             }
         }
+    }
+
+    /// The owner's recorder button in the extension's popup, for the agent group of the owner's
+    /// tab: starts, stops or reads that session's recorder the way `recorder start|stop|status`
+    /// does for an agent, as one of the session's executions. The answer names the recording and
+    /// its event count, or why it did not run, such as an execution of the agent in progress.
+    async fn record(&self, message: &Value) {
+        let Some(action) = message["action"]
+            .as_str()
+            .filter(|action| matches!(*action, "start" | "stop" | "status"))
+        else {
+            return;
+        };
+        let project = message["group"].as_str().unwrap_or_default();
+        let code = format!("return JSON.stringify(await recorder.{action}())");
+        let reply = match self.execution_life(project, None) {
+            Ok(life) => self.execute(project, &life, &code, RECORD_MS, None).await,
+            Err(refusal) => Reply::Refused { refusal },
+        };
+        let mut answer = owner_recording(&reply);
+        answer["type"] = "recorded".into();
+        answer["request"] = message["request"].clone();
+        let sent = serde_json::to_vec(&answer)
+            .ok()
+            .and_then(|body| frame(&body))
+            .is_some_and(|framed| self.outbound.try_send(framed).is_ok());
+        let outcome = if answer.get("error").is_none() {
+            "ok"
+        } else {
+            "rejected"
+        };
+        tracing::info!(
+            event.name = "browser.recorder.owner",
+            outcome = if sent { outcome } else { "error" }
+        );
     }
 
     /// Asks an unpacked extension to reload when its installed files are newer.
@@ -1921,6 +2000,58 @@ mod owned_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_owner_recorder_answer_names_the_recording_or_why_it_did_not_run() {
+        let executed = |output: &str, failure| {
+            Reply::Executed(view::Outcome {
+                failure,
+                output: output.to_owned(),
+                truncated: false,
+                tabs: Vec::new(),
+            })
+        };
+        let started = executed(r#"[return value] {"id":"mvt1","path":"/run/x"}"#, None);
+        assert_eq!(
+            owner_recording(&started),
+            json!({ "recording": true, "id": "mvt1" })
+        );
+        let status = executed(
+            r#"[return value] {"id":"mvt1","events":4,"path":"/run/x"}"#,
+            None,
+        );
+        assert_eq!(
+            owner_recording(&status),
+            json!({ "recording": true, "id": "mvt1", "events": 4 })
+        );
+        let stopped = executed(
+            r#"[return value] {"id":"mvt1","path":"/run/x","reason":"stopped","events":4,"frames":2}"#,
+            None,
+        );
+        assert_eq!(
+            owner_recording(&stopped),
+            json!({ "recording": false, "id": "mvt1", "events": 4 })
+        );
+        assert_eq!(
+            owner_recording(&executed("[return value] null", None)),
+            json!({ "recording": false })
+        );
+        let refused = executed(
+            "Error: The recorder keeps what a person does in agent tabs, which only the full observation profile collects",
+            Some(view::ScriptFailure::ScriptError),
+        );
+        assert_eq!(owner_recording(&refused)["error"], "script_error");
+        assert!(
+            owner_recording(&refused)["message"]
+                .as_str()
+                .unwrap()
+                .contains("full observation profile")
+        );
+        let busy = Reply::Refused {
+            refusal: Refusal::Busy,
+        };
+        assert_eq!(owner_recording(&busy), json!({ "error": "busy" }));
+    }
 
     #[tokio::test]
     async fn native_messages_round_trip_and_reject_oversized_frames() {
