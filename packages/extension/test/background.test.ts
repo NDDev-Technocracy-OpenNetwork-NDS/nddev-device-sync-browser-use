@@ -38,6 +38,11 @@ class Browser {
   readonly heldCommands = new Map<string, ReturnType<typeof deferred>>();
   readonly actions: string[] = [];
   readonly notifications: { id: string; message: string }[] = [];
+  // Notifications Chrome still shows, by id, and the clears and focus calls the worker made.
+  readonly shown = new Set<string>();
+  readonly focus: string[] = [];
+  readonly notificationClicked = new Event();
+  readonly notificationButton = new Event();
   readonly evaluated: string[] = [];
   // Every command sent to Chrome, as "method tab" or "method tab/session".
   readonly commands: string[] = [];
@@ -116,7 +121,10 @@ class Browser {
           for (const id of tabIds) this.move(id, groupId ?? 99);
           return groupId ?? 99;
         },
-        update: async (id: number) => this.tab(id),
+        update: async (id: number, change?: { active?: boolean }) => {
+          if (change?.active) this.focus.push(`tab ${id}`);
+          return this.tab(id);
+        },
         remove: async (id: number) => {
           this.actions.push(`remove ${id}`);
           this.tab(id);
@@ -130,10 +138,19 @@ class Browser {
       },
       tabGroups: {
         get: async (id: number) => ({ id }),
-        update: async () => ({}),
+        update: async (id: number, change?: { collapsed?: boolean }) => {
+          if (change?.collapsed === false) this.focus.push(`group ${id}`);
+          return { id };
+        },
         onRemoved: event(),
       },
-      windows: { get: async (id: number) => ({ id }), update: async () => ({}) },
+      windows: {
+        get: async (id: number) => ({ id }),
+        update: async (id: number, change?: { focused?: boolean }) => {
+          if (change?.focused) this.focus.push(`window ${id}`);
+          return { id };
+        },
+      },
       debugger: {
         attach: async ({ tabId }: Session) => {
           await this.held.get(tabId)?.promise;
@@ -177,10 +194,13 @@ class Browser {
       notifications: {
         create: async (id: string, options: { message: string }) => {
           this.notifications.push({ id, message: options.message });
+          this.shown.add(id);
           return id;
         },
-        clear: async () => true,
-        onClicked: event(),
+        clear: async (id: string) => this.shown.delete(id),
+        getAll: async () => Object.fromEntries([...this.shown].map((id) => [id, true])),
+        onClicked: this.notificationClicked,
+        onButtonClicked: this.notificationButton,
       },
       contextMenus: {
         create: () => {},
@@ -339,6 +359,62 @@ test("the owner pins an element only in an agent tab", async () => {
   expect(
     browser.evaluated.filter((expression) => expression.includes("ndsPinnedElem")),
   ).toHaveLength(1);
+});
+
+test("an owner notification ends with the agent's hold on its tab", async () => {
+  const { browser, send } = await worker({ p: P }, [
+    [1, P],
+    [2, P],
+  ]);
+  await send({ type: "claim", group: "p" })();
+  const notify = (tab: number) =>
+    send({
+      type: "cdp",
+      group: "p",
+      tab,
+      method: "NDS.notifyOwner",
+      params: { reason: "Pass it" },
+    })();
+  expect(await notify(1)).toMatchObject({ result: { notification: "owner:1" } });
+  expect(await notify(2)).toMatchObject({ result: { notification: "owner:2" } });
+  expect(browser.shown).toEqual(new Set(["owner:1", "owner:2"]));
+  // The owner takes tab 2 out of the agent group: its check is no agent's any more.
+  browser.move(2, -1);
+  await until(() => !browser.shown.has("owner:2"));
+  // The session releases the rest without closing tabs: nothing stays to ask for a person.
+  await send({ type: "release", group: "p", close: false })();
+  await until(() => browser.shown.size === 0);
+  expect(browser.tabs.has(1)).toBe(true);
+});
+
+test("an owner notification opens its tab, its group and its window", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  await send({ type: "cdp", group: "p", tab: 1, method: "NDS.notifyOwner", params: {} })();
+  browser.notificationClicked.fire("owner:1");
+  await until(() => browser.focus.includes("window 1"));
+  expect(browser.focus).toEqual([`group ${P}`, "tab 1", "window 1"]);
+  expect(browser.shown.has("owner:1")).toBe(false);
+  // Its button does the same; a notification for a tab that is gone opens nothing.
+  await send({ type: "cdp", group: "p", tab: 1, method: "NDS.notifyOwner", params: {} })();
+  browser.focus.length = 0;
+  browser.notificationButton.fire("owner:1", 0);
+  await until(() => browser.focus.includes("window 1"));
+  browser.focus.length = 0;
+  browser.notificationClicked.fire("owner:77");
+  await Bun.sleep(20);
+  expect(browser.focus).toEqual([]);
+});
+
+test("a new worker clears the owner notifications an earlier one left", async () => {
+  const browser = new Browser({ p: P }, [[1, P]]);
+  browser.shown.add("owner:1");
+  browser.shown.add("pin:1");
+  (globalThis as unknown as { chrome: unknown }).chrome = browser.api();
+  const source = "../src/background.ts";
+  await import(`${source}?worker=${loads++}`);
+  await until(() => !browser.shown.has("owner:1"));
+  expect(browser.shown).toEqual(new Set(["pin:1"]));
 });
 
 test("Runtime.enable makes Chrome report the page's execution contexts again", async () => {

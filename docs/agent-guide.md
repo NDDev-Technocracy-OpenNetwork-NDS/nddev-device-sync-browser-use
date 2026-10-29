@@ -143,7 +143,9 @@ console.log(getLatestLogs({ page: state.page, sinceLastCall: true }));
   every interactive line ends with a Playwright locator, for example
   `- button "Save" [id="save"]` or `- role=link[name="Docs"i]`. `accessibilitySnapshot` is the same helper.
   - **Use the locator as it is:** `state.page.locator('[id="save"]').click()`. Never invent a
-    selector the snapshot does not show. A `>> nth=N` suffix tells equal locators apart.
+    selector the snapshot does not show. A `>> nth=N` suffix tells equal locators apart; it is
+    positional and holds only for that snapshot, so before a destructive action scope to a unique
+    parent such as a dialog, a row or a form instead.
   - Visible text can differ from the DOM's through CSS, such as `text-transform`; match names
     case-insensitively.
   - Later calls show only what changed, when that is shorter; "No changes since last call" means
@@ -230,8 +232,9 @@ one exists.
 - **Avoid** classes, generated ids and long CSS paths; they change.
 - **Narrow a locator** with `filter`:
   `state.page.locator("tr").filter({ hasText: "Jane" }).getByRole("button")`.
-- **Several matches** throw a strict mode error; choose one with `.first()`, `.last()` or
-  `.nth(n)`.
+- **Several matches** throw a strict mode error that lists every match with a locator of its
+  own (`aka getByRole(...)`); use one of those, or scope to a unique parent. Do not guess with
+  `.first()` or `.nth(n)`: the position changes with the page.
 
 ## Pages and tabs
 
