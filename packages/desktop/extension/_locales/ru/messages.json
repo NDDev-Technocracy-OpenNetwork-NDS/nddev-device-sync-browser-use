@@ -1,0 +1,200 @@
+{
+  "extensionName": {
+    "message": "NDDev OpenNetwork NDS browser-use"
+  },
+  "extensionDescription": {
+    "message": "Даёт агентам NDS работать в их собственных группах вкладок вашего браузера через хост NDS на этом устройстве."
+  },
+  "actionTitle": {
+    "message": "Агент NDS"
+  },
+  "title": {
+    "message": "Агент NDS"
+  },
+  "linkOk": {
+    "message": "Подключено"
+  },
+  "linkOff": {
+    "message": "Агенты на паузе"
+  },
+  "linkDown": {
+    "message": "Хост не запущен"
+  },
+  "linkMismatch": {
+    "message": "Нужно обновление"
+  },
+  "mismatch": {
+    "message": "Хост NDS говорит на контракте $1, а это расширение нет. Обновите расширение или выполните `nds-browser-use install` для нового хоста."
+  },
+  "controlTitle": {
+    "message": "Управление агентами"
+  },
+  "controlOn": {
+    "message": "Агенты могут работать в своих группах вкладок."
+  },
+  "controlOff": {
+    "message": "Агенты не могут действовать, их вкладки отпущены."
+  },
+  "agentTabs": {
+    "message": "Открыто вкладок агентов: $1."
+  },
+  "tabTitle": {
+    "message": "Эта вкладка"
+  },
+  "tabAgent": {
+    "message": "Группа агента «$1»"
+  },
+  "tabOwner": {
+    "message": "Ваша вкладка"
+  },
+  "tabNone": {
+    "message": "Нет вкладки"
+  },
+  "tabAgentNote": {
+    "message": "Здесь работает агент. Свои действия здесь вы можете записать для него."
+  },
+  "tabOwnerNote": {
+    "message": "Агенты её не трогают. Перенесите её в группу агента, чтобы поделиться."
+  },
+  "record": {
+    "message": "Записать мои действия"
+  },
+  "stopRecord": {
+    "message": "Остановить запись"
+  },
+  "recordingNow": {
+    "message": "Записываю ваши действия: пока $1."
+  },
+  "recordedDone": {
+    "message": "Записано действий: $1. Агент читает их через `recorder events`."
+  },
+  "recordHint": {
+    "message": "Ваши клики, ввод и переходы здесь станут шагами, которые агент сможет повторить."
+  },
+  "refusedNoAgentTab": {
+    "message": "Откройте вкладку группы агента, чтобы записать в ней свои действия."
+  },
+  "refusedSession": {
+    "message": "У этой группы агента нет открытой сессии."
+  },
+  "refusedBusy": {
+    "message": "Агент сейчас выполняет код; повторите через мгновение."
+  },
+  "refusedPermission": {
+    "message": "Управление агентами выключено."
+  },
+  "refusedHost": {
+    "message": "Хост NDS не подключён."
+  },
+  "refusedTimeout": {
+    "message": "Хост NDS не ответил."
+  },
+  "privateAdd": {
+    "message": "Не сохранять $1"
+  },
+  "privateIs": {
+    "message": "$1 — приватный сайт"
+  },
+  "privateAddAny": {
+    "message": "Не сохранять этот сайт"
+  },
+  "privateTitle": {
+    "message": "Приватные сайты"
+  },
+  "privateNote": {
+    "message": "Агенты там работают, но их журнал не хранит содержимое этих сайтов."
+  },
+  "privateEmpty": {
+    "message": "Пока нет."
+  },
+  "privateRemove": {
+    "message": "Снова сохранять $1"
+  },
+  "activityTitle": {
+    "message": "Что делал агент"
+  },
+  "activityNone": {
+    "message": "Пока ничего. Шаги появляются здесь в полном режиме наблюдения."
+  },
+  "activityNoTab": {
+    "message": "Откройте вкладку группы агента, чтобы увидеть, что он делал."
+  },
+  "activityHost": {
+    "message": "Хост NDS не ответил."
+  },
+  "activityHint": {
+    "message": "Сначала новые. Агенты читают всё через `nds-browser-use -s <project> activity`."
+  },
+  "kindAction": {
+    "message": "действие"
+  },
+  "kindNavigation": {
+    "message": "страница"
+  },
+  "kindPage": {
+    "message": "вкладка"
+  },
+  "kindNetwork": {
+    "message": "запрос"
+  },
+  "kindExecution": {
+    "message": "код"
+  },
+  "kindDownload": {
+    "message": "загрузка"
+  },
+  "kindConsole": {
+    "message": "консоль"
+  },
+  "kindDialog": {
+    "message": "диалог"
+  },
+  "kindPageError": {
+    "message": "ошибка"
+  },
+  "kindRecording": {
+    "message": "запись"
+  },
+  "kindPersonAction": {
+    "message": "вы"
+  },
+  "kindToast": {
+    "message": "сообщение"
+  },
+  "kindOther": {
+    "message": "событие"
+  },
+  "private": {
+    "message": "приватно"
+  },
+  "observationTitle": {
+    "message": "Наблюдение"
+  },
+  "full": {
+    "message": "Полное"
+  },
+  "standard": {
+    "message": "Стандарт"
+  },
+  "off": {
+    "message": "Выкл."
+  },
+  "observationFull": {
+    "message": "Действия агентов, сеть и консоль страниц хранятся на этом устройстве для агентов; секреты вырезаны."
+  },
+  "observationStandard": {
+    "message": "Только названия, время и исход действий агентов; без содержимого страниц."
+  },
+  "observationOff": {
+    "message": "Ничего не собирается, рекордер выключен."
+  },
+  "guide": {
+    "message": "Руководство агента"
+  },
+  "versions": {
+    "message": "Расширение $1 · хост $2"
+  },
+  "versionsNoHost": {
+    "message": "Расширение $1"
+  }
+}

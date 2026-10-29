@@ -113,8 +113,10 @@ It has:
 - **`process`:** the executor's process. `cwd()` is `artifacts`; `exit`, `abort` and `chdir` are
   refused, since the session owns the process.
 - **Timers and `fetch`:** `setTimeout`, `setInterval`, `clearTimeout` and `clearInterval`; an
-  interval of an aborted script stops with it. `fetch` runs in the executor and does not carry the page's
-  cookies. `Buffer`, `crypto` and `AbortSignal` are Node.js's.
+  interval of an aborted script stops with it. `setImmediate`, `clearImmediate` and
+  `queueMicrotask` are Node.js's, and `performance` times your own steps (the page's clock is
+  `page.evaluate(() => performance.now())`). `fetch` runs in the executor and does not carry the
+  page's cookies. `Buffer`, `crypto` and `AbortSignal` are Node.js's.
 - **The helpers below.**
 
 ## The loop: observe, act, observe

@@ -55,6 +55,50 @@ const SETUP_TIMEOUT_MS = 10_000;
 const SHOT_STYLE = "nds-screenshot-style";
 const SHOT_HIDE = `(() => { if (document.getElementById("${SHOT_STYLE}")) return; const style = document.createElement("style"); style.id = "${SHOT_STYLE}"; style.textContent = "#nds-ghost-cursor { display: none !important } html { scrollbar-width: none !important } ::-webkit-scrollbar { display: none !important } * { caret-color: transparent !important }"; (document.head ?? document.documentElement).append(style); })()`;
 const SHOT_SHOW = `document.getElementById("${SHOT_STYLE}")?.remove()`;
+// Chrome draws a tab the owner is not looking at about once a second, and Playwright waits for
+// two animation frames before each pointer action: an agent's click in such a tab took two
+// seconds, and a screenshot waited for a frame. Chrome draws a tab that is being captured as if
+// it were shown, so while an agent works in a tab the worker keeps a screencast of it open, of
+// 8x8 pixels and at most one frame every 600 draws, whose frames go nowhere. It ends after
+// AWAKE_IDLE_MS without a command, so idle agent tabs cost nothing. The agent's own screencast,
+// for a recording, replaces it while it runs.
+const AWAKE_IDLE_MS = 20_000;
+const AWAKE = { format: "jpeg", quality: 1, maxWidth: 8, maxHeight: 8, everyNthFrame: 600 };
+type Awake = { timer: ReturnType<typeof setTimeout> | undefined; on: boolean; agent: boolean };
+const awake = new Map<number, Awake>();
+
+function awakeOf(tab: number): Awake {
+  let state = awake.get(tab);
+  if (!state) {
+    state = { timer: undefined, on: false, agent: false };
+    awake.set(tab, state);
+  }
+  return state;
+}
+
+async function wake(tab: number): Promise<void> {
+  const state = awakeOf(tab);
+  clearTimeout(state.timer);
+  state.timer = setTimeout(() => void rest(tab, state), AWAKE_IDLE_MS);
+  if (state.on || state.agent) return;
+  state.on = true;
+  await chrome.debugger.sendCommand({ tabId: tab }, "Page.startScreencast", AWAKE).catch(() => {
+    state.on = false;
+  });
+}
+
+async function rest(tab: number, state: Awake): Promise<void> {
+  if (awake.get(tab) !== state || !state.on || state.agent) return;
+  state.on = false;
+  await chrome.debugger.sendCommand({ tabId: tab }, "Page.stopScreencast").catch(() => undefined);
+}
+
+// A tab's debugger session ended or was replaced, and its screencast with it.
+function asleep(tab: number): void {
+  clearTimeout(awake.get(tab)?.timer);
+  awake.delete(tab);
+}
+
 // The ghost cursor shows each agent mouse action in an agent tab and fades after 5 s. It moves only after the agent's own Input.dispatchMouseEvent, never with the owner's
 // mouse. A cursor the executor installed (ghostCursor.show) follows the mouse itself and is left
 // alone, and ghostCursor.hide turns this one off until the next show.
@@ -79,12 +123,17 @@ type HostRequest =
   | { type: "reload"; id?: undefined; version: string }
   | ({ type: "recorded"; request: number } & OwnerRecording)
   | { type: "incompatible"; id?: undefined; contract: number }
-  | { type: "journaled"; id?: undefined; request: number; lines: string[] };
+  | { type: "journaled"; id?: undefined; request: number; lines: string[] }
+  | { type: "about"; id?: undefined; version: string; commit: string };
 // Every request but `reload`, which the worker answers by reloading, not with a result, and the
 // host's answer to the owner's recorder button.
 type Answered = Exclude<
   HostRequest,
-  { type: "reload" } | { type: "recorded" } | { type: "incompatible" } | { type: "journaled" }
+  | { type: "reload" }
+  | { type: "recorded" }
+  | { type: "incompatible" }
+  | { type: "journaled" }
+  | { type: "about" }
 >;
 // The recorder of the agent group that holds the owner's tab, as the popup shows it.
 type OwnerRecording = {
@@ -187,8 +236,18 @@ function saveGroups(): Promise<void> {
 let hostContract: number | undefined;
 const CONTRACT = 2;
 
+// The icon tells the owner the state at a glance: the number of agent tabs, OFF, a host that is
+// not running, or one that does not match.
 async function badge(): Promise<void> {
-  const text = !enabled ? "OFF" : !port ? "…" : hostContract !== undefined ? "!" : "";
+  const tabs = [...attached.keys()].filter(usable).length;
+  const [text, color] = !enabled
+    ? ["OFF", "#646b78"]
+    : !port
+      ? ["…", "#b26a00"]
+      : hostContract !== undefined
+        ? ["!", "#c4322b"]
+        : [tabs > 0 ? String(tabs) : "", "#0b7a8a"];
+  await chrome.action.setBadgeBackgroundColor({ color }).catch(() => undefined);
   await chrome.action.setBadgeText({ text });
 }
 
@@ -222,7 +281,10 @@ function connect(): void {
     if (message.type === "reload") void reloadFor(message.version);
     else if (message.type === "recorded") recorded.get(message.request)?.(message);
     else if (message.type === "journaled") journaled.get(message.request)?.(message.lines);
-    else if (message.type === "incompatible") {
+    else if (message.type === "about") {
+      hostBuild = { version: message.version, commit: message.commit };
+      for (const done of abouts.splice(0)) done();
+    } else if (message.type === "incompatible") {
       // The host speaks another contract: nothing an agent asks can work until one is updated.
       hostContract = message.contract;
       void badge();
@@ -232,6 +294,7 @@ function connect(): void {
     // The host owned every session; without it no agent may keep control.
     port = undefined;
     hostContract = undefined;
+    hostBuild = undefined;
     void detachAll().then(badge);
     setTimeout(connect, retry);
     retry = Math.min(retry * 2, 60_000);
@@ -546,6 +609,25 @@ async function dispatch(message: Answered): Promise<unknown> {
       if (message.method === "NDS.clearOwner") return clearOwner(message.tab);
       await reattaching.get(message.tab);
       still();
+      if (!message.session) {
+        // An agent's own screencast replaces the worker's; any other command wakes the tab.
+        if (message.method === "Page.startScreencast") {
+          // The worker's screencast ends first, so the agent's starts afresh and gets its first
+          // frame at once, as without the worker.
+          const state = awakeOf(message.tab);
+          state.agent = true;
+          if (state.on) {
+            state.on = false;
+            await chrome.debugger
+              .sendCommand({ tabId: message.tab }, "Page.stopScreencast")
+              .catch(() => undefined);
+            still();
+          }
+        } else {
+          await wake(message.tab);
+          still();
+        }
+      }
       const target: chrome.debugger.DebuggerSession = { tabId: message.tab };
       if (message.session) target.sessionId = message.session;
       if (message.method === "Runtime.enable") {
@@ -575,6 +657,12 @@ async function dispatch(message: Answered): Promise<unknown> {
         const result = (await command(target, message.method, params)) ?? {};
         still();
         if (message.method === "Input.dispatchMouseEvent") point(message.tab, message.params);
+        if (message.method === "Page.stopScreencast" && !message.session) {
+          // The agent's screencast ended, and with it the worker's; the next command wakes it.
+          const state = awakeOf(message.tab);
+          state.agent = false;
+          state.on = false;
+        }
         return restore.record(message.tab, message.method, message.params, result);
       } finally {
         release();
@@ -765,6 +853,7 @@ function attach(tab: number, life: Life): Promise<unknown> {
           throw new Refusal("target_closed");
         }
         attachment.pending = false;
+        void badge();
         restore.startSession(tab);
         await remember(tab, () => usable(tab) === attachment);
       } else if (attachment.revoked || attachment.pending) {
@@ -826,6 +915,8 @@ function ended(tab: number, attachment: Attachment): void {
   attachment.ended = true;
   if (attached.get(tab) !== attachment) return;
   attached.delete(tab);
+  asleep(tab);
+  void badge();
   restore.endSession(tab);
   // No agent holds the tab any more, so nobody would clear its check or act on it.
   void chrome.notifications.clear(`${OWNER}${tab}`).catch(() => undefined);
@@ -1205,6 +1296,13 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     }
   }
   if (method === "Target.detachedFromTarget" && ignored.delete(String(fields.sessionId))) return;
+  // The worker's own screencast frames go nowhere: they are answered and dropped.
+  if (method === "Page.screencastFrame" && !source.sessionId && !awake.get(tab)?.agent) {
+    void chrome.debugger
+      .sendCommand(source, "Page.screencastFrameAck", { sessionId: fields.sessionId })
+      .catch(() => undefined);
+    return;
+  }
   if (method === "Page.downloadWillBegin" || method === "Page.downloadProgress") {
     if (!announce(tab, method, fields)) return;
   }
@@ -1266,6 +1364,7 @@ function settle(tab: number, attachment: Attachment, reason: string, outcome: Ou
 // group or whose life closed meanwhile gets no further command and is detached again.
 async function reattach(tab: number, attachment: Attachment): Promise<Reattached> {
   const current = () => usable(tab) === attachment;
+  asleep(tab);
   send({ type: "event", tab, method: "Runtime.executionContextsCleared", params: {} });
   for (const child of restore.takeChildren(tab))
     send({ type: "event", tab, method: "Target.detachedFromTarget", params: { sessionId: child } });
@@ -1486,8 +1585,26 @@ async function setPrivate(sites: string[]): Promise<void> {
   await chrome.storage.local.set({ [PRIVATE]: privateSites });
 }
 
+// The connected host's build, asked for once per connection; the popup's footer names it.
+let hostBuild: { version: string; commit: string } | undefined;
+const abouts: (() => void)[] = [];
+
+async function about(): Promise<void> {
+  if (hostBuild || !port) return;
+  await new Promise<void>((done) => {
+    const timer = setTimeout(done, 1000);
+    abouts.push(() => {
+      clearTimeout(timer);
+      done();
+    });
+    send({ type: "about" });
+  });
+}
+
 async function status(tab: number | undefined): Promise<object> {
-  const site = siteOf((await tabOf(tab))?.url);
+  const [owner] = await Promise.all([tabOf(tab), about()]);
+  const site = siteOf(owner?.url);
+  const group = owner?.id === undefined ? undefined : usable(owner.id)?.life.group;
   return {
     enabled,
     observation,
@@ -1495,7 +1612,11 @@ async function status(tab: number | undefined): Promise<object> {
     hostContract,
     tabs: [...attached.keys()].filter(usable).length,
     privateSites,
+    version: chrome.runtime.getManifest().version,
+    hasTab: owner !== undefined,
+    ...(hostBuild ? { host: hostBuild } : {}),
     ...(site ? { site } : {}),
+    ...(group ? { group } : {}),
   };
 }
 

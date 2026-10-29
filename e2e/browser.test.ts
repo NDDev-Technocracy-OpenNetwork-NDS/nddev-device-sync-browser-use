@@ -197,9 +197,10 @@ async function ownerSwitch(enable: boolean): Promise<void> {
   await page.waitForFunction(
     () => !(document.getElementById("toggle") as HTMLButtonElement).disabled,
   );
-  if ((await toggle.getAttribute("data-enabled")) !== String(enable)) await toggle.click();
+  if ((await toggle.getAttribute("aria-checked")) !== String(enable)) await toggle.click();
   await page.waitForFunction(
-    (expected) => document.getElementById("toggle")?.dataset.enabled === String(expected),
+    (expected) =>
+      document.getElementById("toggle")?.getAttribute("aria-checked") === String(expected),
     enable,
   );
   await page.close();
@@ -420,6 +421,25 @@ test("agent code acts in its own tab and the browser shows the result", async ()
   expect(requests).toBeGreaterThan(before);
   const page = await observed("/");
   expect(await page?.locator("#c").textContent()).toBe("1");
+});
+
+// Chrome draws a tab nobody looks at about once a second, and a click waits for two frames; the
+// extension keeps an agent tab drawn while the agent works in it, so actions answer at once.
+test("actions in a background agent tab answer at once", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.setContent('<button id="b">B</button><input id="i">');
+     const time = async (f) => { const t = Date.now(); await f(); return Date.now() - t; };
+     await page.click("#b"); await page.waitForTimeout(1500);
+     const clicks = []; for (let i = 0; i < 5; i++) clicks.push(await time(() => page.click("#b")));
+     const fills = []; for (let i = 0; i < 5; i++) fills.push(await time(() => page.fill("#i", "x" + i)));
+     await page.close(); return JSON.stringify({ clicks, fills })`,
+    "--timeout",
+    "25000",
+  );
+  const times = JSON.parse(String(result.body.value)) as { clicks: number[]; fills: number[] };
+  expect(Math.max(...times.clicks)).toBeLessThan(600);
+  expect(Math.max(...times.fills)).toBeLessThan(600);
 });
 
 test("owner tabs stay outside the agent session", async () => {
@@ -839,6 +859,7 @@ async function recorded(): Promise<void> {
      await page.mouse.move(120, 80); await page.click("#inc"); await page.waitForTimeout(1200);
      return recording.isRecording({ page })`,
   );
+  if (started.body.value !== "true") console.error("RECORDING", JSON.stringify(started.body));
   expect(started.body.value).toBe("true");
   expect(await (await observed("/?recording"))?.locator("#nds-ghost-cursor").count()).toBe(1);
   const stopped = await run(
@@ -1915,10 +1936,17 @@ test("a private site keeps its content out of the journal, and the popup shows t
   // The popup lists the group's newest steps, the private ones marked.
   await popup.reload();
   await popup.waitForFunction(() => Number(document.body.dataset.recent) > 0);
-  expect(await popup.locator("#recent").textContent()).toContain("action (private)  fill");
+  const step = popup.locator('#recent li[data-type="action"][data-private="true"]').first();
+  expect(await step.textContent()).toContain("fill");
+  await popup.screenshot({ path: join(root, "popup-agent-tab.png") });
+  if (process.env.NDS_E2E_SHOTS)
+    cpSync(
+      join(root, "popup-agent-tab.png"),
+      join(process.env.NDS_E2E_SHOTS, "popup-agent-tab.png"),
+    );
   // The owner keeps the site's content again.
   await popup.locator("#private li button").click();
-  await popup.waitForFunction(() => document.getElementById("private")?.children.length === 0);
+  await popup.waitForFunction(() => document.getElementById("private")?.dataset.count === "0");
   await popup.close();
   await run("acceptance", "await state.private.close(); delete state.private");
 });
