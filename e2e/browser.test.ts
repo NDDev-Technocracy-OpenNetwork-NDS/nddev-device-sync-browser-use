@@ -1668,30 +1668,37 @@ async function plain(...args: string[]): Promise<{ code: number; stdout: string;
 // stays as it was.
 test("a download whose name the owner's folder already holds is still kept and removed", async () => {
   writeFileSync(join(downloadsFolder, "moved.txt"), "the owner's own");
-  const result = await run(
-    "acceptance",
-    `const page = await context.newPage(); await page.goto("${origin}/files");
-     await page.evaluate(() => { const link = document.createElement("a"); link.id = "plain"; link.href = "/files/plain"; link.textContent = "Plain"; document.body.append(link); });
-     const [download] = await Promise.all([page.waitForEvent("download"), page.click("#plain")]);
-     const path = await download.path();
-     const result = JSON.stringify({ kept: /[\\/].downloads[\\/][0-9a-f]{32}[\\/]moved.txt$/.test(path), body: require("node:fs").readFileSync(path, "utf8") });
-     await page.close();
-     return result`,
-    "--timeout",
-    "20000",
-  );
-  expect(JSON.parse(String(result.body.value))).toEqual({ kept: true, body: "moved body" });
-  const deadline = Date.now() + 5000;
-  while (
-    readdirSync(downloadsFolder).some((name) => name.startsWith("moved (")) &&
-    Date.now() < deadline
-  )
-    await Bun.sleep(100);
-  expect(readdirSync(downloadsFolder).filter((name) => name.startsWith("moved"))).toEqual([
-    "moved.txt",
-  ]);
-  expect(readFileSync(join(downloadsFolder, "moved.txt"), "utf8")).toBe("the owner's own");
-  rmSync(join(downloadsFolder, "moved.txt"));
+  try {
+    const result = await run(
+      "acceptance",
+      `const page = await context.newPage(); await page.goto("${origin}/files");
+       await page.evaluate(() => { const link = document.createElement("a"); link.id = "plain"; link.href = "/files/plain"; link.textContent = "Plain"; document.body.append(link); });
+       const [download] = await Promise.all([page.waitForEvent("download"), page.click("#plain")]);
+       const file = await download.path();
+       const { basename, dirname } = require("node:path");
+       // The host's copy lies in the session's .downloads/<token>/ under the site's name.
+       const kept = basename(dirname(dirname(file))) === ".downloads" && /^[0-9a-f]{32}$/.test(basename(dirname(file))) && basename(file) === "moved.txt";
+       const result = JSON.stringify({ kept, body: require("node:fs").readFileSync(file, "utf8") });
+       await page.close();
+       return result`,
+      "--timeout",
+      "20000",
+    );
+    expect(JSON.parse(String(result.body.value))).toEqual({ kept: true, body: "moved body" });
+    const deadline = Date.now() + 5000;
+    while (
+      readdirSync(downloadsFolder).some((name) => name.startsWith("moved (")) &&
+      Date.now() < deadline
+    )
+      await Bun.sleep(100);
+    expect(readdirSync(downloadsFolder).filter((name) => name.startsWith("moved"))).toEqual([
+      "moved.txt",
+    ]);
+    expect(readFileSync(join(downloadsFolder, "moved.txt"), "utf8")).toBe("the owner's own");
+  } finally {
+    for (const name of readdirSync(downloadsFolder).filter((name) => name.startsWith("moved")))
+      rmSync(join(downloadsFolder, name));
+  }
 });
 
 test("an agent tab's download is the agent's file", async () => {
