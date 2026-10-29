@@ -19,7 +19,8 @@ browser's own DevTools socket as a client of the owner's ADB server, and the hos
 CLI are the same.
 
 Agent CLI: `nds-browser-use skill` prints the [agent guide](docs/agent-guide.md),
-which an agent reads once per task. `nds-browser-use session new <project>`, then
+which an agent reads once per task; `just install-skill` installs a coding-agent skill
+(`skills/nds-browser-use`) that sends agents to it. `nds-browser-use session new <project>`, then
 `nds-browser-use -s <project> -e '<playwright code>'`; `status`,
 `session list` and `session close` complete the surface. An agent closes its
 session when its task is done; that closes the session's tabs too, unless
