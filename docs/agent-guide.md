@@ -200,18 +200,32 @@ one exists.
 
 ### Recording and DevTools
 
-- **`recording.start({ page, outputPath })`** records a tab as video, with a ghost cursor that
-  follows your mouse actions. **`recording.stop({ page })`** returns the file and the execution
-  times. **`ghostCursor.show({ page, style })`** and **`ghostCursor.hide({ page })`** control the
-  cursor outside recordings.
+- **`state.video = await recording.start({ page, outputPath })`** records a tab as video, with a
+  ghost cursor that follows your mouse actions; keep the handle in `state`.
+  - **`await state.video.stop()`** returns the file and the execution times;
+    `recording.stop({ page })` does the same by page. **`cancel()`** keeps no file.
+  - **`setPage(otherPage)`** films another tab from now on.
+  - `clock: "manual"` films only **`await state.video.wait(ms)`**, so your thinking stays out.
+  - `audio: true` adds the page's sound.
+  - `aspectRatio: { width: 16, height: 9 }` fits the viewport while recording and restores it.
+  - `.mp4`, `.mov`, `.mkv` or `.webm`. The file appears only when it is complete.
+- **`ghostCursor.show({ page, style })`** and **`ghostCursor.hide({ page })`** control the cursor
+  outside recordings.
 - **`createDemoVideo({ recordingPath, durationMs, executionTimestamps })`** speeds up the waits
   between executions. Keep its promise in `state` and await it in a later execution.
   Recording needs ffmpeg.
-- **`recorder.start()`** records what the owner does in the session's tabs, for writing a skill.
+- **`recorder.start()`** records what the owner does in the session's tabs, for writing a skill,
+  with Playwright's codegen engine: each action carries the locator and the code codegen would
+  write. It needs the full observation profile.
   - **`recorder.stop()`** ends the recording.
-  - **`recorder.events({ errors?, type?, ids? })`** prints the timeline.
-  - **`recorder.frame({ eventId, offset })`** names a screenshot of that moment.
-  - Copy a recording out of `artifacts` before closing the session, or pass `outputDir`.
+  - **`await recorder.events({ errors?, type?, ids?, exclude?, full? })`**, or
+    `nds-browser-use -s <project> recorder events`, gives the timeline as JSON lines: the person's
+    actions (`person-action`), live-region messages (`toast`) and what the pages did meanwhile.
+    Each record's `seq` is its id.
+  - **`await recorder.frame({ eventId, offset })`**, or `recorder frame <id> --offset 1000`, names
+    the screenshot of that moment; an offset of 1000 shows the result of a click.
+  - A value typed into a password, one-time-code or card field is never kept.
+  - Copy frames out of `artifacts` before closing the session, or pass `outputDir`.
 - **`getCDPSession({ page })`** gives raw CDP; `context.newCDPSession(page)` works too.
 - **`createDebugger({ cdp })`** sets breakpoints, steps, reads local variables and evaluates in a
   paused frame. Give it its own CDP session.
@@ -278,6 +292,29 @@ one exists.
   the tab that opened it.
 - **Before a destructive action,** such as delete, send or pay, confirm the target with a snapshot
   or a labelled screenshot.
+
+## Performance
+
+- **Web vitals.** Paints and layout shifts come from the page's own buffered entries:
+  ```js
+  await state.page.evaluate(() => new Promise((done) => {
+    const vitals = { paints: {}, cls: 0 };
+    new PerformanceObserver((list) => { for (const e of list.getEntries()) vitals.paints[e.name] = e.startTime; })
+      .observe({ type: "paint", buffered: true });
+    new PerformanceObserver((list) => { for (const e of list.getEntries()) if (!e.hadRecentInput) vitals.cls += e.value; })
+      .observe({ type: "layout-shift", buffered: true });
+    setTimeout(() => done(vitals), 500);
+  }));
+  ```
+- **Counters.** `const cdp = await getCDPSession({ page: state.page }); await cdp.send("Performance.enable");`
+  then `(await cdp.send("Performance.getMetrics")).metrics` gives script, layout and task time, heap
+  size and node counts.
+- **Slow devices.** `Emulation.setCPUThrottlingRate({ rate: 4 })` and
+  `Network.emulateNetworkConditions` slow only the agent tab; reset both (`rate: 1`, `offline:
+  false, latency: 0, downloadThroughput: -1, uploadThroughput: -1`) before you finish.
+- **Timing your own steps.** Chrome gives extensions no `Profiler` domain, so there is no CPU
+  profile. Wrap the work in `performance.mark()` and `performance.measure()` in the page, and
+  compare `ScriptDuration` and `TaskDuration` of `Performance.getMetrics` before and after.
 
 ## Activity
 

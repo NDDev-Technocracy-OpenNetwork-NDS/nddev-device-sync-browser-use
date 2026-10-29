@@ -52,7 +52,8 @@ function collecting(): boolean {
   return started && observation() === "full";
 }
 
-function emit(record: Raw): void {
+/** Queues one raw record for the host, when the profile collects. */
+export function emit(record: Raw): void {
   if (!collecting()) return;
   queue.push({ at: new Date().toISOString(), ...(exec === undefined ? {} : { exec }), ...record });
   if (queue.length >= BATCH) void send(false);
@@ -65,6 +66,16 @@ async function send(flush: boolean): Promise<void> {
   const records = queue;
   queue = [];
   if (records.length > 0 || flush) await hostCommand("NDS.activity", { records, flush });
+}
+
+/** Sends everything queued at once and asks the host to write what it holds back. */
+export function flush(): Promise<void> {
+  return collecting() ? send(true) : Promise.resolve();
+}
+
+/** The journal's number of a page, 0 for one it never saw. */
+export function pageId(page: Page): number {
+  return pages.get(page) ?? 0;
 }
 
 /** Starts collecting; the host keeps the journal of this executor's session. */

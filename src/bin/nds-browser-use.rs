@@ -22,6 +22,8 @@ const USAGE: &str = "usage:
   nds-browser-use [--device <name>] -s <project> (-e <code> | -f <file> | -f -) [--timeout <ms, at most 25000>] [--expect <target>:<document>] [--json]
   nds-browser-use [--device <name>] -s <project> artifact (list | <path> [--output <file>])
   nds-browser-use [--device <name>] -s <project> recorder (start | stop | status)
+  nds-browser-use [--device <name>] -s <project> recorder events [<id>...] [--recording <id>] [--type <type>] [--errors] [--exclude <regex>] [--full]
+  nds-browser-use [--device <name>] -s <project> recorder frame <id> [--offset <ms>] [--recording <id>]
   nds-browser-use [--device <name>] -s <project> activity [--all] [--type <type>] [--errors] [--grep <text>] [--exec <id>] [--last <n, at most 10000>] [--full]
   nds-browser-use [--device <name>] -s <project> activity body <sha256>
   nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)
@@ -105,6 +107,13 @@ async fn main() -> ExitCode {
         _ if device.is_some() => remote(device.as_deref().unwrap_or_default(), &words).await,
         ["-s", project, "artifact", rest @ ..] => artifact_command(project, rest),
         ["-s", project, "activity", rest @ ..] => activity_command(project, rest),
+        [
+            "-s",
+            project,
+            "recorder",
+            which @ ("events" | "frame"),
+            rest @ ..,
+        ] => recorder_command(project, *which == "frame", rest),
         _ => client(&words).await,
     }
 }
@@ -347,6 +356,43 @@ fn activity_command(project: &str, words: &[&str]) -> ExitCode {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             refused("not_found", "the activity journal holds no such body")
         }
+        Err(_) => refused("unavailable", "the activity journal could not be read"),
+    }
+}
+
+/// A recording's events as JSON lines, or the path of the frame closest to one event, read from
+/// the activity journal here without the host.
+#[cfg(any(unix, windows))]
+fn recorder_command(project: &str, frame: bool, words: &[&str]) -> ExitCode {
+    let Some(query) = activity::Recorder::parse(frame, words) else {
+        return usage();
+    };
+    if !protocol::valid_project(project) {
+        return refused("invalid_request", "the project name is not valid");
+    }
+    let directory = match install::state_dir() {
+        Ok(state) => state.join("activity").join(project),
+        Err(error) => return failed(&Error::Io(error)),
+    };
+    let lines = if frame {
+        activity::recorder_frame(&directory, &query).map(|path| vec![path.display().to_string()])
+    } else {
+        activity::recorder_events(&directory, &query)
+    };
+    match lines {
+        Ok(lines) => {
+            let mut out = std::io::stdout().lock();
+            for line in lines {
+                if std::io::Write::write_all(&mut out, format!("{line}\n").as_bytes()).is_err() {
+                    return ExitCode::from(2);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => refused(
+            "not_found",
+            "the activity journal holds no such recording, event or frame",
+        ),
         Err(_) => refused("unavailable", "the activity journal could not be read"),
     }
 }

@@ -245,6 +245,11 @@ beforeAll(async () => {
         // new tab, and the frame of another site offers its own link.
         "/files": `<title>Files</title><a id="bytes" href="/files/bytes">Bytes</a><a id="moved" href="/files/moved">Moved</a><a id="once" href="/files/once">Once</a><form method="post" action="/files/post"><button id="post">Post</button></form><button id="blob" onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['blob body'])); a.download = 'made.txt'; a.click(); window.URL.revokeObjectURL(a.href)">Blob</button><a id="tab" href="/files/plain" target="_blank">Tab</a><button id="open" onclick="window.open('/files/once')">Open</button><iframe src="http://localhost:${fixture?.port}/files-frame"></iframe>`,
         "/files-frame": `<a id="inner" href="/files/plain">Inner</a>`,
+        // A tone the page plays through Web Audio once a button is pressed.
+        "/tone": `<title>Tone</title><button id="tone" onclick="const audio = new AudioContext(); const tone = audio.createOscillator(); tone.frequency.value = 440; tone.connect(audio.destination); tone.start()">Tone</button>`,
+        // A form for the recorder: a password field whose label names no secret, and a status
+        // region that announces the save.
+        "/record": `<title>Record</title><input id="name" aria-label="Name"><input id="word" type="password" aria-label="Kennwort"><button id="save" onclick="document.getElementById('status').textContent = 'Saved ' + document.getElementById('name').value">Save</button><div role="status" id="status"></div>`,
         // A page whose script calls the site's API, logs the same error twice and throws.
         "/journal": `<title>Journal</title><input id="email" aria-label="Email"><input id="password" type="password" aria-label="Password"><script>fetch('/api/journal?id=7&token=abc').then((r) => r.json()); console.error('cart failed'); console.error('cart failed'); setTimeout(() => { throw new Error('late boom') });</script>`,
         // A different site (localhost vs 127.0.0.1) renders out of process.
@@ -330,6 +335,8 @@ beforeAll(async () => {
     executablePath: chrome,
     headless: true,
     env,
+    // Tabs keep their window's own size, as in the owner's browser: the observer emulates none.
+    viewport: null,
     args: [
       "--remote-debugging-port=0",
       `--disable-extensions-except=${installed},${foreign}`,
@@ -862,6 +869,115 @@ async function recorded(): Promise<void> {
   expect((streams[0]?.width ?? 1) % 2).toBe(0);
 }
 
+// Recording parity with Playwriter: a handle to keep, a manual clock that films only `wait(ms)`, a
+// file that appears complete, other containers, another tab mid-recording, a viewport fitted to
+// an aspect ratio and restored, and the page's own sound. Skipped without ffmpeg.
+test.skipIf(Bun.which("ffmpeg") === null)(
+  "recordings film the manual clock, move between tabs and keep the page's sound",
+  async () => {
+    await opened("filming");
+    const probe = (path: string, entries: string) =>
+      JSON.parse(
+        Bun.spawnSync([
+          "ffprobe",
+          "-v",
+          "error",
+          "-show_entries",
+          entries,
+          "-of",
+          "json",
+          path,
+        ]).stdout.toString(),
+      ) as { format?: { duration?: string }; streams?: Record<string, unknown>[] };
+    try {
+      const manual = await run(
+        "filming",
+        `const fs = require("node:fs");
+         const page = await context.newPage(); await page.goto("${origin}/?manual");
+         const path = artifacts + "/manual.webm";
+         const handle = await recording.start({ page, outputPath: path, clock: "manual" });
+         const before = fs.existsSync(path);
+         await page.waitForTimeout(1500);
+         await handle.wait(1000);
+         await page.waitForTimeout(800);
+         const done = await handle.stop(); await page.close();
+         return JSON.stringify({ before, path: done.path, clock: handle.clock, recording: handle.isRecording })`,
+        "--timeout",
+        "20000",
+      );
+      expect(manual.body).toMatchObject({ failure: null });
+      const filmed = JSON.parse(String(manual.body.value));
+      expect(filmed).toMatchObject({ before: false, clock: "manual", recording: false });
+      const webm = probe(filmed.path, "format=duration:stream=codec_name");
+      expect(Number(webm.format?.duration)).toBeGreaterThan(0.8);
+      expect(Number(webm.format?.duration)).toBeLessThan(1.5);
+      expect(webm.streams?.[0]?.codec_name).toBe("vp8");
+
+      const moved = await run(
+        "filming",
+        `const first = await context.newPage(); await first.goto("${origin}/?first");
+         const second = await context.newPage(); await second.goto("${origin}/linked");
+         const inner = (page) => page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+         const size = await inner(first);
+         const handle = await recording.start({ page: first, outputPath: artifacts + "/moved.mp4", aspectRatio: { width: 1, height: 1 } });
+         const fitted = await inner(first);
+         await first.waitForTimeout(600);
+         await handle.setPage(second);
+         const back = await inner(first);
+         const square = await inner(second);
+         await second.waitForTimeout(600);
+         const done = await handle.stop();
+         const after = await inner(second);
+         await first.close(); await second.close();
+         return JSON.stringify({ size, fitted, back, square, after, page: handle.page === second, path: done.path })`,
+        "--timeout",
+        "20000",
+      );
+      expect(moved.body).toMatchObject({ failure: null });
+      const switched = JSON.parse(String(moved.body.value));
+      expect(switched.fitted.width).toBe(switched.fitted.height);
+      expect(switched.back).toEqual(switched.size);
+      expect(switched.square.width).toBe(switched.square.height);
+      expect(switched.after).toEqual(switched.size);
+      expect(switched.page).toBe(true);
+      const mp4 = probe(switched.path, "format=duration:stream=width,height");
+      expect(Number(mp4.format?.duration)).toBeGreaterThan(1);
+      expect(mp4.streams?.[0]?.width).toBe(mp4.streams?.[0]?.height);
+
+      const sound = await run(
+        "filming",
+        `const page = await context.newPage(); await page.goto("${origin}/tone");
+         const handle = await recording.start({ page, outputPath: artifacts + "/tone.mp4", audio: true });
+         await page.click("#tone");
+         await page.waitForTimeout(2000);
+         const done = await handle.stop(); await page.close();
+         return done.path`,
+        "--timeout",
+        "20000",
+      );
+      expect(sound.body).toMatchObject({ failure: null });
+      const audio = probe(String(sound.body.value), "stream=codec_type,codec_name");
+      expect(audio.streams?.map((stream) => stream.codec_type).sort()).toEqual(["audio", "video"]);
+      const volume = Bun.spawnSync([
+        "ffmpeg",
+        "-hide_banner",
+        "-i",
+        String(sound.body.value),
+        "-af",
+        "volumedetect",
+        "-f",
+        "null",
+        "-",
+      ]).stderr.toString();
+      const peak = Number(/max_volume: (-?[\d.]+) dB/.exec(volume)?.[1] ?? "-91");
+      expect(peak).toBeGreaterThan(-30);
+    } finally {
+      await cli("session", "close", "filming", "--close-tabs");
+    }
+  },
+  90_000,
+);
+
 // DevTools helpers over raw CDP: matched CSS rules, a live script edit, and a breakpoint with its
 // local variables and an expression evaluated in the paused frame.
 test("devtools helpers style, edit and debug an agent page", async () => {
@@ -911,43 +1027,71 @@ test("devtools helpers style, edit and debug an agent page", async () => {
   }
 });
 
-// The recorder: a person acts in an agent tab, and the agent reads a timeline of actions with
-// locators and a frame of the screen.
+// The recorder: a person acts in an agent tab, and the agent reads Playwright's codegen of each
+// action, the status message the page announced and a frame of the screen. A value typed into a
+// password field is never kept, whatever its label says.
 test("the recorder turns a person's actions in an agent tab into events and frames", async () => {
   await opened("recorder");
   try {
     const started = await run(
       "recorder",
-      `const page = await context.newPage(); await page.goto("${origin}/helpers?recorder"); return JSON.stringify(await recorder.start())`,
+      `const page = await context.newPage(); await page.goto("${origin}/record"); return JSON.stringify(await recorder.start())`,
     );
+    expect(started.body).toMatchObject({ failure: null });
     expect(JSON.parse(String(started.body.value)).path).toStartWith(
       join(runtime, "sessions", "recorder"),
     );
     // The CLI's recorder commands are the helper's calls.
     const status = await plain("-s", "recorder", "recorder", "status");
     expect(status.code).toBe(0);
-    // inspect escapes a Windows path's separators, so only its platform-neutral parts are compared.
-    expect(status.stdout).toContain("id: '1'");
     expect(status.stdout).toContain("recordings");
-    const tab = await observed("/helpers?recorder");
-    await tab?.click("#save");
+    const tab = await observed("/record");
     await tab?.fill("#name", "Ada");
+    await tab?.fill("#word", "hunter2");
+    await tab?.click("#save");
     await tab?.locator("#name").press("Tab");
-    await Bun.sleep(1000);
-    const result = await run(
-      "recorder",
-      `const stopped = await recorder.stop(); return JSON.stringify({ stopped, timeline: recorder.events(), first: recorder.frame({ eventId: 1 }) })`,
+    await Bun.sleep(1500);
+    const stopped = await run("recorder", `return JSON.stringify(await recorder.stop())`);
+    expect(stopped.body).toMatchObject({ failure: null });
+    expect(JSON.parse(String(stopped.body.value)).frames).toBeGreaterThan(0);
+    const listed = await plain("-s", "recorder", "recorder", "events");
+    expect(listed.code).toBe(0);
+    expect(listed.stdout).not.toContain("hunter2");
+    const events = listed.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const actions = events.filter((event) => event.type === "person-action");
+    expect(actions.map((event) => [event.action, event.value ?? event.key ?? null])).toEqual([
+      ["fill", "Ada"],
+      ["fill", "[redacted]"],
+      ["click", null],
+      ["press", "Tab"],
+    ]);
+    expect(String(actions[2]?.code)).toBe(
+      "await page.getByRole('button', { name: 'Save' }).click();",
     );
-    const seen = JSON.parse(String(result.body.value)) as {
-      stopped: { events: number; frames: number };
-      timeline: string;
-      first: string;
-    };
-    expect(seen.timeline).toContain('click getByRole("button", { name: "Save" })');
-    expect(seen.timeline).toContain('fill getByRole("textbox", { name: "Name" }) = "Ada"');
-    expect(seen.timeline).toContain("press");
-    expect(seen.stopped.frames).toBeGreaterThan(0);
-    expect(existsSync(seen.first)).toBe(true);
+    expect(String(actions[2]?.aria)).toContain('textbox "Name" [ref=e2]: Ada');
+    expect(String(actions[2]?.aria)).toContain('textbox "Kennwort" [ref=e3]: [redacted]');
+    expect(String(actions[1]?.code)).not.toContain("hunter2");
+    expect(events.some((event) => event.type === "toast" && event.text === "Saved Ada")).toBe(true);
+    const frame = await plain(
+      "-s",
+      "recorder",
+      "recorder",
+      "frame",
+      String(actions[2]?.seq),
+      "--offset",
+      "1000",
+    );
+    expect(frame.code).toBe(0);
+    expect(existsSync(frame.stdout.trim())).toBe(true);
+    // The same reading in agent code.
+    const inCode = await run(
+      "recorder",
+      `return (await recorder.events({ type: "person-action" })).split("\\n").length`,
+    );
+    expect(inCode.body.value).toBe("4");
     expect((await plain("-s", "recorder", "recorder", "status")).stdout).toBe(
       "[return value] null\n",
     );
@@ -955,6 +1099,68 @@ test("the recorder turns a person's actions in an agent tab into events and fram
   } finally {
     await cli("session", "close", "recorder", "--close-tabs");
   }
+});
+
+// A screenshot shows the page, not this module's ghost cursor; a labelled screenshot keeps its
+// labels. A bare `page` says how to get one.
+test("screenshots leave the ghost cursor out and a bare page says how to get one", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/record");
+     // A blank part of the page, so the pointer hovers nothing there.
+     const clip = { x: 0, y: 300, width: 60, height: 60 };
+     await page.evaluate(() => document.activeElement?.blur());
+     const plain = await page.screenshot({ clip, type: "jpeg", quality: 100 });
+     await ghostCursor.show({ page, style: "dot" });
+     await page.mouse.move(30, 330);
+     await page.waitForTimeout(400);
+     const shown = await page.evaluate(() => getComputedStyle(document.getElementById("nds-ghost-cursor")).display);
+     const withCursor = await page.screenshot({ clip, type: "jpeg", quality: 100 });
+     const after = await page.evaluate(() => [Boolean(document.getElementById("nds-ghost-cursor")), Boolean(document.getElementById("nds-screenshot-style"))]);
+     await ghostCursor.hide({ page });
+     await page.close();
+     return JSON.stringify({ shown, same: plain.equals(withCursor), after })`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body).toMatchObject({ failure: null });
+  expect(JSON.parse(String(result.body.value))).toEqual({
+    shown: "block",
+    same: true,
+    after: [true, false],
+  });
+  const bare = await run("acceptance", "page.url()");
+  expect(String(bare.body.output)).toContain("There is no global `page`");
+});
+
+// The guide's performance recipes work through the extension: buffered web vitals, CDP counters,
+// CPU throttling and measures of the agent's own steps.
+test("the guide's performance recipes measure an agent page", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/article");
+     const vitals = await page.evaluate(() => new Promise((done) => {
+       const seen = { paints: {}, cls: 0 };
+       new PerformanceObserver((list) => { for (const e of list.getEntries()) seen.paints[e.name] = e.startTime; }).observe({ type: "paint", buffered: true });
+       setTimeout(() => done(seen), 300);
+     }));
+     const cdp = await getCDPSession({ page });
+     await cdp.send("Performance.enable");
+     const metrics = Object.fromEntries((await cdp.send("Performance.getMetrics")).metrics.map((m) => [m.name, m.value]));
+     await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+     await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+     const measured = await page.evaluate(() => { performance.mark("a"); let x = 0; for (let i = 0; i < 1e6; i++) x += i; performance.mark("b"); return performance.measure("work", "a", "b").duration >= 0; });
+     await cdp.detach(); await page.close();
+     return JSON.stringify({ paint: "first-paint" in vitals.paints || "first-contentful-paint" in vitals.paints, nodes: metrics.Nodes > 0, measured })`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body).toMatchObject({ failure: null });
+  expect(JSON.parse(String(result.body.value))).toEqual({
+    paint: true,
+    nodes: true,
+    measured: true,
+  });
 });
 
 // Agent code loads modules, and reads the elements the owner pinned with right-click. The menu
