@@ -143,10 +143,12 @@ Agent tabs keep working through other extensions and executor replacements:
 Limits: Chrome serves WebAuthn only to a focused page, so a passkey step needs
 `page.bringToFront()` and visibly activates the agent tab. Chrome keeps every
 extension out of `chrome://` pages and the Chrome Web Store. Browser-chrome
-and OS dialogs, real authenticators' user verification, a download's file (Chrome
-refuses an extension's `Page.setDownloadBehavior`, so the download events reach
-Playwright but the file keeps the browser's folder), browser-wide cookies, new
-browser contexts and permission grants are outside `chrome.debugger`.
+and OS dialogs, real authenticators' user verification, browser-wide cookies, new
+browser contexts and permission grants are outside `chrome.debugger`. Chrome also
+refuses an extension's `Page.setDownloadBehavior`, so a download stays in the
+browser's folder; the executor loads its URL again through the tab with the page's
+cookies, which gives agent code `saveAs()`, `path()`, `createReadStream()` and `failure()` for
+every download except one that answered a form's POST or that a site serves only once.
 
 ## Devices
 
