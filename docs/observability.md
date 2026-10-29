@@ -15,7 +15,7 @@ executor follows it.
 
 | Profile | Collected |
 | --- | --- |
-| **Full** (the owner's default) | Standard, plus the activity journal with content: each execution's code and result, Playwright actions with their locators and values, navigations, network requests with their redacted URLs, headers and textual bodies, console messages, page errors, dialogs and downloads; the recorder's network capture. |
+| **Full** (the owner's default) | Standard, plus the activity journal with content: each execution's code and result, Playwright actions with their locators and values, navigations, network requests with their redacted URLs, headers and textual bodies, console errors, warnings and failed assertions, page errors, dialogs and downloads; the recorder's network capture. |
 | **Standard** | The host's lifecycle, security and outcome events, such as one per execution with its duration, outcome and error class. No URL, title, locator, value or body. |
 | **Off** | Nothing new is collected or exported: no journal, no recorder, no telemetry. Records not yet written or sent are discarded. Sessions, permissions and the errors agents and the owner see keep working. |
 
@@ -62,7 +62,9 @@ Noise is left out:
 - requests to analytics and advertising hosts;
 - successful static assets (images, fonts, styles, scripts, media);
 - `data:`, `blob:` and extension URLs;
-- successful third-party reads.
+- successful third-party reads;
+- console messages below a warning (`log`, `info`, `debug`), which agents already read in their
+  execution's reply.
 
 Failed requests are always kept.
 
