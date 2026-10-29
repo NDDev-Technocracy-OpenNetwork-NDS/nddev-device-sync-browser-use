@@ -4,11 +4,19 @@ AGPL-3.0-only NDS module. [NDDev OpenNetwork](https://nddev.ai).
 
 Agent browser automation inside owner-granted Chrome tab groups, as defined by
 [ADR 0015](https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync/blob/dev/standarts/decisions/0015-agent-browser-automation.md).
-The pinned MV3 extension (`packages/extension`) attaches only to NDS tab groups and
+The pinned MV3 extension (`packages/desktop/extension`) attaches only to NDS tab groups and
 talks to the Rust host through Chrome native messaging. The host serves agents
 on a private Unix socket and runs each session's Playwright code in a Bun
 executor (`packages/executor`) connected to a session-scoped CDP endpoint. There is
 no TCP listener, debugging port, tunnel or vendor telemetry.
+
+The project has two browser sides:
+- [desktop browsers](docs/desktop.md): the extension and its native host;
+- [phones](docs/mobile.md): a Chromium browser on an Android phone, such as Chrome.
+
+On a phone the Rust phone link (`src/mobile`) takes the extension's place. It reaches the
+browser's own DevTools socket as a client of the owner's ADB server, and the host, executor and
+CLI are the same.
 
 What it covers of Playwriter, row by row: [Playwriter parity](docs/playwriter-parity.md).
 
@@ -181,6 +189,14 @@ file only its owner can write:
 (default `~/.local/share/nds-browser-use/bin/nds-browser-use`, where `just install` puts it); or
 `command` gives an absolute program and its arguments instead. Code goes to the device on stdin,
 never on a command line.
+
+## Phones
+
+The owner turns on USB debugging on an Android phone and authorizes this computer. The owner
+then runs `nds-browser-use phones` to list the phone's browsers, and
+`nds-browser-use phone serve <serial>` to serve one of them. Agents use
+`nds-browser-use --phone <serial> ...` (or `NDS_BROWSER_PHONE`) like any session command, and
+work only in tabs they open. See [docs/mobile.md](docs/mobile.md).
 
 ## Owned NDS sessions
 

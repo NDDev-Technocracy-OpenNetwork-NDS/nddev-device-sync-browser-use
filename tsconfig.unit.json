@@ -5,5 +5,5 @@
     "types": ["bun"],
     "noEmit": true
   },
-  "include": ["packages/extension/test/*.ts", "packages/executor/test/*.ts"]
+  "include": ["packages/desktop/extension/test/*.ts", "packages/executor/test/*.ts"]
 }

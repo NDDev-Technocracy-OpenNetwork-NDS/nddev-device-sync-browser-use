@@ -23,7 +23,11 @@ pub mod host;
 #[cfg(any(unix, windows))]
 pub mod install;
 #[cfg(any(unix, windows))]
+pub mod mobile;
+#[cfg(any(unix, windows))]
 mod runtime;
+#[cfg(any(unix, windows))]
+pub use runtime::choose_phone;
 #[cfg(any(unix, windows))]
 mod socket;
 
@@ -35,7 +39,7 @@ pub use nddev_device_sync_adapter_io::{CancellationToken, IoError, LocalIo, Nati
 use protocol::Document;
 use protocol::Refusal;
 
-/// Unpacked build: the ID follows the public key pinned in `packages/extension/manifest.json`.
+/// Unpacked build: the ID follows the public key pinned in `packages/desktop/extension/manifest.json`.
 pub const UNPACKED_EXTENSION_ID: &str = "lcdkocghcaakekcaeopjanfbohpfacbk";
 /// The same extension published in the Chrome Web Store, which assigns its own key.
 pub const STORE_EXTENSION_ID: &str = "lpnfnhkdjamhnoknoohhmjfhhjkeofio";
@@ -143,7 +147,8 @@ mod tests {
     #[test]
     fn extension_id_matches_the_pinned_manifest_key() {
         let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../packages/extension/manifest.json")).unwrap();
+            serde_json::from_str(include_str!("../packages/desktop/extension/manifest.json"))
+                .unwrap();
         let key = manifest["key"].as_str().unwrap();
         let der = decode_base64(key);
         let digest = Sha256::digest(&der);

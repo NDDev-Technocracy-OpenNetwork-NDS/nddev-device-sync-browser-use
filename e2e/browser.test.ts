@@ -291,7 +291,7 @@ beforeAll(async () => {
   const wrapper = join(root, windows ? "host.cmd" : "host.sh");
   mkdirSync(join(prefix, "bin"), { recursive: true });
   cpSync(binary, hostBinary);
-  cpSync(join(repository, "packages/extension"), installed, { recursive: true });
+  cpSync(join(repository, "packages/desktop/extension"), installed, { recursive: true });
   if (windows) {
     writeFileSync(wrapper, `@"${hostBinary}" %* 2>>"${hostLog}"\r\n`);
   } else {

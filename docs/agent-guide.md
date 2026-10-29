@@ -85,6 +85,18 @@ or to spare this one's resources.
 - Each device has its own sessions, tabs and owner. A device that is off or unreachable answers
   `Error (device_unreachable)`; ask the owner rather than retrying in a loop.
 
+## Phones
+
+When the owner serves the browser of an Android phone, tabs can run there too.
+
+- `nds-browser-use --phone <serial>` before a command, or `NDS_BROWSER_PHONE=<serial>`, uses that
+  phone's browser: `nds-browser-use --phone R58M12345AB session new shop`.
+- `nds-browser-use phones` lists the phones and their browsers.
+- You see only the tabs you open there, with the phone's viewport, user agent and touch input.
+- `Error (unavailable)` means the owner is not serving that phone. Ask the owner, and never
+  start `phone serve` or change the phone's settings yourself.
+- In a WebView app, `context.newPage()` fails: such apps cannot open tabs.
+
 ## The code
 
 Code runs as an async function body. A single expression is returned; otherwise use `return`.
