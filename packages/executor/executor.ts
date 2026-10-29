@@ -18,6 +18,7 @@ import {
   getReactSource,
   getStylesForLocator,
 } from "./agent/devtools";
+import { attach as watchDownloads } from "./agent/downloads";
 import { bounded, compose, describeError, errorParts, waitBudget } from "./agent/format";
 import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
@@ -90,6 +91,7 @@ function observe(page: Page): void {
   watchLogs(page, context, keys);
   watchLoad(page);
   watchSnapshots(page);
+  watchDownloads(page);
 }
 for (const page of context.pages()) observe(page);
 context.on("page", observe);

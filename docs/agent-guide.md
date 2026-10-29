@@ -269,11 +269,14 @@ one exists.
 - **Dialogs.** Before the action that opens an alert, confirm or prompt, set
   `state.page.once("dialog", (dialog) => dialog.accept())`.
 - **Uploads.** Use `setInputFiles(path)` on the file input. Clipboard paste can fail silently.
-- **Downloads.** `page.waitForEvent("download")` gives a download's `url()` and
-  `suggestedFilename()`. The file itself keeps the browser's own folder, so `saveAs()` and `path()`
-  fail. To keep the bytes, fetch the URL in the page, which sends the page's cookies:
-  `await page.evaluate(async (url) => (await fetch(url)).text(), download.url())`, then write them
-  into `artifacts`.
+- **Downloads.** Take the download from `Promise.all([state.page.waitForEvent("download"),
+  state.page.click(...)])`, then keep it with
+  `await download.saveAs(artifacts + "/" + download.suggestedFilename())`. `path()`,
+  `createReadStream()` and `failure()` work too, also after the page closed; closing the page waits
+  for the copy. The browser keeps its own
+  copy in its download folder; the agent's copy is the same URL loaded again with the page's
+  cookies, so a download that answered a form's POST, or that the site serves only once, refuses
+  with an error that says so.
 - **Before a destructive action,** such as delete, send or pay, confirm the target with a snapshot
   or a labelled screenshot.
 
@@ -323,5 +326,5 @@ Use these only when locators cannot express the action.
 - **Secrets.** Page content, URLs and screenshots stay on this device. Do not paste them into
   places the owner did not ask for.
 - **Limits.** Outside the agent's reach: `chrome://` pages, the Chrome Web Store, other
-  extensions' pages, browser and OS dialogs, a download's file, browser-wide cookies, new browser
-  contexts and permission prompts.
+  extensions' pages, browser and OS dialogs, a file a form's POST downloaded, browser-wide cookies,
+  new browser contexts and permission prompts.

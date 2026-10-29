@@ -62,5 +62,6 @@ form or why it is left out.
 | Other extensions' frames removed before attach | Same, for the exact agent tab only. |
 | Reattach and setup replay after Chrome's own detach | Same, at most 5 in 5 seconds. |
 | Per-command deadlines, noisy network events dropped | Same. |
-| Download events | Same: `waitForEvent("download")` gives the URL and suggested name. Chrome refuses an extension's `Page.setDownloadBehavior`, so the file keeps the browser's own folder. |
+| Download events | Same: `waitForEvent("download")` gives the URL and suggested name. |
+| Download files | Better. Chrome refuses an extension's `Page.setDownloadBehavior` in both, so Playwriter's `saveAs()` finds no file. Here the executor loads the URL again through the tab (`Network.loadNetworkResource`, with the page's cookies and across sites), or reads a `blob:` URL in its page. That copy answers `saveAs()`, `path()`, `createReadStream()` and `failure()`, also after the page closed; closing the page waits for it. A form's POST is refused, never replaced by a GET. |
 | Screencast shared between clients | Not shared: one recording per tab. |
