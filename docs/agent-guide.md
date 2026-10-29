@@ -173,9 +173,10 @@ console.log(getLatestLogs({ page: state.page, sinceLastCall: true }));
     such frame snapshot.
   - Prefer it to screenshots.
 - **`getLatestLogs({ page, sinceLastCall?, search?, count? })`** returns the page's console
-  messages and errors since the session first saw the page. The first `sinceLastCall` call
-  returns everything so far. Logs survive navigation, so errors of the previous load stay visible.
-  **`clearAllLogs()`** forgets the logs of every page.
+  messages and errors since the session first saw the page, as an array of lines, empty when
+  there are none. A search keeps five lines around each match and marks gaps with `---`. The
+  first `sinceLastCall` call returns everything so far. Logs survive navigation, so errors of the
+  previous load stay visible. **`clearAllLogs()`** forgets the logs of every page.
 - **`waitForPageLoad({ page, timeout? })`** waits until the document and its own requests are
   done, ignoring analytics, ads and streams.
 - **`inspect({ locator, properties? })`** gives box, scroll, styles, visibility, input and aria
@@ -183,8 +184,10 @@ console.log(getLatestLogs({ page: state.page, sinceLastCall: true }));
 - **`getCleanHTML({ locator, search? })`** returns HTML without scripts and styles, one line per
   element.
 - **`getPageMarkdown({ page, search? })`** returns the main article as text.
-- **`screenshotWithAccessibilityLabels({ page })`** writes a screenshot with a ref label on every
-  interactive element. Use it for grids, maps and other visual layouts.
+- **`screenshotWithAccessibilityLabels({ page, locator?, interactiveOnly? })`** writes a
+  screenshot with a ref label on every interactive element. Use it for grids, maps and other
+  visual layouts. `locator` labels only that part of the page; `interactiveOnly: false` also
+  labels headings, images and other elements with a ref.
 - **`resizeImageForAgent({ input, maxDimension? })`** makes a smaller copy before you read an
   image. It needs ffmpeg.
 - **`getLocatorStringForElement(locator)`** returns a stable locator string for a script.
@@ -221,8 +224,11 @@ one exists.
   - `audio: true` adds the page's sound.
   - `aspectRatio: { width: 16, height: 9 }` fits the viewport while recording and restores it.
   - `.mp4`, `.mov`, `.mkv` or `.webm`. The file appears only when it is complete.
-- **`ghostCursor.show({ page, style })`** and **`ghostCursor.hide({ page })`** control the cursor
-  outside recordings.
+- **The ghost cursor** shows each of your mouse actions in agent tabs and fades after 5 s, so the
+  owner sees where you click; it never follows the owner's own mouse and stays out of
+  screenshots. **`ghostCursor.show({ page, style })`** (`minimal`, `dot` or `screenstudio`) makes
+  it follow every mouse movement, and **`ghostCursor.hide({ page })`** turns it off until the next
+  show.
 - **`createDemoVideo({ recordingPath, durationMs, executionTimestamps })`** speeds up the waits
   between executions. Keep its promise in `state` and await it in a later execution.
   Recording needs ffmpeg.
@@ -230,6 +236,8 @@ one exists.
   with Playwright's codegen engine: each action carries the locator and the code codegen would
   write. It needs the full observation profile.
   - **`recorder.stop()`** ends the recording.
+  - The owner can also start and stop it in the extension's popup, "Record what I do", in a tab
+    of your group. When the owner says they showed you something, read `recorder events`.
   - **`await recorder.events({ errors?, type?, ids?, exclude?, full? })`**, or
     `nds-browser-use -s <project> recorder events`, gives the timeline as JSON lines: the person's
     actions (`person-action`), live-region messages (`toast`) and what the pages did meanwhile.

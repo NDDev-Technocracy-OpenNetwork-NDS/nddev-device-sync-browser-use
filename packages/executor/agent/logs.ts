@@ -32,10 +32,14 @@ export function attach(page: Page, context: BrowserContext, keys: (page: Page) =
     const type = message.type();
     const previews = message.args().map(String);
     const text = previews.length > 0 ? consoleText(previews) : consoleText([message.text()]);
-    // Only errors and warnings say where they came from; that is where an agent looks next.
+    // Only errors and warnings say where they came from; that is where an agent looks next. A
+    // location in another extension is its console wrapper (React DevTools wraps every call), not
+    // the page's code, so it is left out.
     const { url, lineNumber } = message.location();
     const source =
-      (type === "error" || type === "warning") && url ? ` (${shortSource(url, lineNumber)})` : "";
+      (type === "error" || type === "warning") && /^(https?|file):/.test(url)
+        ? ` (${shortSource(url, lineNumber)})`
+        : "";
     push(`[${type}] ${text}${source}`);
   });
   page.on("pageerror", (error) => {
@@ -69,15 +73,36 @@ export type LogOptions = {
   sinceLastCall?: boolean | undefined;
 };
 
-export function getLatestLogs({ page, count, search, sinceLastCall }: LogOptions): string {
+/** Lines of context kept around each search match, as in Playwriter. */
+const CONTEXT = 5;
+
+/**
+ * The page's log lines, as Playwriter returns them: an array, empty when there is nothing, so
+ * `logs.length` and `logs.filter()` mean what they say. A search keeps five lines around each
+ * match and marks a gap with `---`.
+ */
+export function getLatestLogs({ page, count, search, sinceLastCall }: LogOptions): string[] {
   const log = logs.get(page);
-  if (!log) return "No logs for this page";
-  let lines = sinceLastCall ? log.entries.slice(log.read) : log.entries;
+  if (!log) return [];
+  let lines = sinceLastCall ? log.entries.slice(log.read) : [...log.entries];
   if (sinceLastCall) log.read = log.entries.length;
-  if (search !== undefined) lines = lines.filter(matches(search));
-  if (count !== undefined) lines = lines.slice(-count);
-  if (lines.length > 0) return lines.join("\n");
-  return sinceLastCall ? "No new logs since last call" : "No logs";
+  if (search !== undefined) {
+    const match = matches(search);
+    const kept = new Set<number>();
+    lines.forEach((line, index) => {
+      if (!match(line)) return;
+      for (let near = Math.max(0, index - CONTEXT); near <= index + CONTEXT; near++) kept.add(near);
+    });
+    const found: string[] = [];
+    let previous = -1;
+    for (const index of [...kept].filter((index) => index < lines.length).sort((a, b) => a - b)) {
+      if (previous >= 0 && index !== previous + 1) found.push("---");
+      found.push(lines[index] ?? "");
+      previous = index;
+    }
+    lines = found;
+  }
+  return count !== undefined ? lines.slice(-count) : lines;
 }
 
 /** Forgets the logs of every page the session sees, so later reads start empty. */

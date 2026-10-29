@@ -168,8 +168,9 @@ const sandbox = vm.createContext({
         ? pathToFileURL(resolve(artifacts, specifier)).href
         : specifier
     ),
-  screenshotWithAccessibilityLabels: (options: { page: Page }) =>
-    screenshotWithAccessibilityLabels(options, artifacts),
+  screenshotWithAccessibilityLabels: (
+    options: Parameters<typeof screenshotWithAccessibilityLabels>[0],
+  ) => screenshotWithAccessibilityLabels(options, artifacts),
   resizeImageForAgent,
   resizeImage: resizeImageForAgent,
   recording,
