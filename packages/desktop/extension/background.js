@@ -44,6 +44,11 @@ const SETUP_TIMEOUT_MS = 10_000;
 const SHOT_STYLE = "nds-screenshot-style";
 const SHOT_HIDE = `(() => { if (document.getElementById("${SHOT_STYLE}")) return; const style = document.createElement("style"); style.id = "${SHOT_STYLE}"; style.textContent = "#nds-ghost-cursor { display: none !important } html { scrollbar-width: none !important } ::-webkit-scrollbar { display: none !important } * { caret-color: transparent !important }"; (document.head ?? document.documentElement).append(style); })()`;
 const SHOT_SHOW = `document.getElementById("${SHOT_STYLE}")?.remove()`;
+// The ghost cursor shows each agent mouse action in an agent tab and fades after 5 s, as in
+// Playwriter. It moves only after the agent's own Input.dispatchMouseEvent, never with the owner's
+// mouse. A cursor the executor installed (ghostCursor.show) follows the mouse itself and is left
+// alone, and ghostCursor.hide turns this one off until the next show.
+const CURSOR = `((x, y, press) => { if (globalThis.__ndsCursorOff || !document.documentElement) return; let host = document.getElementById("nds-ghost-cursor"); if (host && !host.__ndsMove) return; if (!host) { host = document.createElement("div"); host.id = "nds-ghost-cursor"; host.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647"; const root = host.attachShadow({ mode: "closed" }); const dot = document.createElement("div"); dot.style.cssText = "position:fixed;left:0;top:0;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:rgba(0,0,0,.55);border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);opacity:0;transition:opacity .3s,transform .1s"; root.append(dot); document.documentElement.append(host); let idle; host.__ndsMove = (x, y, press) => { dot.style.left = x + "px"; dot.style.top = y + "px"; dot.style.opacity = "1"; if (press) { dot.style.transform = "scale(.7)"; setTimeout(() => { dot.style.transform = ""; }, 150); } clearTimeout(idle); idle = setTimeout(() => { dot.style.opacity = "0"; }, 5000); }; } host.__ndsMove(x, y, press); })`;
 class Refusal extends Error {
 }
 let port;
@@ -120,6 +125,8 @@ function connect() {
     next.onMessage.addListener((message) => {
         if (message.type === "reload")
             void reloadFor(message.version);
+        else if (message.type === "recorded")
+            recorded.get(message.request)?.(message);
         else
             void handle(message);
     });
@@ -441,6 +448,8 @@ async function dispatch(message) {
                 const params = restore.chromeParams(message.tab, message.method, message.params);
                 const result = (await command(target, message.method, params)) ?? {};
                 still();
+                if (message.method === "Input.dispatchMouseEvent")
+                    point(message.tab, message.params);
                 return restore.record(message.tab, message.method, message.params, result);
             }
             finally {
@@ -858,6 +867,16 @@ function liveIn(groupId) {
     const life = group === undefined ? undefined : lives.get(group);
     return life?.open ? life : undefined;
 }
+// Moves the ghost cursor to an agent mouse event's point; it never delays or fails the event.
+function point(tab, params) {
+    const { type, x, y } = (params ?? {});
+    if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x + y))
+        return;
+    const expression = `${CURSOR}(${x}, ${y}, ${type === "mousePressed"})`;
+    void chrome.debugger
+        .sendCommand({ tabId: tab }, "Runtime.evaluate", { expression })
+        .catch(() => undefined);
+}
 // A check in an agent tab that only a person passes, such as a CAPTCHA. One notification per tab
 // names the agent and the site and stays until the owner opens the tab from it, the agent clears
 // it, or the agent's hold on the tab ends: its session closed, the tab left the agent group, or
@@ -1204,6 +1223,32 @@ async function setEnabled(value) {
         connect();
     await badge();
 }
+// The owner's recorder button: the host runs `recorder.start()`, `stop()` or `status()` in the
+// session of the agent group that holds the owner's tab, as `recorder start` does for an agent,
+// so an agent later reads what the owner did. The popup names its tab only when it is opened as
+// a page of its own (tests); otherwise it is the active tab of the last focused window.
+const RECORD_REPLY_MS = 15_000;
+const recorded = new Map();
+let records = 0;
+async function record(action, tab) {
+    const id = tab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id ?? -1;
+    const held = usable(id);
+    if (!held)
+        return { error: "no_agent_tab" };
+    if (!port)
+        return { error: "extension_unavailable" };
+    const request = ++records;
+    return new Promise((done) => {
+        const timer = setTimeout(() => finish({ error: "timeout" }), RECORD_REPLY_MS);
+        function finish(answer) {
+            clearTimeout(timer);
+            recorded.delete(request);
+            done(answer);
+        }
+        recorded.set(request, finish);
+        send({ type: "record", request, group: held.life.group, action });
+    });
+}
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
     // Only this extension's own pages (the popup) may change the switch.
     if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("")))
@@ -1215,6 +1260,11 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     const profile = OBSERVATIONS.find((each) => each === message.profile);
     if (message.type === "observe" && profile) {
         void setObservation(profile).then(() => reply({ enabled, observation, connected: port !== undefined }));
+        return true;
+    }
+    if (message.type === "record" &&
+        (message.action === "start" || message.action === "stop" || message.action === "status")) {
+        void record(message.action, typeof message.tab === "number" ? message.tab : undefined).then(reply);
         return true;
     }
     if (message.type === "get")

@@ -72,9 +72,10 @@ for agents.
   - Refs such as `[ref=e5]` appear in screenshot labels and in the snapshot of a frame of another
     process. `ref({ page, ref })` or `refToLocator({ ref, page })` reaches that element through
     its frame, until the next view that shows refs.
-- `getLatestLogs({ page, sinceLastCall, search, count })` reads the page's console messages and
-  errors, kept from the moment the session first saw the page. With `sinceLastCall` it returns
-  only what is new, and `clearAllLogs()` forgets every page's logs.
+- `getLatestLogs({ page, sinceLastCall, search, count })` returns the page's console messages
+  and errors as an array of lines, as in Playwriter, kept from the moment the session first saw
+  the page. With `sinceLastCall` it returns only what is new, and `clearAllLogs()` forgets every
+  page's logs.
 - `waitForPageLoad({ page, timeout })` waits until the document is complete
   and its own requests have finished, ignoring analytics, ads, long polls and
   streams, and reports `{ success, readyState, pendingRequests, waitTimeMs }`.
@@ -84,9 +85,11 @@ for agents.
   styles and SVG, one indented line per element, and `getPageMarkdown({ page })`
   the main article as text through Mozilla Readability; both take `search` and
   diff like snapshots.
-- `screenshotWithAccessibilityLabels({ page })` writes a screenshot into
-  `artifacts` with a label on every visible interactive element, named by the
-  ref of the snapshot it returns, for layouts where position matters.
+- `screenshotWithAccessibilityLabels({ page, locator, interactiveOnly })` writes a
+  screenshot into `artifacts` with a label on every visible interactive element,
+  named by the ref of the snapshot it returns, for layouts where position matters;
+  `locator` limits the labels to one part, and `interactiveOnly: false` labels
+  every element with a ref.
   `resizeImageForAgent({ input, maxDimension })` makes a smaller copy through
   ffmpeg, which must be on PATH.
 - `getLocatorStringForElement(locator)` returns a stable locator string for a

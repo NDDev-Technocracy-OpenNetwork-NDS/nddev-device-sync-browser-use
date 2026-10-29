@@ -47,4 +47,54 @@ for (const button of profiles) {
   });
 }
 
+// The owner's recorder for the agent group of this tab: what the owner does there becomes a
+// timeline the agent reads with `recorder events`, for example to write a skill from it.
+type Recording = {
+  recording?: boolean;
+  id?: string;
+  events?: number;
+  error?: string;
+  message?: string;
+};
+const record = document.getElementById("record") as HTMLButtonElement | null;
+const recording = document.getElementById("recording");
+// A popup opened as a page of its own, as in tests, names the tab it acts for.
+const forTab = Number(new URLSearchParams(location.search).get("tab")) || undefined;
+const REFUSED: Record<string, string> = {
+  no_agent_tab: "Open a tab of an agent group to record what you do there.",
+  session_not_found: "This agent group has no open session.",
+  busy: "The agent is running code; try again in a moment.",
+  permission_required: "Agent control is disabled.",
+  extension_unavailable: "The NDS host is not connected.",
+  timeout: "The NDS host did not answer.",
+};
+
+function recorded(answer: Recording): void {
+  if (!record || !recording) return;
+  const active = answer.recording === true;
+  record.textContent = active ? "Stop recording" : "Record what I do";
+  record.dataset.recording = String(active);
+  record.disabled = answer.error === "no_agent_tab";
+  document.body.dataset.recording = answer.error ? "error" : String(active);
+  recording.textContent = answer.error
+    ? (REFUSED[answer.error] ?? answer.message ?? answer.error)
+    : active
+      ? `Recording your actions in this agent group${answer.events ? ` (${answer.events} so far)` : ""}.`
+      : answer.id
+        ? `Recorded ${answer.events ?? 0} actions; the agent reads them with \`recorder events\`.`
+        : "Your clicks, typing and navigations in this group become steps the agent can replay.";
+}
+
+async function ask(action: "start" | "stop" | "status"): Promise<void> {
+  recorded(
+    (await chrome.runtime.sendMessage({ type: "record", action, tab: forTab })) as Recording,
+  );
+}
+
+record?.addEventListener("click", () => {
+  record.disabled = true;
+  void ask(record.dataset.recording === "true" ? "stop" : "start");
+});
+
 void chrome.runtime.sendMessage({ type: "get" }).then((status) => show(status as Status));
+void ask("status");
