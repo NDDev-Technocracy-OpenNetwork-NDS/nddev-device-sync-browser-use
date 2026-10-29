@@ -14,6 +14,20 @@ pub struct Status {
     /// Version of the connected extension build.
     pub extension: String,
     pub sessions: usize,
+    /// The host's own build: its package version and the source commit it was built from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<Build>,
+    /// False when the connected extension speaks another contract than this host: nothing works
+    /// until one of them is updated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatible: Option<bool>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Build {
+    pub version: String,
+    pub commit: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

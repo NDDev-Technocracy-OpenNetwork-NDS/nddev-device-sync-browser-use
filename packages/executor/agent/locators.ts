@@ -50,8 +50,13 @@ export async function getLocatorStringForElement(locator: Locator): Promise<stri
  * each is `globalThis.ndsPinnedElemN` in the page and `[data-nds-pin="N"]` for a locator.
  */
 export async function pinnedElements({ page }: { page: Page }): Promise<string> {
-  const count = await page.evaluate(
-    () => (globalThis as { __ndsPins?: unknown[] }).__ndsPins?.length ?? 0,
+  const count = await page.evaluate(() =>
+    Math.max(
+      0,
+      ...[...document.querySelectorAll("[data-nds-pin]")].map(
+        (pin) => Number(pin.getAttribute("data-nds-pin")) || 0,
+      ),
+    ),
   );
   if (!count) return "No pinned elements";
   const lines: string[] = [];

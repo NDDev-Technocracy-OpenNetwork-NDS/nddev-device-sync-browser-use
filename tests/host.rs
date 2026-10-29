@@ -40,11 +40,28 @@ impl Fixture {
         self.root.path().join("runtime")
     }
 
+    /// This host's session areas: under the state directory, named by its runtime directory.
+    fn sessions(&self) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(self.runtime().as_os_str().as_encoded_bytes());
+        let key: String = digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let state = if cfg!(windows) {
+            self.root.path().to_owned()
+        } else {
+            self.root.path().join("state")
+        };
+        state.join("nds-browser-use").join("sessions").join(key)
+    }
+
     fn command(&self, arguments: &[&str]) -> Command {
         let mut command = Command::new(HOST);
         command
             .args(arguments)
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
+            .env("XDG_STATE_HOME", self.root.path().join("state"))
             .env("LOCALAPPDATA", self.root.path())
             .env("NDS_BROWSER_USE_RUNTIME_DIR", self.runtime())
             .stdin(Stdio::piped())
@@ -150,8 +167,9 @@ fn an_admitted_host_serves_owner_only_sockets_until_its_port_closes() {
     fixture.install();
     let runtime = fixture.runtime();
     // A host that died without its shutdown left a session area behind.
-    let leftover = runtime.join("sessions").join("acceptance");
+    let leftover = fixture.sessions().join("acceptance");
     std::fs::create_dir_all(&leftover).unwrap();
+    std::fs::create_dir_all(&runtime).unwrap();
     #[cfg(unix)]
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(leftover.join("form.png"), b"earlier screenshot").unwrap();

@@ -1,0 +1,68 @@
+name: chrome-channels
+
+# Failure feedback under STD-0004 R-0007, declared narrowly:
+# - purpose: learn of a Chrome change that breaks the extension, the relay or the executor before
+#   the owner's browser updates to it; main-ci keeps its pinned, hash-checked Chrome for Testing;
+# - owner: the browser-use module owner;
+# - selected inputs: main at the time of the run, and the newest Chrome for Testing of each of
+#   the Stable, Beta and Dev channels, unpinned by intent;
+# - budget: three Linux jobs once a day on free GitHub-hosted runners (a public repository), at
+#   most 25 minutes each; only the real-browser acceptance runs, not the rest of main-ci.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chrome-channels
+  cancel-in-progress: true
+
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [Stable, Beta, Dev]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: package.json
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
+        with:
+          just-version: '1.59.0'
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+      - name: Fetch the newest Chrome for Testing of the channel
+        shell: bash
+        env:
+          CHANNEL: ${{ matrix.channel }}
+        run: |
+          index="https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
+          curl --fail --location --max-time 60 "$index" --output "$RUNNER_TEMP/channels.json"
+          version="$(jq -r --arg c "$CHANNEL" '.channels[$c].version' "$RUNNER_TEMP/channels.json")"
+          url="$(jq -r --arg c "$CHANNEL" '.channels[$c].downloads.chrome[] | select(.platform == "linux64") | .url' "$RUNNER_TEMP/channels.json")"
+          case "$url" in https://storage.googleapis.com/chrome-for-testing-public/*) ;; *) echo "unexpected download URL" >&2; exit 1 ;; esac
+          echo "Chrome for Testing $CHANNEL $version"
+          curl --fail --location --max-time 300 "$url" --output "$RUNNER_TEMP/chrome.zip"
+          unzip -q "$RUNNER_TEMP/chrome.zip" -d "$RUNNER_TEMP/cft"
+          # Keep Chrome's sandbox: the bundled SUID helper replaces user namespaces that Ubuntu's
+          # AppArmor policy restricts.
+          sandbox="$RUNNER_TEMP/cft/chrome-linux64/chrome_sandbox"
+          sudo chown root:root "$sandbox"
+          sudo chmod 4755 "$sandbox"
+          echo "CHROME_DEVEL_SANDBOX=$sandbox" >> "$GITHUB_ENV"
+          echo "NDS_TEST_CHROME=$RUNNER_TEMP/cft/chrome-linux64/chrome" >> "$GITHUB_ENV"
+      - name: Real-browser acceptance in an isolated profile
+        env:
+          NDS_E2E_DIAGNOSTICS: "1"
+        run: just browser-check

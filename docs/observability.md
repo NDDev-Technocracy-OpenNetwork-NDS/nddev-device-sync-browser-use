@@ -48,6 +48,29 @@ not have yet, and an NDS pipeline that is deployed for the owner's devices. Both
 module. Until they exist, the journal is the agents' complete view and telemetry carries only
 metadata.
 
+## Private sites and what the owner sees
+
+The popup's **Private sites** lists sites, each with its subdomains, whose content the journal
+never keeps. "Keep <site> private" adds the site of the owner's tab, and × removes one. Agents
+still work there.
+
+A record of a private site keeps only:
+- its type and time;
+- its execution, page and tab;
+- its outcome: the action's name, an HTTP method and status, an execution's success.
+
+It is marked `"private": true` and has no URL, locator, value, text, code, output, headers or body.
+Console messages, toasts, dialogs and page errors of such a site are not kept at all.
+
+Two more cases count as private:
+- an execution while a private page is open, since its result may carry that page;
+- a record that names no page while a private page is open.
+
+A site made private applies at once, also to pages already open.
+
+The popup's **What the agent did here** shows the newest steps of the agent group of the owner's
+tab, newest first, as the journal holds them.
+
 ## What is collected, and what is not
 
 Secrets never reach the journal:

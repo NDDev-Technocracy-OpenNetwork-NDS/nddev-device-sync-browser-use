@@ -14,8 +14,7 @@
 // name leaves them alone. Audio of out-of-process frames, and a graph wired before the tap
 // started, are not captured.
 //
-// Adapted from Playwriter's playwriter/src/audio-tap-client.ts (MIT License, Copyright (c) 2026
-// Tommy D. Rossi, https://github.com/remorses/playwriter).
+// Adapted from MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md).
 
 export function startAudioTap(bindingName: string): void {
   type Tap = { subscribers: Set<string>; teardown: () => void };

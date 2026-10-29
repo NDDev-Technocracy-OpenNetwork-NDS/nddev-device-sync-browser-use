@@ -25,6 +25,23 @@ inside the tab groups that the owner grants them. Phones are described in [mobil
 - **Owner actions.** The owner hands a tab to an agent by moving it into the agent's group, and
   pins an element with the context menu.
 
+## Browsers
+
+`install --browser` registers the host for one browser's user profile root:
+
+| Name | Browser |
+|---|---|
+| `chrome`, `chrome-beta`, `chrome-dev`, `chrome-canary` | Google Chrome and its channels |
+| `chrome-for-testing`, `chromium` | Unbranded builds |
+| `edge`, `edge-beta`, `edge-dev` | Microsoft Edge and its channels |
+| `brave` | Brave |
+
+Other Chromium browsers can use `--host-dir <their NativeMessagingHosts folder>`, but two are
+known not to work:
+- **Vivaldi:** its stable version gives extensions no tab groups. The agent groups depend on
+  them.
+- **Opera:** it turns tab groups into its own tab islands.
+
 ## Install
 
 - `just install` puts the host's `bin/` and the unpacked `extension/` under one prefix, and
@@ -32,3 +49,12 @@ inside the tab groups that the owner grants them. Phones are described in [mobil
 - Loading the unpacked extension is the owner's action. After that, an install reloads it through
   the host.
 - The Chrome Web Store build is the same extension without the pinned `key`.
+
+## Versions
+
+- `nds-browser-use status` names the host's build (`host.version` and the source commit
+  `host.commit`) beside the connected extension's version.
+- The host and the extension speak one contract. When they do not match, for example a store
+  extension older than the host, the host refuses it, `status` reports `compatible: false`, and
+  the extension shows `!` on its icon and explains in its popup which side to update.
+

@@ -1,7 +1,6 @@
 // The snapshot tree rules: scope pruning, interactive filtering, locators and redundant text.
 //
-// Adapted from Playwriter's playwriter/src/aria-snapshot.unit.test.ts (MIT License, Copyright (c)
-// 2026 Tommy D. Rossi, https://github.com/remorses/playwriter).
+// Adapted from MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md).
 import { describe, expect, it } from "bun:test";
 import {
   buildRawSnapshotTree,

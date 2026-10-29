@@ -24,6 +24,22 @@ pub fn choose_phone(serial: &str) -> Result<(), IoError> {
         .map_err(|_| IoError::InvalidConfiguration)
 }
 
+/// The root of this host's session areas: on disk under the user's state directory, not in the
+/// runtime directory, which is a small memory-backed file system on Linux, so a large download,
+/// recording or recorder capture neither fails nor holds memory. Each host (the desktop's, each
+/// phone's, a test's own runtime directory) has its own root, named by its runtime directory,
+/// because a starting host removes the areas a dead host left in its root.
+pub(crate) fn sessions_directory() -> Result<PathBuf, IoError> {
+    use sha2::{Digest, Sha256};
+    let runtime = directory()?;
+    let digest = Sha256::digest(runtime.as_os_str().as_encoded_bytes());
+    let key: String = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(crate::install::state_dir()?.join("sessions").join(key))
+}
+
 pub(crate) fn directory() -> Result<PathBuf, IoError> {
     let path = match std::env::var_os("NDS_BROWSER_USE_RUNTIME_DIR") {
         Some(path) => PathBuf::from(path),
@@ -105,6 +121,20 @@ fn socket(directory: &Path, name: &str) -> Result<PathBuf, IoError> {
         return Err(IoError::InvalidConfiguration);
     }
     Ok(path)
+}
+
+/// Creates a private directory together with the missing directories above it, each of those only
+/// the user can enter, then verifies it as [`private_directory`] does.
+pub(crate) fn private_tree(path: &Path) -> Result<(), IoError> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .map_err(|_| IoError::Unavailable)?;
+    }
+    private_directory(path)
 }
 
 /// Creates or verifies a directory that only the current user can enter.
