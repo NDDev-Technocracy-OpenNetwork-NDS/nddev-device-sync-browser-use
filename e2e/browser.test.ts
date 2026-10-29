@@ -170,6 +170,33 @@ beforeAll(async () => {
     port: 0,
     fetch(request) {
       requests += 1;
+      const path = new URL(request.url).pathname;
+      // Downloads: a file only the page's cookie opens, one behind a redirect to another site, and
+      // one a form's POST answers.
+      const attachment = (body: BodyInit, name: string) =>
+        new Response(body, {
+          headers: {
+            "content-type": "application/octet-stream",
+            "content-disposition": `attachment; filename="${name}"`,
+          },
+        });
+      if (path === "/files/bytes") {
+        return request.headers.get("cookie")?.includes("nds-e2e=1")
+          ? attachment(
+              Uint8Array.from({ length: 1024 }, (_, index) => index % 256),
+              "bytes.bin",
+            )
+          : new Response("no cookie", { status: 403 });
+      }
+      if (path === "/files/moved") {
+        return Response.redirect(`http://localhost:${fixture?.port}/files/plain`, 302);
+      }
+      if (path === "/files/plain") return attachment("moved body", "moved.txt");
+      if (path === "/files/post") {
+        return request.method === "POST"
+          ? attachment("posted body", "posted.txt")
+          : new Response("post only", { status: 405 });
+      }
       const page: Record<string, string> = {
         "/": `<title>Fixture</title><button id="inc" onclick="c.textContent = Number(c.textContent) + 1">Increment</button><span id="c">0</span><button id="open" onclick="window.open('/target')">Open</button><a id="link" href="/linked" target="_blank">Linked</a>`,
         "/linked": "<title>Linked</title><p>linked</p>",
@@ -181,8 +208,8 @@ beforeAll(async () => {
         "/form": `<input id="text" oninput="echo.textContent = this.value"><span id="echo"></span><input id="file" type="file" onchange="picked.textContent = this.files[0].name + ':' + this.files[0].size"><span id="picked"></span>`,
         "/fetch": `<button id="load" onclick="fetch('/api').then((r) => r.text()).then((t) => (out.textContent = t))">Load</button><span id="out"></span>`,
         "/api": "live",
-        "/download": `<title>Download</title><a id="get" href="/report-data" download="report.txt">Get</a>`,
-        "/report-data": "report body",
+        // The page revokes its blob URL later, as FileSaver does.
+        "/files": `<title>Files</title><a id="bytes" href="/files/bytes">Bytes</a><a id="moved" href="/files/moved">Moved</a><form method="post" action="/files/post"><button id="post">Post</button></form><button id="blob" onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['blob body'])); a.download = 'made.txt'; a.click(); setTimeout(() => window.URL.revokeObjectURL(a.href), 40000)">Blob</button>`,
         // A different site (localhost vs 127.0.0.1) renders out of process.
         "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
         "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
@@ -210,7 +237,7 @@ beforeAll(async () => {
         // WebAuthn needs a domain RP ID; localhost is a secure context.
         "/passkey": `<button id="register" onclick="navigator.credentials.create({ publicKey: { rp: { name: 'NDS', id: 'localhost' }, user: { id: new Uint8Array(16), name: 'agent', displayName: 'Agent' }, challenge: new Uint8Array(32), pubKeyCredParams: [{ type: 'public-key', alg: -7 }], authenticatorSelection: { residentKey: 'required', userVerification: 'required' } } }).then(() => (outcome.textContent = 'registered'), (e) => (outcome.textContent = e.name))">Register</button><button id="signin" onclick="navigator.credentials.get({ publicKey: { rpId: 'localhost', challenge: new Uint8Array(32), userVerification: 'required' } }).then(() => (outcome.textContent = 'signed-in'), (e) => (outcome.textContent = e.name))">Sign in</button><span id="outcome"></span>`,
       };
-      const body = page[new URL(request.url).pathname];
+      const body = page[path];
       return body === undefined
         ? new Response("missing", { status: 404 })
         : new Response(body, { headers: { "content-type": "text/html" } });
@@ -1245,24 +1272,61 @@ async function plain(...args: string[]): Promise<{ code: number; stdout: string;
 }
 
 // A download of an agent tab reaches Playwright as its event, with the URL and the name the site
-// suggests; the file keeps the browser's own folder, so the agent fetches the URL in the page,
-// with the page's cookies, and keeps the bytes in its artifacts.
-test("an agent tab's download reaches the agent's code", async () => {
+// suggests, and the agent's copy of its file answers saveAs(), path(), createReadStream() and
+// failure(): with the page's cookies, across a redirect to another site, for a blob and after the
+// page closed, which waits for the copies still loading. A form's POST cannot be sent again, so
+// its file is refused, not replaced by a GET.
+test("an agent tab's download is the agent's file", async () => {
   const result = await run(
     "acceptance",
-    `const page = await context.newPage(); await page.goto("${origin}/download");
-     const [download] = await Promise.all([page.waitForEvent("download"), page.click("#get")]);
-     const text = await page.evaluate(async (url) => (await fetch(url)).text(), download.url());
-     require("node:fs").writeFileSync(\`\${artifacts}/report.txt\`, text); await page.close();
-     return JSON.stringify({ name: download.suggestedFilename(), url: download.url(), text })`,
+    `const fs = require("node:fs");
+     const page = await context.newPage(); await page.goto("${origin}/files");
+     await page.evaluate(() => { document.cookie = "nds-e2e=1; path=/"; });
+     const get = async (selector) => (await Promise.all([page.waitForEvent("download"), page.click(selector)]))[0];
+     const bytes = await get("#bytes"), moved = await get("#moved"), made = await get("#blob");
+     await Promise.all([bytes, moved, made].map((download) => download.path()));
+     await page.close();
+     await bytes.saveAs(\`\${artifacts}/bytes.bin\`);
+     const saved = fs.readFileSync(\`\${artifacts}/bytes.bin\`);
+     const chunks = []; for await (const chunk of await moved.createReadStream()) chunks.push(chunk);
+     return JSON.stringify({
+       name: bytes.suggestedFilename(),
+       bytes: saved.length === 1024 && saved.every((byte, index) => byte === index % 256),
+       path: (await bytes.path()).endsWith("/bytes.bin") && fs.readFileSync(await bytes.path()).equals(saved),
+       failure: await bytes.failure(),
+       moved: Buffer.concat(chunks).toString(),
+       made: fs.readFileSync(await made.path(), "utf8"),
+     })`,
     "--timeout",
     "20000",
   );
+  expect(result.body).toMatchObject({ failure: null });
   expect(JSON.parse(String(result.body.value))).toEqual({
-    name: "report.txt",
-    url: `${origin}/report-data`,
-    text: "report body",
+    name: "bytes.bin",
+    bytes: true,
+    path: true,
+    failure: null,
+    moved: "moved body",
+    made: "blob body",
   });
+  const posted = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/files");
+     const get = async (selector) => (await Promise.all([page.waitForEvent("download"), page.click(selector)]))[0];
+     const posted = await get("#post"), bytes = await get("#bytes");
+     await page.close();
+     await bytes.saveAs(\`\${artifacts}/closed.bin\`);
+     return JSON.stringify({
+       closed: require("node:fs").statSync(\`\${artifacts}/closed.bin\`).size,
+       posted: await posted.saveAs(\`\${artifacts}/posted.txt\`).then(() => "saved", (error) => error.message),
+     })`,
+    "--timeout",
+    "20000",
+  );
+  expect(posted.body).toMatchObject({ failure: null });
+  const after = JSON.parse(String(posted.body.value));
+  expect(after.closed).toBe(1024);
+  expect(after.posted).toContain("answered a form's POST");
 });
 
 // Another device's browser is driven through that device's own CLI: here a device whose transport
