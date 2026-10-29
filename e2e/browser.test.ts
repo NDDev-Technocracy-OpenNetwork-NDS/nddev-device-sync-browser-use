@@ -422,6 +422,25 @@ test("agent code acts in its own tab and the browser shows the result", async ()
   expect(await page?.locator("#c").textContent()).toBe("1");
 });
 
+// Chrome draws a tab nobody looks at about once a second, and a click waits for two frames; the
+// extension keeps an agent tab drawn while the agent works in it, so actions answer at once.
+test("actions in a background agent tab answer at once", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.setContent('<button id="b">B</button><input id="i">');
+     const time = async (f) => { const t = Date.now(); await f(); return Date.now() - t; };
+     await page.click("#b"); await page.waitForTimeout(1500);
+     const clicks = []; for (let i = 0; i < 5; i++) clicks.push(await time(() => page.click("#b")));
+     const fills = []; for (let i = 0; i < 5; i++) fills.push(await time(() => page.fill("#i", "x" + i)));
+     await page.close(); return JSON.stringify({ clicks, fills })`,
+    "--timeout",
+    "25000",
+  );
+  const times = JSON.parse(String(result.body.value)) as { clicks: number[]; fills: number[] };
+  expect(Math.max(...times.clicks)).toBeLessThan(600);
+  expect(Math.max(...times.fills)).toBeLessThan(600);
+});
+
 test("owner tabs stay outside the agent session", async () => {
   const owner = await observer.newPage();
   await owner.goto(`${origin}/owner`);
@@ -839,6 +858,7 @@ async function recorded(): Promise<void> {
      await page.mouse.move(120, 80); await page.click("#inc"); await page.waitForTimeout(1200);
      return recording.isRecording({ page })`,
   );
+  if (started.body.value !== "true") console.error("RECORDING", JSON.stringify(started.body));
   expect(started.body.value).toBe("true");
   expect(await (await observed("/?recording"))?.locator("#nds-ghost-cursor").count()).toBe(1);
   const stopped = await run(

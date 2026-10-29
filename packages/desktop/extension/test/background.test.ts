@@ -859,6 +859,40 @@ test("a command or close of another group never acts on the tab", async () => {
   ).toMatchObject({ result: {} });
 });
 
+// A tab the owner is not looking at is drawn about once a second; while the agent works in it the
+// worker keeps it drawn with a screencast of its own, whose frames never reach the agent, and
+// yields to the agent's own screencast.
+test("an agent tab stays drawn while the agent works in it", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  const cdp = (method: string) => send({ type: "cdp", group: "p", tab: 1, method, params: {} })();
+  const casts = () => browser.commands.filter((command) => command.includes("Screencast 1"));
+  await cdp("Runtime.evaluate");
+  await cdp("Input.dispatchMouseEvent");
+  expect(casts()).toEqual(["Page.startScreencast 1"]);
+  // Its frame is answered and dropped.
+  const before = browser.posted.length;
+  browser.events.cdp.fire({ tabId: 1 }, "Page.screencastFrame", { sessionId: 4, data: "" });
+  await Bun.sleep(10);
+  expect(browser.commands).toContain("Page.screencastFrameAck 1");
+  expect(
+    browser.posted.slice(before).some((message) => message.method === "Page.screencastFrame"),
+  ).toBe(false);
+  // The agent's own screencast replaces it, and its frames reach the agent.
+  await cdp("Page.startScreencast");
+  browser.events.cdp.fire({ tabId: 1 }, "Page.screencastFrame", { sessionId: 5, data: "" });
+  await until(() => browser.posted.find((message) => message.method === "Page.screencastFrame"));
+  await cdp("Page.stopScreencast");
+  await cdp("Runtime.evaluate");
+  expect(casts()).toEqual([
+    "Page.startScreencast 1",
+    "Page.stopScreencast 1",
+    "Page.startScreencast 1",
+    "Page.stopScreencast 1",
+    "Page.startScreencast 1",
+  ]);
+});
+
 // A host of another contract says so; the badge and the popup tell the owner why nothing works.
 test("a host of another contract is shown to the owner", async () => {
   const { browser } = await worker({ p: P }, [[1, P]]);
