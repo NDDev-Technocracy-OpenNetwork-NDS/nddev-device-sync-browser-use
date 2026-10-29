@@ -868,6 +868,31 @@ test("an agent tab's download goes to the host, and the browser copy only once t
   expect(browser.removed).toEqual(["file 5", "entry 5"]);
 });
 
+// A small file can be complete before the agent tab's CDP event reaches the worker, on a loaded
+// machine: the download is still the agent's, and it goes to the host once the event arrives.
+test("a download that finished before its agent tab announced it still goes to the host", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  browser.download(9, "https://example.test/small.bin");
+  browser.finish(9, "/home/owner/Downloads/small (1).bin");
+  await Bun.sleep(10);
+  expect(browser.posted.find((posted) => posted.type === "download")).toBeUndefined();
+  browser.events.cdp.fire({ tabId: 1 }, "Page.downloadWillBegin", {
+    guid: "g9",
+    url: "https://example.test/small.bin",
+    frameId: "t1",
+    suggestedFilename: "small.bin",
+  });
+  const reported = await until(() => browser.posted.find((posted) => posted.type === "download"));
+  expect(reported).toMatchObject({
+    group: "p",
+    id: 9,
+    name: "small.bin",
+    state: "complete",
+    path: "/home/owner/Downloads/small (1).bin",
+  });
+});
+
 // A tab an agent tab opened closes once its download starts, before any debugger reaches it; its
 // download is reported on the opener, and its own events never reach the host.
 test("a download from a tab an agent tab opened is reported on the opener", async () => {
