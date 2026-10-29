@@ -119,6 +119,8 @@ struct State {
     downloads: bool,
     /// The owner's observation profile (see [`observation`]).
     observation: observation::Observation,
+    /// The owner's private sites, of which the journal keeps no content (`observation::sites`).
+    private_sites: Vec<String>,
     /// Child CDP sessions (frames, workers) and the agent tab that owns them.
     children: HashMap<String, i64>,
 }
@@ -695,6 +697,7 @@ impl Host {
                 state.enabled = message["enabled"].as_bool() == Some(true);
                 state.contract = message["contract"].as_u64();
                 state.downloads = message["downloads"].as_bool() == Some(true);
+                state.private_sites = observation::sites(&message["private"]);
                 let profile = observation::Observation::parse(&message["observation"]);
                 state.user_agent = bounded(message["userAgent"].as_str().unwrap_or_default(), 512);
                 state.extension = bounded(message["version"].as_str().unwrap_or_default(), 32);
@@ -719,6 +722,11 @@ impl Host {
                 drop(state);
                 self.observe(profile);
                 self.update();
+            }
+            Some("private") => self.state().private_sites = observation::sites(&message["sites"]),
+            Some("journal") => {
+                let host = self.clone();
+                tokio::spawn(async move { host.recent(&message).await });
             }
             Some("observation") => {
                 self.observe(observation::Observation::parse(&message["profile"]))
@@ -2027,6 +2035,25 @@ mod owned_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_sites_are_lowercase_host_names() {
+        let long = "a".repeat(300);
+        assert_eq!(
+            observation::sites(&json!([
+                "Mail.Example.com",
+                "example.com",
+                "example.com",
+                "bad host",
+                ".x",
+                "x.",
+                long,
+                7
+            ])),
+            ["example.com", "mail.example.com"]
+        );
+        assert!(observation::sites(&json!(null)).is_empty());
+    }
 
     #[test]
     fn browsers_are_named_from_their_user_agents() {

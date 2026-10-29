@@ -1865,6 +1865,59 @@ test("the activity journal keeps what agents did and the popup's off stops it", 
   expect((await cli("status")).body.observation).toBe("full");
 });
 
+// The owner keeps a site private in the popup: agents still work there, the journal keeps that
+// they did, never what, and the popup shows the agent's newest steps.
+test("a private site keeps its content out of the journal, and the popup shows the steps", async () => {
+  const site = `http://localhost:${fixture.port}/journal`;
+  const opened = await run(
+    "acceptance",
+    `state.private = await context.newPage(); await state.private.goto("${site}"); return "ok"`,
+  );
+  expect(opened.body.value).toBe("ok");
+  const popup = await observer.newPage();
+  await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+  const tab = await popup.evaluate(async (url) => {
+    const tabs = (globalThis as unknown as { chrome: ChromeTabs }).chrome.tabs;
+    return (await tabs.query({})).find((each) => each.url === url)?.id;
+  }, site);
+  await popup.goto(`chrome-extension://${extensionId}/popup.html?tab=${tab}`);
+  await popup.locator("#private-add:not([disabled])").click();
+  await popup.waitForFunction(() =>
+    document.getElementById("private")?.textContent?.includes("localhost"),
+  );
+  const result = await run(
+    "acceptance",
+    `await state.private.fill("#email", "private-note@test");
+     await state.private.evaluate(() => fetch("/api/journal?id=8").then((r) => r.json()));
+     await state.private.waitForTimeout(1500); return "done"`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body.value).toBe("done");
+  await Bun.sleep(1500);
+  const listed = await plain("-s", "acceptance", "activity", "--last", "20", "--full");
+  expect(listed.stdout).not.toContain("private-note");
+  expect(listed.stdout).not.toContain("tok-should-not-stay");
+  const records = listed.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const fill = records.findLast((record) => record.type === "action" && record.api === "fill");
+  // The action names its page, so the journal knows its site without guessing.
+  expect(fill).toMatchObject({ private: true, page: expect.any(Number) });
+  expect(fill?.value).toBeUndefined();
+  expect(fill?.locator).toBeUndefined();
+  // The popup lists the group's newest steps, the private ones marked.
+  await popup.reload();
+  await popup.waitForFunction(() => Number(document.body.dataset.recent) > 0);
+  expect(await popup.locator("#recent").textContent()).toContain("action (private)  fill");
+  // The owner keeps the site's content again.
+  await popup.locator("#private li button").click();
+  await popup.waitForFunction(() => document.getElementById("private")?.children.length === 0);
+  await popup.close();
+  await run("acceptance", "await state.private.close(); delete state.private");
+});
+
 // Another device's browser is driven through that device's own CLI: here a device whose transport
 // runs this CLI again, so the whole path is exercised without a second machine.
 test("a device's CLI runs a session's code there and hands its artifacts back", async () => {

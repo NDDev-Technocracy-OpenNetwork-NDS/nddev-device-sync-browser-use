@@ -41,7 +41,16 @@ pub struct Writer {
     held: Option<Held>,
     /// Values typed into fields that are no secret: aria snapshots may show them.
     typed: std::collections::HashSet<String>,
+    /// The owner's private sites (hosts, with their subdomains): of them the journal keeps that
+    /// something happened, never what.
+    private: Vec<String>,
+    /// The host each page of the session shows now, checked against the private sites when a
+    /// record comes, so a site made private later counts at once.
+    page_hosts: std::collections::HashMap<u64, String>,
 }
+
+/// Pages whose site the journal remembers at once.
+const PAGES_LIMIT: usize = 1024;
 
 /// How many typed values a journal remembers for its snapshots.
 const TYPED_LIMIT: usize = 256;
@@ -86,6 +95,42 @@ fn url(value: &Value) -> Option<Value> {
     value.as_str().map(|url| clean::url(url).into())
 }
 
+/// What the journal keeps of a private site's record: that it happened, when, in which execution,
+/// page and tab, and its outcome; never a URL, text, value, locator, code, output or body. Console
+/// messages, toasts, dialogs and page errors of such a site are not kept at all.
+fn bare(raw: &Value) -> Option<Map<String, Value>> {
+    let kind = raw["type"].as_str()?;
+    if matches!(
+        kind,
+        "console" | "toast" | "dialog" | "page-error" | "person-signal"
+    ) {
+        return None;
+    }
+    let mut record = Map::new();
+    record.insert("type".into(), kind.into());
+    if let Some(at) = raw["at"]
+        .as_str()
+        .filter(|at| at.len() <= 32 && at.bytes().all(|byte| b"0123456789TZ:.-".contains(&byte)))
+    {
+        record.insert("at".into(), at.into());
+    }
+    for field in ["exec", "page", "tab", "id", "ms", "status"] {
+        if let Some(number) = raw[field].as_u64() {
+            record.insert(field.into(), number.into());
+        }
+    }
+    if let Some(ok) = raw["ok"].as_bool() {
+        record.insert("ok".into(), ok.into());
+    }
+    for field in ["api", "method", "resource", "event", "action", "recording"] {
+        if let Some(value) = class(&raw[field], 64) {
+            record.insert(field.into(), value);
+        }
+    }
+    record.insert("private".into(), true.into());
+    Some(record)
+}
+
 impl Writer {
     pub fn new(directory: &Path, name: &str) -> Self {
         Self {
@@ -97,6 +142,61 @@ impl Writer {
             full: false,
             held: None,
             typed: std::collections::HashSet::new(),
+            private: Vec::new(),
+            page_hosts: std::collections::HashMap::new(),
+        }
+    }
+
+    /// The owner's private sites, as the extension's popup keeps them.
+    pub fn set_private(&mut self, sites: &[String]) {
+        if self.private != sites {
+            self.private = sites.to_vec();
+        }
+    }
+
+    fn private_url(&self, url: &str) -> bool {
+        self.private_host(&clean::host(url).to_ascii_lowercase())
+    }
+
+    fn private_host(&self, host: &str) -> bool {
+        !host.is_empty()
+            && self.private.iter().any(|site| {
+                host == *site
+                    || host
+                        .strip_suffix(site.as_str())
+                        .is_some_and(|rest| rest.ends_with('.'))
+            })
+    }
+
+    /// Follows which page shows which site, and tells whether a record is of a private one. An
+    /// execution, and a record that names no page, count as private while any page shows a
+    /// private site, since they may carry that page's content.
+    fn private(&mut self, raw: &Value) -> bool {
+        let kind = raw["type"].as_str().unwrap_or_default();
+        let page = raw["page"].as_u64();
+        if let (Some(page), "page" | "navigation") = (page, kind) {
+            if raw["event"].as_str() == Some("closed") {
+                self.page_hosts.remove(&page);
+            } else if let Some(url) = raw["url"].as_str()
+                && (self.page_hosts.len() < PAGES_LIMIT || self.page_hosts.contains_key(&page))
+            {
+                self.page_hosts
+                    .insert(page, clean::host(url).to_ascii_lowercase());
+            }
+        }
+        if self.private.is_empty() {
+            return false;
+        }
+        let any_private = || self.page_hosts.values().any(|host| self.private_host(host));
+        if raw["url"].as_str().is_some_and(|url| self.private_url(url)) {
+            return true;
+        }
+        match (kind, page) {
+            ("execution", _) | (_, None) => any_private(),
+            (_, Some(page)) => self
+                .page_hosts
+                .get(&page)
+                .is_some_and(|host| self.private_host(host)),
         }
     }
 
@@ -109,6 +209,15 @@ impl Writer {
 
     /// Writes one raw record of the executor or the host, if the journal keeps it.
     pub fn ingest(&mut self, raw: &Value, now: Instant) {
+        if self.private(raw) {
+            if let Some(mut record) = bare(raw) {
+                self.flush();
+                self.sequence += 1;
+                record.insert("seq".into(), self.sequence.into());
+                self.append(record);
+            }
+            return;
+        }
         let Some((mut record, fold)) = self.project(raw) else {
             return;
         };
@@ -573,6 +682,53 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn a_private_site_keeps_only_that_something_happened() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut writer = Writer::new(directory.path(), "j.jsonl");
+        let now = Instant::now();
+        // The pages open before the owner makes the site private.
+        writer.ingest(&json!({ "type": "page", "page": 1, "event": "opened", "url": "https://mail.example.com/inbox" }), now);
+        writer.ingest(
+            &json!({ "type": "page", "page": 2, "event": "opened", "url": "https://shop.test/" }),
+            now,
+        );
+        writer.set_private(&["example.com".to_owned()]);
+        let records = [
+            // An action Playwright reports without its page.
+            json!({ "type": "action", "exec": 1, "api": "fill", "locator": "#reply", "value": "a private letter", "ms": 3 }),
+            json!({ "type": "network", "exec": 1, "method": "GET", "status": 200, "resource": "fetch", "url": "https://api.example.com/messages?id=7" }),
+            json!({ "type": "console", "page": 1, "level": "error", "text": "private error" }),
+            json!({ "type": "execution", "exec": 1, "id": 1, "ok": true, "code": "return letter", "output": "a private letter" }),
+            json!({ "type": "action", "exec": 2, "page": 2, "api": "fill", "locator": "#q", "value": "shoes" }),
+            json!({ "type": "page", "page": 1, "event": "closed" }),
+            json!({ "type": "execution", "exec": 3, "id": 3, "ok": true, "code": "return 1", "output": "1" }),
+        ];
+        for record in &records {
+            writer.ingest(record, now);
+        }
+        writer.flush();
+        let kept = lines(directory.path());
+        let text = std::fs::read_to_string(directory.path().join("j.jsonl")).unwrap();
+        assert!(!text.contains("private letter"));
+        assert!(!text.contains("api.example.com") && !text.contains("private error"));
+        // The page record written before the site became private keeps its URL; nothing after.
+        assert_eq!(kept[1]["url"], "https://shop.test/");
+        assert_eq!(
+            kept[2],
+            json!({ "type": "action", "exec": 1, "api": "fill", "ms": 3, "private": true, "seq": 3 })
+        );
+        assert_eq!(
+            (kept[3]["private"].clone(), kept[3]["status"].clone()),
+            (json!(true), json!(200))
+        );
+        // The execution while a private page was open keeps no code or output; the later one does.
+        assert_eq!(kept[4]["type"], "execution");
+        assert!(kept[4].get("output").is_none() && kept[4].get("code").is_none());
+        assert_eq!(kept[5]["value"], "shoes");
+        assert_eq!(kept[7]["output"], "1");
     }
 
     #[test]

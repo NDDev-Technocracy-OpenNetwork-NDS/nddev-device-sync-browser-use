@@ -11,7 +11,11 @@
       .profiles { display: flex; gap: 4px; }
       .profiles button { margin-top: 6px; }
       .profiles button[aria-pressed="true"] { font-weight: 600; outline: 2px solid currentColor; }
-      #observation, #recording { color: GrayText; margin: 6px 0 0; }
+      #observation, #recording, #recent-note, .note { color: GrayText; margin: 6px 0 0; }
+      #recent { margin: 6px 0 0; padding-left: 0; list-style: none; font: 12px ui-monospace, monospace; }
+      #recent li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px; }
+      #private { margin: 6px 0 0; padding-left: 0; list-style: none; }
+      #private button { width: auto; margin: 0 0 0 6px; padding: 0 6px; }
     </style>
   </head>
   <body>
@@ -31,6 +35,17 @@
       <legend>Show the agent how</legend>
       <button id="record" type="button" disabled>Record what I do</button>
       <p id="recording"></p>
+    </fieldset>
+    <fieldset id="activity">
+      <legend>What the agent did here</legend>
+      <ol id="recent"></ol>
+      <p id="recent-note"></p>
+    </fieldset>
+    <fieldset>
+      <legend>Private sites</legend>
+      <p class="note">Agents still work there, but their activity journal keeps no content of them.</p>
+      <button id="private-add" type="button" disabled>Keep this site private</button>
+      <ul id="private"></ul>
     </fieldset>
     <p><a href="https://nddev.ai" target="_blank" rel="noreferrer">NDDev OpenNetwork</a></p>
     <script type="module" src="popup.js"></script>

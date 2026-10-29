@@ -9,6 +9,9 @@ const ENABLED = "enabled";
 const OBSERVATION = "observation";
 const OBSERVATIONS = ["full", "standard", "off"];
 const GROUPS = "groups";
+// The owner's private sites: agents still work there, but the journal keeps no content of them.
+const PRIVATE = "private";
+const PRIVATE_LIMIT = 256;
 const RELOADED_FOR = "reloadedFor";
 const OWNER = "owner:";
 const PIN = "nds-pin";
@@ -53,6 +56,7 @@ class Refusal extends Error {
 let port;
 let enabled = true;
 let observation = "full";
+let privateSites = [];
 let retry = 1000;
 // Group key -> Chrome group id. Persisted for worker restarts in this browser session.
 let groups = new Map();
@@ -92,8 +96,11 @@ async function command(target, method, params) {
     }
 }
 async function load() {
-    const local = await chrome.storage.local.get([ENABLED, OBSERVATION]);
+    const local = await chrome.storage.local.get([ENABLED, OBSERVATION, PRIVATE]);
     enabled = local[ENABLED] !== false;
+    privateSites = Array.isArray(local[PRIVATE])
+        ? local[PRIVATE].filter((site) => typeof site === "string")
+        : [];
     observation = OBSERVATIONS.find((profile) => profile === local[OBSERVATION]) ?? "full";
     const session = await chrome.storage.session.get(GROUPS);
     groups = new Map(Object.entries((session[GROUPS] ?? {})));
@@ -130,6 +137,8 @@ function connect() {
             void reloadFor(message.version);
         else if (message.type === "recorded")
             recorded.get(message.request)?.(message);
+        else if (message.type === "journaled")
+            journaled.get(message.request)?.(message.lines);
         else if (message.type === "incompatible") {
             // The host speaks another contract: nothing an agent asks can work until one is updated.
             hostContract = message.contract;
@@ -157,6 +166,7 @@ function connect() {
         // The host takes agent downloads' files from this worker (see `downloads` below).
         downloads: chrome.downloads !== undefined,
         observation,
+        private: privateSites,
     });
     void badge();
 }
@@ -1269,17 +1279,94 @@ async function record(action, tab) {
         send({ type: "record", request, group: held.life.group, action });
     });
 }
+// The popup's view of the owner's tab: the agent group it belongs to, the newest steps the
+// journal holds of that group, and the site the owner may keep private.
+const journaled = new Map();
+let journals = 0;
+async function tabOf(tab) {
+    if (tab !== undefined)
+        return chrome.tabs.get(tab).catch(() => undefined);
+    return (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+}
+function siteOf(url) {
+    try {
+        const parsed = new URL(url ?? "");
+        return parsed.protocol === "http:" || parsed.protocol === "https:"
+            ? parsed.hostname.toLowerCase()
+            : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+async function recent(tab) {
+    const id = (await tabOf(tab))?.id ?? -1;
+    const held = usable(id);
+    if (!held)
+        return { error: "no_agent_tab" };
+    if (!port)
+        return { error: "extension_unavailable" };
+    const request = ++journals;
+    return new Promise((done) => {
+        const timer = setTimeout(() => finish(undefined), RECORD_REPLY_MS);
+        function finish(lines) {
+            clearTimeout(timer);
+            journaled.delete(request);
+            done(lines ? { lines } : { error: "timeout" });
+        }
+        journaled.set(request, finish);
+        send({ type: "journal", request, group: held.life.group });
+    });
+}
+async function setPrivate(sites) {
+    privateSites = [...new Set(sites)].sort().slice(0, PRIVATE_LIMIT);
+    send({ type: "private", sites: privateSites });
+    await chrome.storage.local.set({ [PRIVATE]: privateSites });
+}
+async function status(tab) {
+    const site = siteOf((await tabOf(tab))?.url);
+    return {
+        enabled,
+        observation,
+        connected: port !== undefined,
+        hostContract,
+        tabs: [...attached.keys()].filter(usable).length,
+        privateSites,
+        ...(site ? { site } : {}),
+    };
+}
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
     // Only this extension's own pages (the popup) may change the switch.
     if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("")))
         return false;
+    const tab = typeof message.tab === "number" ? message.tab : undefined;
     if (message.type === "set" && typeof message.enabled === "boolean") {
-        void setEnabled(message.enabled).then(() => reply({ enabled, observation, connected: port !== undefined, hostContract }));
+        void setEnabled(message.enabled)
+            .then(() => status(tab))
+            .then(reply);
         return true;
     }
     const profile = OBSERVATIONS.find((each) => each === message.profile);
     if (message.type === "observe" && profile) {
-        void setObservation(profile).then(() => reply({ enabled, observation, connected: port !== undefined, hostContract }));
+        void setObservation(profile)
+            .then(() => status(tab))
+            .then(reply);
+        return true;
+    }
+    if (message.type === "private" && (message.action === "add" || message.action === "remove")) {
+        const site = message.site?.toLowerCase();
+        const next = message.action === "add"
+            ? site
+                ? [...privateSites, site]
+                : privateSites
+            : privateSites.filter((each) => each !== site);
+        void setPrivate(next)
+            .then(() => status(tab))
+            .then(reply);
+        return true;
+    }
+    if (message.type === "recent") {
+        void recent(tab).then(reply);
         return true;
     }
     if (message.type === "record" &&
@@ -1287,14 +1374,10 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         void record(message.action, typeof message.tab === "number" ? message.tab : undefined).then(reply);
         return true;
     }
-    if (message.type === "get")
-        reply({
-            enabled,
-            observation,
-            connected: port !== undefined,
-            hostContract,
-            tabs: [...attached.keys()].filter(usable).length,
-        });
+    if (message.type === "get") {
+        void status(tab).then(reply);
+        return true;
+    }
     return false;
 });
 // Browser start and install/update/reload each start the worker; both connect.

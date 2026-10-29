@@ -12,6 +12,9 @@ const OBSERVATION = "observation";
 type Observation = "full" | "standard" | "off";
 const OBSERVATIONS: readonly Observation[] = ["full", "standard", "off"];
 const GROUPS = "groups";
+// The owner's private sites: agents still work there, but the journal keeps no content of them.
+const PRIVATE = "private";
+const PRIVATE_LIMIT = 256;
 const RELOADED_FOR = "reloadedFor";
 const OWNER = "owner:";
 const PIN = "nds-pin";
@@ -71,12 +74,13 @@ type HostRequest =
   | { type: "forget"; id: number; download: number }
   | { type: "reload"; id?: undefined; version: string }
   | ({ type: "recorded"; request: number } & OwnerRecording)
-  | { type: "incompatible"; id?: undefined; contract: number };
+  | { type: "incompatible"; id?: undefined; contract: number }
+  | { type: "journaled"; id?: undefined; request: number; lines: string[] };
 // Every request but `reload`, which the worker answers by reloading, not with a result, and the
 // host's answer to the owner's recorder button.
 type Answered = Exclude<
   HostRequest,
-  { type: "reload" } | { type: "recorded" } | { type: "incompatible" }
+  { type: "reload" } | { type: "recorded" } | { type: "incompatible" } | { type: "journaled" }
 >;
 // The recorder of the agent group that holds the owner's tab, as the popup shows it.
 type OwnerRecording = {
@@ -92,6 +96,7 @@ class Refusal extends Error {}
 let port: chrome.runtime.Port | undefined;
 let enabled = true;
 let observation: Observation = "full";
+let privateSites: string[] = [];
 let retry = 1000;
 // Group key -> Chrome group id. Persisted for worker restarts in this browser session.
 let groups = new Map<string, number>();
@@ -157,8 +162,11 @@ async function command(
 }
 
 async function load(): Promise<void> {
-  const local = await chrome.storage.local.get([ENABLED, OBSERVATION]);
+  const local = await chrome.storage.local.get([ENABLED, OBSERVATION, PRIVATE]);
   enabled = local[ENABLED] !== false;
+  privateSites = Array.isArray(local[PRIVATE])
+    ? (local[PRIVATE] as unknown[]).filter((site): site is string => typeof site === "string")
+    : [];
   observation = OBSERVATIONS.find((profile) => profile === local[OBSERVATION]) ?? "full";
   const session = await chrome.storage.session.get(GROUPS);
   groups = new Map(Object.entries((session[GROUPS] ?? {}) as Record<string, number>));
@@ -207,6 +215,7 @@ function connect(): void {
   next.onMessage.addListener((message: HostRequest) => {
     if (message.type === "reload") void reloadFor(message.version);
     else if (message.type === "recorded") recorded.get(message.request)?.(message);
+    else if (message.type === "journaled") journaled.get(message.request)?.(message.lines);
     else if (message.type === "incompatible") {
       // The host speaks another contract: nothing an agent asks can work until one is updated.
       hostContract = message.contract;
@@ -232,6 +241,7 @@ function connect(): void {
     // The host takes agent downloads' files from this worker (see `downloads` below).
     downloads: chrome.downloads !== undefined,
     observation,
+    private: privateSites,
   });
   void badge();
 }
@@ -1373,26 +1383,109 @@ async function record(action: string, tab: number | undefined): Promise<OwnerRec
   });
 }
 
+// The popup's view of the owner's tab: the agent group it belongs to, the newest steps the
+// journal holds of that group, and the site the owner may keep private.
+const journaled = new Map<number, (lines: string[]) => void>();
+let journals = 0;
+
+async function tabOf(tab: number | undefined): Promise<chrome.tabs.Tab | undefined> {
+  if (tab !== undefined) return chrome.tabs.get(tab).catch(() => undefined);
+  return (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+}
+
+function siteOf(url: string | undefined): string | undefined {
+  try {
+    const parsed = new URL(url ?? "");
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+      ? parsed.hostname.toLowerCase()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function recent(tab: number | undefined): Promise<{ lines?: string[]; error?: string }> {
+  const id = (await tabOf(tab))?.id ?? -1;
+  const held = usable(id);
+  if (!held) return { error: "no_agent_tab" };
+  if (!port) return { error: "extension_unavailable" };
+  const request = ++journals;
+  return new Promise((done) => {
+    const timer = setTimeout(() => finish(undefined), RECORD_REPLY_MS);
+    function finish(lines: string[] | undefined): void {
+      clearTimeout(timer);
+      journaled.delete(request);
+      done(lines ? { lines } : { error: "timeout" });
+    }
+    journaled.set(request, finish);
+    send({ type: "journal", request, group: held.life.group });
+  });
+}
+
+async function setPrivate(sites: string[]): Promise<void> {
+  privateSites = [...new Set(sites)].sort().slice(0, PRIVATE_LIMIT);
+  send({ type: "private", sites: privateSites });
+  await chrome.storage.local.set({ [PRIVATE]: privateSites });
+}
+
+async function status(tab: number | undefined): Promise<object> {
+  const site = siteOf((await tabOf(tab))?.url);
+  return {
+    enabled,
+    observation,
+    connected: port !== undefined,
+    hostContract,
+    tabs: [...attached.keys()].filter(usable).length,
+    privateSites,
+    ...(site ? { site } : {}),
+  };
+}
+
 chrome.runtime.onMessage.addListener(
   (
-    message: { type?: string; enabled?: boolean; profile?: string; action?: string; tab?: number },
+    message: {
+      type?: string;
+      enabled?: boolean;
+      profile?: string;
+      action?: string;
+      tab?: number;
+      site?: string;
+    },
     sender,
     reply,
   ) => {
     // Only this extension's own pages (the popup) may change the switch.
     if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("")))
       return false;
+    const tab = typeof message.tab === "number" ? message.tab : undefined;
     if (message.type === "set" && typeof message.enabled === "boolean") {
-      void setEnabled(message.enabled).then(() =>
-        reply({ enabled, observation, connected: port !== undefined, hostContract }),
-      );
+      void setEnabled(message.enabled)
+        .then(() => status(tab))
+        .then(reply);
       return true;
     }
     const profile = OBSERVATIONS.find((each) => each === message.profile);
     if (message.type === "observe" && profile) {
-      void setObservation(profile).then(() =>
-        reply({ enabled, observation, connected: port !== undefined, hostContract }),
-      );
+      void setObservation(profile)
+        .then(() => status(tab))
+        .then(reply);
+      return true;
+    }
+    if (message.type === "private" && (message.action === "add" || message.action === "remove")) {
+      const site = message.site?.toLowerCase();
+      const next =
+        message.action === "add"
+          ? site
+            ? [...privateSites, site]
+            : privateSites
+          : privateSites.filter((each) => each !== site);
+      void setPrivate(next)
+        .then(() => status(tab))
+        .then(reply);
+      return true;
+    }
+    if (message.type === "recent") {
+      void recent(tab).then(reply);
       return true;
     }
     if (
@@ -1404,14 +1497,10 @@ chrome.runtime.onMessage.addListener(
       );
       return true;
     }
-    if (message.type === "get")
-      reply({
-        enabled,
-        observation,
-        connected: port !== undefined,
-        hostContract,
-        tabs: [...attached.keys()].filter(usable).length,
-      });
+    if (message.type === "get") {
+      void status(tab).then(reply);
+      return true;
+    }
     return false;
   },
 );
