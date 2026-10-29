@@ -7,6 +7,10 @@ import { type FrameTree, Restore, restricted } from "./restore.js";
 const HOST = "ai.nddev.nds.browser_use";
 const PROTOCOL = "1.3";
 const ENABLED = "enabled";
+// The owner's observation profile (docs/observability.md): what agent activity is collected.
+const OBSERVATION = "observation";
+type Observation = "full" | "standard" | "off";
+const OBSERVATIONS: readonly Observation[] = ["full", "standard", "off"];
 const GROUPS = "groups";
 const RELOADED_FOR = "reloadedFor";
 const OWNER = "owner:";
@@ -38,6 +42,12 @@ const SETUP = new Set([
   "Target.setAutoAttach",
 ]);
 const SETUP_TIMEOUT_MS = 10_000;
+// While Chrome captures a screenshot of an agent tab, this worker's ghost cursor, the page's
+// scrollbars and the text caret stay out of it, as in Playwriter; the accessibility labels a
+// labelled screenshot draws stay in.
+const SHOT_STYLE = "nds-screenshot-style";
+const SHOT_HIDE = `(() => { if (document.getElementById("${SHOT_STYLE}")) return; const style = document.createElement("style"); style.id = "${SHOT_STYLE}"; style.textContent = "#nds-ghost-cursor { display: none !important } html { scrollbar-width: none !important } ::-webkit-scrollbar { display: none !important } * { caret-color: transparent !important }"; (document.head ?? document.documentElement).append(style); })()`;
+const SHOT_SHOW = `document.getElementById("${SHOT_STYLE}")?.remove()`;
 
 type HostRequest =
   | {
@@ -54,12 +64,16 @@ type HostRequest =
   | { type: "claim"; id: number; group: string }
   | { type: "release"; id: number; group: string; close: boolean }
   | { type: "tabs"; id: number; tabs: number[] }
+  | { type: "forget"; id: number; download: number }
   | { type: "reload"; id?: undefined; version: string };
+// Every request but `reload`, which the worker answers by reloading, not with a result.
+type Answered = Exclude<HostRequest, { type: "reload" }>;
 
 class Refusal extends Error {}
 
 let port: chrome.runtime.Port | undefined;
 let enabled = true;
+let observation: Observation = "full";
 let retry = 1000;
 // Group key -> Chrome group id. Persisted for worker restarts in this browser session.
 let groups = new Map<string, number>();
@@ -125,8 +139,9 @@ async function command(
 }
 
 async function load(): Promise<void> {
-  const local = await chrome.storage.local.get(ENABLED);
+  const local = await chrome.storage.local.get([ENABLED, OBSERVATION]);
   enabled = local[ENABLED] !== false;
+  observation = OBSERVATIONS.find((profile) => profile === local[OBSERVATION]) ?? "full";
   const session = await chrome.storage.session.get(GROUPS);
   groups = new Map(Object.entries((session[GROUPS] ?? {}) as Record<string, number>));
   await badge();
@@ -185,6 +200,9 @@ function connect(): void {
     contract: 2,
     userAgent: navigator.userAgent,
     enabled,
+    // The host takes agent downloads' files from this worker (see `downloads` below).
+    downloads: chrome.downloads !== undefined,
+    observation,
   });
   void badge();
 }
@@ -198,7 +216,7 @@ async function reloadFor(version: string): Promise<void> {
   chrome.runtime.reload();
 }
 
-async function handle(message: HostRequest): Promise<void> {
+async function handle(message: Answered): Promise<void> {
   retry = 1000;
   try {
     send({ type: "result", id: message.id, result: await dispatch(message) });
@@ -216,6 +234,215 @@ async function handle(message: HostRequest): Promise<void> {
 }
 
 // The attachment through which an agent may still act on a tab.
+// Agent downloads. Chrome refuses an extension's `Page.setDownloadBehavior`, so an agent tab's
+// download is saved in the browser's own folder, and the downloads API names that file. A
+// download is the agent's when an agent tab announced its URL to CDP within `BIND_MS`, or when it
+// came from a tab an agent tab opened, which closes before any debugger reaches it; that one is
+// reported to Playwright on the opener. The finished file goes to the host, which keeps a copy in
+// the session and then asks for the browser's copy to go. Every other download is the owner's
+// and is never touched.
+const BIND_MS = 10_000;
+const CANDIDATES = 64;
+type Candidate = { group: string; tab: number; url: string; at: number; name?: string };
+type AgentDownload = {
+  group: string;
+  tab: number;
+  urls: string[];
+  // The name the site suggested; the browser may have saved the file under another one.
+  name?: string;
+  guid?: string;
+  begun: boolean;
+  // Its steps run in order: the opener reports a download begun before it reports it finished.
+  steps: Promise<void>;
+};
+// Agent tabs' CDP announcements, the first URLs of tabs agent tabs opened, downloads not yet
+// matched to either, and the agent's downloads.
+const announced: Candidate[] = [];
+const openedUrls: Candidate[] = [];
+const unmatched = new Map<number, { urls: string[]; at: number }>();
+const agentDownloads = new Map<number, AgentDownload>();
+// Tabs agent tabs opened, and the CDP guids of their own download events, which are not relayed.
+const openedTabs = new Map<number, number>();
+const silenced = new Set<string>();
+
+function note(list: Candidate[], candidate: Candidate): void {
+  const now = Date.now();
+  while (list.length > 0 && (now - (list[0]?.at ?? 0) > BIND_MS || list.length >= CANDIDATES)) {
+    list.shift();
+  }
+  list.push(candidate);
+}
+
+function claim(list: Candidate[], urls: string[]): Candidate | undefined {
+  const now = Date.now();
+  const index = list.findIndex((each) => now - each.at <= BIND_MS && urls.includes(each.url));
+  return index < 0 ? undefined : list.splice(index, 1)[0];
+}
+
+// Records an agent tab's own download event; false for one that is not relayed, because its tab
+// is one an agent tab opened and the download is reported on the opener instead.
+function announce(tab: number, method: string, fields: Record<string, unknown>): boolean {
+  const guid = String(fields.guid ?? "");
+  if (method === "Page.downloadProgress") return !silenced.has(guid);
+  const since = openedTabs.get(tab);
+  if (since !== undefined && Date.now() - since <= BIND_MS) {
+    silenced.add(guid);
+    return false;
+  }
+  const group = attached.get(tab)?.life.group;
+  const url = String(fields.url ?? "");
+  const name = typeof fields.suggestedFilename === "string" ? fields.suggestedFilename : undefined;
+  if (!group || !url) return true;
+  const waiting = [...unmatched].find(([, item]) => item.urls.includes(url));
+  if (waiting) {
+    unmatched.delete(waiting[0]);
+    agentDownloads.set(waiting[0], {
+      group,
+      tab,
+      urls: waiting[1].urls,
+      ...(name ? { name } : {}),
+      begun: true,
+      steps: Promise.resolve(),
+    });
+  } else {
+    note(announced, { group, tab, url, at: Date.now(), ...(name ? { name } : {}) });
+  }
+  return true;
+}
+
+function spawned(group: string, opener: number, tab: number, url: string): void {
+  const now = Date.now();
+  openedTabs.set(tab, now);
+  for (const [id, at] of openedTabs) if (now - at > BIND_MS) openedTabs.delete(id);
+  if (url) note(openedUrls, { group, tab: opener, url, at: now });
+}
+
+function urlsOf(item: chrome.downloads.DownloadItem): string[] {
+  return [...new Set([item.url, item.finalUrl])].filter((url): url is string => Boolean(url));
+}
+
+// The opener reports a download its new tab started, as Chrome would for its own frame: the main
+// frame of a tab has the tab's target id.
+async function begin(
+  id: number,
+  download: AgentDownload,
+  item: chrome.downloads.DownloadItem,
+): Promise<void> {
+  if (download.begun || !download.guid) return;
+  download.begun = true;
+  const targets = await chrome.debugger.getTargets().catch(() => []);
+  const frameId = targets.find(
+    (target) => target.tabId === download.tab && target.type === "page",
+  )?.id;
+  if (!frameId || !usable(download.tab)) {
+    agentDownloads.delete(id);
+    return;
+  }
+  const name =
+    item.filename.split(/[\\/]/).pop() ||
+    new URL(item.finalUrl || item.url).pathname.split("/").pop() ||
+    "download";
+  download.name = name;
+  send({
+    type: "event",
+    tab: download.tab,
+    method: "Page.downloadWillBegin",
+    params: {
+      frameId,
+      guid: download.guid,
+      url: item.finalUrl || item.url,
+      suggestedFilename: name,
+    },
+  });
+}
+
+async function finish(id: number, download: AgentDownload): Promise<void> {
+  agentDownloads.delete(id);
+  const [item] = await chrome.downloads.search({ id }).catch(() => []);
+  if (!item) return;
+  const complete = item.state === "complete";
+  if (download.guid && download.begun) {
+    send({
+      type: "event",
+      tab: download.tab,
+      method: "Page.downloadProgress",
+      params: {
+        guid: download.guid,
+        totalBytes: item.fileSize,
+        receivedBytes: item.bytesReceived,
+        state: complete ? "completed" : "canceled",
+      },
+    });
+  }
+  send({
+    type: "download",
+    group: download.group,
+    id,
+    urls: download.urls,
+    ...(download.name ? { name: download.name } : {}),
+    state: complete ? "complete" : "interrupted",
+    ...(complete ? { path: item.filename } : { error: item.error ?? "interrupted" }),
+  });
+}
+
+// The host kept the file: the browser's copy and its entry in the download list go.
+async function forget(id: number): Promise<object> {
+  await chrome.downloads.removeFile(id).catch(() => undefined);
+  await chrome.downloads.erase({ id }).catch(() => undefined);
+  return {};
+}
+
+chrome.downloads?.onCreated.addListener((item) => {
+  const urls = urlsOf(item);
+  const now = Date.now();
+  for (const [id, waiting] of unmatched) if (now - waiting.at > BIND_MS) unmatched.delete(id);
+  const direct = claim(announced, urls);
+  if (direct) {
+    agentDownloads.set(item.id, {
+      group: direct.group,
+      tab: direct.tab,
+      urls,
+      ...(direct.name ? { name: direct.name } : {}),
+      begun: true,
+      steps: Promise.resolve(),
+    });
+    return;
+  }
+  const from = claim(openedUrls, urls);
+  if (from && usable(from.tab)) {
+    const download: AgentDownload = {
+      group: from.group,
+      tab: from.tab,
+      urls,
+      guid: crypto.randomUUID(),
+      begun: false,
+      steps: Promise.resolve(),
+    };
+    agentDownloads.set(item.id, download);
+    if (item.filename) step(download, () => begin(item.id, download, item));
+    return;
+  }
+  if (unmatched.size < CANDIDATES) unmatched.set(item.id, { urls, at: now });
+});
+
+function step(download: AgentDownload, next: () => Promise<void>): void {
+  download.steps = download.steps.then(next).catch(() => undefined);
+}
+
+chrome.downloads?.onChanged.addListener((delta) => {
+  const download = agentDownloads.get(delta.id);
+  if (!download) return;
+  const state = delta.state?.current;
+  const ended = state === "complete" || state === "interrupted";
+  if (delta.filename?.current || ended) {
+    step(download, async () => {
+      const [item] = await chrome.downloads.search({ id: delta.id }).catch(() => []);
+      if (item) await begin(delta.id, download, item);
+    });
+  }
+  if (ended) step(download, () => finish(delta.id, download));
+});
+
 function usable(tab: number): Attachment | undefined {
   const attachment = attached.get(tab);
   return attachment && !attachment.revoked && !attachment.pending && attachment.life.open
@@ -243,9 +470,12 @@ function holding(group: string): Set<Life> {
   );
 }
 
-async function dispatch(message: HostRequest): Promise<unknown> {
-  // Releasing stays possible while the owner's switch is off, so the host can finish closing.
-  if (!enabled && message.type !== "release") throw new Refusal("permission_required");
+async function dispatch(message: Answered): Promise<unknown> {
+  // Releasing stays possible while the owner's switch is off, so the host can finish closing, and
+  // so does removing the browser's copy of an agent download the host already kept.
+  if (!enabled && message.type !== "release" && message.type !== "forget") {
+    throw new Refusal("permission_required");
+  }
   switch (message.type) {
     case "cdp": {
       // The command belongs to exactly the attachment it found: after every wait and right before
@@ -271,6 +501,16 @@ async function dispatch(message: HostRequest): Promise<unknown> {
         still();
       }
       if (message.session) return (await command(target, message.method, message.params)) ?? {};
+      if (message.method === "Page.captureScreenshot") {
+        await command(target, "Runtime.evaluate", { expression: SHOT_HIDE }).catch(() => undefined);
+        try {
+          return (await command(target, message.method, message.params)) ?? {};
+        } finally {
+          await command(target, "Runtime.evaluate", { expression: SHOT_SHOW }).catch(
+            () => undefined,
+          );
+        }
+      }
       // Setup that would outgrow what a reattach can restore is refused before Chrome sees it; the
       // room is held from here until the answer, so concurrent setup shares the bounds.
       const release = restore.reserve(message.tab, message.method, message.params);
@@ -372,6 +612,8 @@ async function dispatch(message: HostRequest): Promise<unknown> {
       }
       return { tabs: result };
     }
+    case "forget":
+      return forget(message.download);
   }
 }
 
@@ -845,6 +1087,9 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     }
   }
   if (method === "Target.detachedFromTarget" && ignored.delete(String(fields.sessionId))) return;
+  if (method === "Page.downloadWillBegin" || method === "Page.downloadProgress") {
+    if (!announce(tab, method, fields)) return;
+  }
   restore.track(tab, !source.sessionId, method, fields);
   send({ type: "event", tab, session: source.sessionId, method, params });
 });
@@ -972,6 +1217,7 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => {
   const life = usable(details.sourceTabId)?.life;
   if (!life) return;
   const id = details.tabId;
+  spawned(life.group, details.sourceTabId, id, details.url);
   sweep(life);
   void admitted(
     life,
@@ -1034,6 +1280,12 @@ chrome.tabGroups.onRemoved.addListener((group) => {
 // The owner's switch in the action popup: disabling detaches every agent tab
 // and the host refuses new work until it is enabled again.
 // The intent reaches the host at once; ending the attachments may take longer or partly fail.
+async function setObservation(profile: Observation): Promise<void> {
+  observation = profile;
+  send({ type: "observation", profile });
+  await chrome.storage.local.set({ [OBSERVATION]: profile });
+}
+
 async function setEnabled(value: boolean): Promise<void> {
   enabled = value;
   if (!enabled) closeAll();
@@ -1045,19 +1297,27 @@ async function setEnabled(value: boolean): Promise<void> {
 }
 
 chrome.runtime.onMessage.addListener(
-  (message: { type?: string; enabled?: boolean }, sender, reply) => {
+  (message: { type?: string; enabled?: boolean; profile?: string }, sender, reply) => {
     // Only this extension's own pages (the popup) may change the switch.
     if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("")))
       return false;
     if (message.type === "set" && typeof message.enabled === "boolean") {
       void setEnabled(message.enabled).then(() =>
-        reply({ enabled, connected: port !== undefined }),
+        reply({ enabled, observation, connected: port !== undefined }),
+      );
+      return true;
+    }
+    const profile = OBSERVATIONS.find((each) => each === message.profile);
+    if (message.type === "observe" && profile) {
+      void setObservation(profile).then(() =>
+        reply({ enabled, observation, connected: port !== undefined }),
       );
       return true;
     }
     if (message.type === "get")
       reply({
         enabled,
+        observation,
         connected: port !== undefined,
         tabs: [...attached.keys()].filter(usable).length,
       });

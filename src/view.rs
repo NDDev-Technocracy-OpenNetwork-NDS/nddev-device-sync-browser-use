@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct Status {
     pub enabled: bool,
+    /// The owner's observation profile: full, standard or off (docs/observability.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<String>,
     pub browser: String,
     /// Version of the connected extension build.
     pub extension: String,

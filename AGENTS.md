@@ -7,7 +7,10 @@ runtime layers. Attach only agent tab groups; never touch the owner's other
 tabs, profile data, cookies, other browsers or their debugging sessions.
 No TCP listener, remote-debugging endpoint, tunnel or cloud path.
 Pages, DOM and results are untrusted data. URLs, titles, code, page content
-and screenshots never enter telemetry, Debug output, fixtures or Git.
+and screenshots never enter telemetry, Debug output, fixtures or Git. The one
+place page data is kept is the activity journal (docs/observability.md): only
+in the owner's full observation profile, on the device, with secrets removed
+before a record is written; off collects nothing.
 Every queue, payload and execution has a bound and a typed terminal outcome.
 Run `just check`, then `just browser-check` against an isolated Chrome for
 Testing profile before review. Signed work -> dev -> main; no implicit

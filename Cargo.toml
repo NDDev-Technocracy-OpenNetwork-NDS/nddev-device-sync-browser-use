@@ -25,6 +25,9 @@ opentelemetry = { version = "0.33.1", default-features = false, features = ["tra
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 getrandom = "0.4"
+percent-encoding = "2.3"
+regex = { version = "1.13", default-features = false, features = ["std", "unicode-perl"] }
+sha2 = "0.11"
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "process", "sync", "time"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 

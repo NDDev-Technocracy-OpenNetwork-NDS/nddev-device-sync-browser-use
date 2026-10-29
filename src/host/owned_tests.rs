@@ -12,6 +12,7 @@ fn fixture() -> (Arc<Host>, mpsc::Receiver<Vec<u8>>, tempfile::TempDir) {
             runtime: runtime.clone(),
             bun: std::env::current_exe().unwrap(),
             executor: root.path().join("inert.ts"),
+            activity: root.path().join("activity"),
         },
         installed: None,
         cdp_socket: runtime.join("cdp.sock"),
@@ -40,7 +41,7 @@ async fn message(queue: &mut mpsc::Receiver<Vec<u8>>) -> Value {
     serde_json::from_slice(&frame[4..]).unwrap()
 }
 
-fn answer(host: &Host, request: &Value) {
+fn answer(host: &Arc<Host>, request: &Value) {
     let result = if request["type"] == "release" {
         json!({ "released": true })
     } else {
@@ -979,4 +980,82 @@ async fn any_other_contract_seals_open_lives_and_a_later_supported_hello_revives
         drained.await.unwrap();
         assert!(!host.state().sessions.contains_key("project"));
     }
+}
+
+// A finished agent download is copied into its session, handed to `NDS.takeDownload` once, and
+// only then is the browser's copy let go; a failed one answers its error.
+#[tokio::test]
+async fn an_agent_download_is_kept_in_its_session_before_the_browser_copy_goes() {
+    let (host, mut queue, root) = fixture();
+    host.state().downloads = true;
+    host.reserve("files", false).unwrap();
+    let browser = root.path().join("browser-folder");
+    std::fs::create_dir_all(&browser).unwrap();
+    let source = browser.join("report.pdf");
+    std::fs::write(&source, b"%PDF report").unwrap();
+    let urls = json!(["http://site/export", "http://cdn/report.pdf"]);
+    let waiting = {
+        let host = host.clone();
+        tokio::spawn(async move {
+            host.take_download(
+                "files",
+                &json!({ "url": "http://cdn/report.pdf", "waitMs": 5000 }),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    host.on_extension(json!({
+        "type": "download", "group": "files", "id": 7, "urls": urls, "state": "complete",
+        "path": source.to_str().unwrap(),
+    }));
+    let Ok(kept) = waiting.await.unwrap() else {
+        panic!("refused")
+    };
+    let file = PathBuf::from(kept["file"].as_str().unwrap());
+    assert!(file.starts_with(root.path().join("runtime/sessions/files/.downloads")));
+    assert_eq!(std::fs::read(&file).unwrap(), b"%PDF report");
+    let forget = message(&mut queue).await;
+    assert_eq!(forget["type"], "forget");
+    assert_eq!(forget["download"], 7);
+    // Taken once: the same URL now waits for another download.
+    let again = host
+        .take_download(
+            "files",
+            &json!({ "url": "http://site/export", "waitMs": 0 }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("refused"));
+    assert_eq!(again, json!({ "pending": true, "copying": false }));
+    host.on_extension(json!({
+        "type": "download", "group": "files", "id": 8, "urls": ["http://site/gone"],
+        "state": "interrupted", "error": "NETWORK_FAILED",
+    }));
+    let failed = host
+        .take_download("files", &json!({ "url": "http://site/gone", "waitMs": 0 }))
+        .await
+        .unwrap_or_else(|_| panic!("refused"));
+    assert_eq!(failed, json!({ "error": "interrupted" }));
+    // Another session's download never reaches this one, and nothing is let go for it.
+    host.on_extension(json!({
+        "type": "download", "group": "elsewhere", "id": 9, "urls": ["http://site/other"],
+        "state": "complete", "path": source.to_str().unwrap(),
+    }));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(queue.try_recv().is_err());
+    assert!(source.exists());
+}
+
+#[tokio::test]
+async fn an_extension_that_cannot_name_download_files_answers_unsupported() {
+    let (host, _queue, _root) = fixture();
+    host.reserve("files", false).unwrap();
+    let answer = host
+        .take_download(
+            "files",
+            &json!({ "url": "http://site/export", "waitMs": 5000 }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("refused"));
+    assert_eq!(answer, json!({ "unsupported": true }));
 }

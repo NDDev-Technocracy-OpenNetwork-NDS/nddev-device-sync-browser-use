@@ -7,6 +7,13 @@ import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import vm from "node:vm";
 import { chromium, type Page } from "playwright-core";
+import {
+  actions,
+  executing as journalExecuting,
+  execution as journalExecution,
+  start as startJournal,
+  attach as watchActivity,
+} from "./agent/activity";
 import { checks, owner } from "./agent/checks";
 import { getCleanHTML, getPageMarkdown } from "./agent/content";
 import {
@@ -20,6 +27,7 @@ import {
 } from "./agent/devtools";
 import { attach as watchDownloads } from "./agent/downloads";
 import { bounded, compose, describeError, errorParts, waitBudget } from "./agent/format";
+import { connect as connectHost } from "./agent/host";
 import { inspect as describe } from "./agent/inspect";
 import { waitForPageLoad, attach as watchLoad } from "./agent/load";
 import { getLocatorStringForElement, inspectPinnedElement, pinnedElements } from "./agent/locators";
@@ -46,6 +54,10 @@ const write = (message: object): void => {
 const browser = await chromium.connectOverCDP(endpoint, { timeout: 15_000 });
 const context = browser.contexts()[0] ?? process.exit(3);
 browser.on("disconnected", () => process.exit(4));
+// The owner's observation profile is known before the first execution; the activity journal
+// records what the profile allows (docs/observability.md).
+await connectHost(browser);
+startJournal(context);
 
 // Callbacks agent code hands to Playwright stay in its execution (./execution): the event emitter
 // every client object shares and the context now, each page's class once a page is seen.
@@ -64,6 +76,9 @@ bindPage(Object.getPrototypeOf(context));
       throw new Error("This execution timed out and was aborted");
   },
 });
+(
+  browser as unknown as { _instrumentation: { addListener(listener: object): void } }
+)._instrumentation.addListener(actions);
 
 const recorder =
   (method: string) =>
@@ -92,6 +107,7 @@ function observe(page: Page): void {
   watchLoad(page);
   watchSnapshots(page);
   watchDownloads(page);
+  watchActivity(page);
 }
 for (const page of context.pages()) observe(page);
 context.on("page", observe);
@@ -185,6 +201,14 @@ const sandbox = vm.createContext({
   clearInterval,
   structuredClone,
 });
+// No default page: a bare `page` says how to get one. It is defined inside the context, because a
+// host-side getter's error would only read as "page is not defined".
+vm.runInContext(
+  `Object.defineProperty(globalThis, "page", { get() { throw new ReferenceError(${JSON.stringify(
+    'There is no global `page`. Open one with `state.page = await context.newPage()`, or reuse one with `state.page = context.pages().findLast((page) => page.url().includes("example.com"))`, and keep it in `state.page` across executions.',
+  )}); }, configurable: true })`,
+  sandbox,
+);
 // `signal` is the calling script's own: aborted once its execution timed out.
 Object.defineProperty(sandbox, "signal", {
   get: () => scope.getStore()?.signal,
@@ -223,10 +247,26 @@ async function run(request: Request): Promise<void> {
   const execution: Execution = { signal: controller.signal, logs: [], withdraw: [] };
   const budget = request.timeout_ms ?? 10_000;
   let answered = false;
+  const started = Date.now();
+  journalExecuting(request.id);
   // Exactly one answer per request: the script's own, or the abort's, whichever comes first.
-  const answer = (message: object): void => {
+  const answer = (message: {
+    id: number;
+    ok: boolean;
+    error?: string;
+    output?: string;
+    truncated?: boolean;
+  }): void => {
     if (answered) return;
     answered = true;
+    void journalExecution({
+      id: request.id,
+      code: request.code,
+      ok: message.ok,
+      ...(message.error ? { error: message.error } : {}),
+      ms: Date.now() - started,
+      output: message.output ?? "",
+    });
     if (running?.id === request.id) running = undefined;
     executing(false);
     write(message);

@@ -200,18 +200,32 @@ one exists.
 
 ### Recording and DevTools
 
-- **`recording.start({ page, outputPath })`** records a tab as video, with a ghost cursor that
-  follows your mouse actions. **`recording.stop({ page })`** returns the file and the execution
-  times. **`ghostCursor.show({ page, style })`** and **`ghostCursor.hide({ page })`** control the
-  cursor outside recordings.
+- **`state.video = await recording.start({ page, outputPath })`** records a tab as video, with a
+  ghost cursor that follows your mouse actions; keep the handle in `state`.
+  - **`await state.video.stop()`** returns the file and the execution times;
+    `recording.stop({ page })` does the same by page. **`cancel()`** keeps no file.
+  - **`setPage(otherPage)`** films another tab from now on.
+  - `clock: "manual"` films only **`await state.video.wait(ms)`**, so your thinking stays out.
+  - `audio: true` adds the page's sound.
+  - `aspectRatio: { width: 16, height: 9 }` fits the viewport while recording and restores it.
+  - `.mp4`, `.mov`, `.mkv` or `.webm`. The file appears only when it is complete.
+- **`ghostCursor.show({ page, style })`** and **`ghostCursor.hide({ page })`** control the cursor
+  outside recordings.
 - **`createDemoVideo({ recordingPath, durationMs, executionTimestamps })`** speeds up the waits
   between executions. Keep its promise in `state` and await it in a later execution.
   Recording needs ffmpeg.
-- **`recorder.start()`** records what the owner does in the session's tabs, for writing a skill.
+- **`recorder.start()`** records what the owner does in the session's tabs, for writing a skill,
+  with Playwright's codegen engine: each action carries the locator and the code codegen would
+  write. It needs the full observation profile.
   - **`recorder.stop()`** ends the recording.
-  - **`recorder.events({ errors?, type?, ids? })`** prints the timeline.
-  - **`recorder.frame({ eventId, offset })`** names a screenshot of that moment.
-  - Copy a recording out of `artifacts` before closing the session, or pass `outputDir`.
+  - **`await recorder.events({ errors?, type?, ids?, exclude?, full? })`**, or
+    `nds-browser-use -s <project> recorder events`, gives the timeline as JSON lines: the person's
+    actions (`person-action`), live-region messages (`toast`) and what the pages did meanwhile.
+    Each record's `seq` is its id.
+  - **`await recorder.frame({ eventId, offset })`**, or `recorder frame <id> --offset 1000`, names
+    the screenshot of that moment; an offset of 1000 shows the result of a click.
+  - A value typed into a password, one-time-code or card field is never kept.
+  - Copy frames out of `artifacts` before closing the session, or pass `outputDir`.
 - **`getCDPSession({ page })`** gives raw CDP; `context.newCDPSession(page)` works too.
 - **`createDebugger({ cdp })`** sets breakpoints, steps, reads local variables and evaluates in a
   paused frame. Give it its own CDP session.
@@ -272,13 +286,54 @@ one exists.
 - **Downloads.** Take the download from `Promise.all([state.page.waitForEvent("download"),
   state.page.click(...)])`, then keep it with
   `await download.saveAs(artifacts + "/" + download.suggestedFilename())`. `path()`,
-  `createReadStream()` and `failure()` work too, also after the page closed; closing the page waits
-  for the copy. The browser keeps its own
-  copy in its download folder; the agent's copy is the same URL loaded again with the page's
-  cookies, so a download that answered a form's POST, or that the site serves only once, refuses
-  with an error that says so.
+  `createReadStream()` and `failure()` work too, also after the page closed. The file is the one the
+  browser saved, kept in the session, so a form's POST, a link that works once and a `blob:` all
+  work, and the owner's download folder keeps no copy. A file that opens in a new tab is reported on
+  the tab that opened it.
 - **Before a destructive action,** such as delete, send or pay, confirm the target with a snapshot
   or a labelled screenshot.
+
+## Performance
+
+- **Web vitals.** Paints and layout shifts come from the page's own buffered entries:
+  ```js
+  await state.page.evaluate(() => new Promise((done) => {
+    const vitals = { paints: {}, cls: 0 };
+    new PerformanceObserver((list) => { for (const e of list.getEntries()) vitals.paints[e.name] = e.startTime; })
+      .observe({ type: "paint", buffered: true });
+    new PerformanceObserver((list) => { for (const e of list.getEntries()) if (!e.hadRecentInput) vitals.cls += e.value; })
+      .observe({ type: "layout-shift", buffered: true });
+    setTimeout(() => done(vitals), 500);
+  }));
+  ```
+- **Counters.** `const cdp = await getCDPSession({ page: state.page }); await cdp.send("Performance.enable");`
+  then `(await cdp.send("Performance.getMetrics")).metrics` gives script, layout and task time, heap
+  size and node counts.
+- **Slow devices.** `Emulation.setCPUThrottlingRate({ rate: 4 })` and
+  `Network.emulateNetworkConditions` slow only the agent tab; reset both (`rate: 1`, `offline:
+  false, latency: 0, downloadThroughput: -1, uploadThroughput: -1`) before you finish.
+- **Timing your own steps.** Chrome gives extensions no `Profiler` domain, so there is no CPU
+  profile. Wrap the work in `performance.mark()` and `performance.measure()` in the page, and
+  compare `ScriptDuration` and `TaskDuration` of `Performance.getMetrics` before and after.
+
+## Activity
+
+In the owner's full observation profile, everything agents do in agent tabs is kept in an activity
+journal: each execution, the Playwright actions with their locators and values, navigations, the
+page's requests with their bodies, console errors and warnings, page errors, dialogs and downloads.
+Secrets are removed and repeats are folded. Read it instead of re-running steps to find out what
+happened:
+
+```bash
+nds-browser-use -s <project> activity                 # the latest executor's timeline, thin
+nds-browser-use -s <project> activity --errors        # failed requests, actions, console and page errors
+nds-browser-use -s <project> activity --type network --grep /api/ --full
+nds-browser-use -s <project> activity body <sha256>    # a request's stored body
+```
+
+`--all` reads the week the journal keeps, `--exec <id>` one execution's records and `--last <n>`
+the newest n. The owner can switch observation to standard or off in the extension's popup; then
+the journal and the recorder collect nothing.
 
 ## Network
 
@@ -326,5 +381,5 @@ Use these only when locators cannot express the action.
 - **Secrets.** Page content, URLs and screenshots stay on this device. Do not paste them into
   places the owner did not ask for.
 - **Limits.** Outside the agent's reach: `chrome://` pages, the Chrome Web Store, other
-  extensions' pages, browser and OS dialogs, a file a form's POST downloaded, browser-wide cookies,
-  new browser contexts and permission prompts.
+  extensions' pages, browser and OS dialogs, browser-wide cookies, new browser contexts and
+  permission prompts.

@@ -12,6 +12,13 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noEmitOnError": true,
-    "newLine": "lf"
+    "newLine": "lf",
+    "noImplicitReturns": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true
   }
 }

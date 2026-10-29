@@ -181,6 +181,7 @@ pub fn load() -> Result<Config, IoError> {
         runtime: runtime::directory()?,
         bun: config.bun,
         executor: config.executor,
+        activity: state_dir()?.join("activity"),
     })
 }
 
@@ -209,6 +210,31 @@ fn config_home() -> Result<PathBuf, IoError> {
         return Err(IoError::InvalidConfiguration);
     }
     Ok(path)
+}
+
+/// Windows keeps state with the configuration, in the user's local application data.
+#[cfg(windows)]
+fn state_home() -> Result<PathBuf, IoError> {
+    runtime::local_app_data()
+}
+
+#[cfg(unix)]
+fn state_home() -> Result<PathBuf, IoError> {
+    let path = match std::env::var_os("XDG_STATE_HOME") {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(std::env::var_os("HOME").ok_or(IoError::Unavailable)?)
+            .join(".local")
+            .join("state"),
+    };
+    if !path.is_absolute() {
+        return Err(IoError::InvalidConfiguration);
+    }
+    Ok(path)
+}
+
+/// The per-user state directory: the activity journal (docs/observability.md).
+pub fn state_dir() -> Result<PathBuf, IoError> {
+    Ok(state_home()?.join("nds-browser-use"))
 }
 
 /// The per-user configuration directory: the host configuration and the agent's devices.

@@ -6,6 +6,16 @@ type Message = Record<string, unknown>;
 type Listener = (...args: unknown[]) => unknown;
 type Tab = { id: number; groupId: number; windowId: number; url: string };
 type Session = { tabId: number; sessionId?: string };
+type Download = {
+  id: number;
+  url: string;
+  finalUrl: string;
+  filename: string;
+  state: string;
+  fileSize: number;
+  bytesReceived: number;
+  error?: string;
+};
 
 class Event {
   readonly listeners: Listener[] = [];
@@ -50,6 +60,12 @@ class Browser {
   readonly scripted: number[] = [];
   readonly heldScripts = new Map<number, ReturnType<typeof deferred>>();
   readonly menu = new Event();
+  // Downloads Chrome knows, by id, and the files and list entries the worker removed.
+  readonly downloads = new Map<number, Download>();
+  readonly removed: string[] = [];
+  readonly downloadCreated = new Event();
+  readonly downloadChanged = new Event();
+  readonly navigationTarget = new Event();
   readonly posted: Message[] = [];
   readonly port = { onMessage: new Event(), onDisconnect: new Event() };
   readonly events = {
@@ -78,6 +94,30 @@ class Browser {
   move(id: number, groupId: number): void {
     this.tab(id).groupId = groupId;
     this.events.tabsUpdated.fire(id, { groupId });
+  }
+
+  // Chrome starts a download and later finishes it, as its downloads API reports them.
+  download(id: number, url: string, finalUrl = url): Download {
+    const item = {
+      id,
+      url,
+      finalUrl,
+      filename: "",
+      state: "in_progress",
+      fileSize: 0,
+      bytesReceived: 0,
+    };
+    this.downloads.set(id, item);
+    this.downloadCreated.fire({ ...item });
+    return item;
+  }
+
+  finish(id: number, filename: string, state = "complete"): void {
+    const item = this.downloads.get(id);
+    if (!item) throw new Error(`No download ${id}`);
+    Object.assign(item, { filename, state, fileSize: 5, bytesReceived: 5 });
+    this.downloadChanged.fire({ id, filename: { current: filename } });
+    this.downloadChanged.fire({ id, state: { current: state } });
   }
 
   // Chrome ends a debugger session by itself.
@@ -180,8 +220,25 @@ class Browser {
           }
           return method === "Target.getTargetInfo" ? { targetInfo: { targetId: `t${tabId}` } } : {};
         },
+        getTargets: async () =>
+          [...this.sessions].map((tabId) => ({ tabId, type: "page", id: `t${tabId}` })),
         onEvent: this.events.cdp,
         onDetach: this.events.detached,
+      },
+      downloads: {
+        search: async ({ id }: { id: number }) => {
+          const item = this.downloads.get(id);
+          return item ? [{ ...item }] : [];
+        },
+        removeFile: async (id: number) => {
+          this.removed.push(`file ${id}`);
+        },
+        erase: async ({ id }: { id: number }) => {
+          this.removed.push(`entry ${id}`);
+          return [id];
+        },
+        onCreated: this.downloadCreated,
+        onChanged: this.downloadChanged,
       },
       scripting: {
         executeScript: async ({ target }: { target: { tabId: number } }) => {
@@ -190,7 +247,7 @@ class Browser {
           return [];
         },
       },
-      webNavigation: { onCreatedNavigationTarget: event() },
+      webNavigation: { onCreatedNavigationTarget: this.navigationTarget },
       notifications: {
         create: async (id: string, options: { message: string }) => {
           this.notifications.push({ id, message: options.message });
@@ -781,4 +838,87 @@ test("a command or close of another group never acts on the tab", async () => {
   expect(
     await send({ type: "cdp", group: "q", tab: 1, method: "Runtime.evaluate" })(),
   ).toMatchObject({ result: {} });
+});
+
+// An agent tab's download is told to the host with its finished file, and only the host's word
+// that it kept a copy lets the browser's copy and its list entry go.
+test("an agent tab's download goes to the host, and the browser copy only once the host kept it", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  browser.events.cdp.fire({ tabId: 1 }, "Page.downloadWillBegin", {
+    guid: "g1",
+    url: "https://example.test/final.pdf",
+    frameId: "t1",
+    suggestedFilename: "final.pdf",
+  });
+  browser.download(5, "https://example.test/export", "https://example.test/final.pdf");
+  browser.finish(5, "/home/owner/Downloads/final.pdf");
+  const reported = await until(() => browser.posted.find((posted) => posted.type === "download"));
+  expect(reported).toEqual({
+    type: "download",
+    group: "p",
+    id: 5,
+    urls: ["https://example.test/export", "https://example.test/final.pdf"],
+    name: "final.pdf",
+    state: "complete",
+    path: "/home/owner/Downloads/final.pdf",
+  });
+  expect(browser.removed).toEqual([]);
+  expect(await send({ type: "forget", download: 5 })()).toMatchObject({ result: {} });
+  expect(browser.removed).toEqual(["file 5", "entry 5"]);
+});
+
+// A tab an agent tab opened closes once its download starts, before any debugger reaches it; its
+// download is reported on the opener, and its own events never reach the host.
+test("a download from a tab an agent tab opened is reported on the opener", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  browser.navigationTarget.fire({ sourceTabId: 1, tabId: 30, url: "https://example.test/file" });
+  browser.download(6, "https://example.test/file");
+  browser.finish(6, "/home/owner/Downloads/file.csv");
+  await until(() => browser.posted.find((posted) => posted.type === "download"));
+  const events = browser.posted.filter((posted) => posted.type === "event" && posted.tab === 1);
+  expect(events.map((event) => event.method)).toEqual([
+    "Page.downloadWillBegin",
+    "Page.downloadProgress",
+  ]);
+  const [begun, ended] = events.map((event) => event.params as Record<string, unknown>);
+  expect(begun).toMatchObject({
+    frameId: "t1",
+    url: "https://example.test/file",
+    suggestedFilename: "file.csv",
+  });
+  expect(ended).toMatchObject({ guid: begun?.guid, state: "completed", totalBytes: 5 });
+  expect(browser.posted.find((posted) => posted.type === "download")).toMatchObject({
+    group: "p",
+    id: 6,
+    state: "complete",
+  });
+});
+
+// The owner's own downloads, in tabs of no agent, are never reported or removed.
+test("a download no agent tab announced stays the owner's", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  browser.events.cdp.fire({ tabId: 1 }, "Page.downloadWillBegin", {
+    guid: "g1",
+    url: "https://example.test/agent.pdf",
+  });
+  browser.download(7, "https://owner.test/mine.pdf");
+  browser.finish(7, "/home/owner/Downloads/mine.pdf");
+  browser.download(8, "https://example.test/failed.pdf");
+  browser.events.cdp.fire({ tabId: 1 }, "Page.downloadWillBegin", {
+    guid: "g2",
+    url: "https://example.test/failed.pdf",
+  });
+  browser.finish(8, "", "interrupted");
+  const failed = await until(() => browser.posted.find((posted) => posted.type === "download"));
+  expect(failed).toMatchObject({
+    id: 8,
+    state: "interrupted",
+    urls: ["https://example.test/failed.pdf"],
+  });
+  await Bun.sleep(20);
+  expect(browser.posted.filter((posted) => posted.type === "download")).toHaveLength(1);
+  expect(browser.removed).toEqual([]);
 });

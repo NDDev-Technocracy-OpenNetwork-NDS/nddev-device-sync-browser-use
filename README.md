@@ -145,10 +145,20 @@ Limits: Chrome serves WebAuthn only to a focused page, so a passkey step needs
 extension out of `chrome://` pages and the Chrome Web Store. Browser-chrome
 and OS dialogs, real authenticators' user verification, browser-wide cookies, new
 browser contexts and permission grants are outside `chrome.debugger`. Chrome also
-refuses an extension's `Page.setDownloadBehavior`, so a download stays in the
-browser's folder; the executor loads its URL again through the tab with the page's
-cookies, which gives agent code `saveAs()`, `path()`, `createReadStream()` and `failure()` for
-every download except one that answered a form's POST or that a site serves only once.
+refuses an extension's `Page.setDownloadBehavior`, so a download is saved in the
+browser's folder. The extension's `downloads` permission names that file for a
+download an agent tab started, or a tab one opened: the host keeps a copy in the
+session and the browser's copy and its list entry are removed, so agent code gets
+`saveAs()`, `path()`, `createReadStream()` and `failure()` for every download. A
+download no agent tab announced is loaded again through the tab instead.
+
+## Observation
+
+The extension's popup has an observation switch: full (the default), standard and off. In full,
+the executor keeps an activity journal of agent tabs for agents to read with
+`nds-browser-use -s <project> activity`, with secrets removed and repeats folded; standard keeps
+only the host's metadata events; off collects nothing and stops the recorder. See
+[docs/observability.md](docs/observability.md).
 
 ## Devices
 

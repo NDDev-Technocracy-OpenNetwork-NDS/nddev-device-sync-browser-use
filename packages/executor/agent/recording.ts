@@ -1,29 +1,19 @@
-// Video of agent tabs: CDP screencast frames encoded by ffmpeg, which must be on PATH, with a
-// ghost cursor that follows the mouse events that agent actions dispatch, and a demo cut that
-// speeds up the time between executions.
+// Video of agent tabs (agent/capture.ts encodes it) with a ghost cursor that follows the mouse
+// events that agent actions dispatch, and a demo cut that speeds up the time between executions.
+// `recording.start()` returns a handle to keep in `state`: `stop()`, `cancel()`, `setPage(page)`
+// to film another tab, and `wait(ms)` for the manual clock.
 //
-// The fixed-size filter and the static-page start are adapted from Playwriter's
+// The handle API and the viewport fit are adapted from Playwriter's
 // playwriter/src/screen-recording.ts (MIT License, Copyright (c) 2026 Tommy D. Rossi,
 // https://github.com/remorses/playwriter).
-import { type ChildProcess, spawn } from "node:child_process";
-import { stat, unlink } from "node:fs/promises";
-import { isAbsolute } from "node:path";
-import type { CDPSession, Page } from "playwright-core";
+import { spawn } from "node:child_process";
+import { inspect } from "node:util";
+import type { Page } from "playwright-core";
+import { Capture, type Clock, fitToAspectRatio } from "./capture";
 
 type Span = { start: number; end: number };
 
-type Recording = {
-  cdp: CDPSession;
-  ffmpeg: ChildProcess;
-  path: string;
-  started: number;
-  executions: Span[];
-  last?: Buffer | undefined;
-  timer: ReturnType<typeof setTimeout>;
-  encoded: Promise<number>;
-};
-
-const recordings = new Map<Page, Recording>();
+const handles = new Set<RecordingHandle>();
 let running: number | undefined;
 
 /** The executor marks each execution, so a demo cut can tell work from waiting. */
@@ -34,22 +24,23 @@ export function executing(active: boolean): void {
   }
   const start = running ?? Date.now();
   running = undefined;
-  for (const recording of recordings.values()) {
-    recording.executions.push({
-      start: Math.max(0, start - recording.started),
-      end: Date.now() - recording.started,
-    });
-  }
+  for (const handle of handles) handle.executed(start, Date.now());
 }
 
 export type RecordingOptions = {
   page: Page;
   outputPath: string;
   frameRate?: number | undefined;
+  /** The page's sound too, with the real clock only. */
+  audio?: boolean | undefined;
+  /** `real` films all time; `manual` only the time inside `handle.wait(ms)`. */
+  clock?: Clock | undefined;
   /** The longest edge of the frames in pixels. */
   maxSize?: number | undefined;
   /** JPEG quality of the frames, 0 to 100. */
   quality?: number | undefined;
+  /** Shrinks the viewport to this aspect ratio while recording, such as 16:9; restored after. */
+  aspectRatio?: { width: number; height: number } | null | undefined;
   /** Stops by itself after this long; 0 never does. */
   maxDurationMs?: number | undefined;
 };
@@ -61,136 +52,174 @@ export type RecordingResult = {
   executionTimestamps: Span[];
 };
 
+/** Shrinks the viewport to the aspect ratio and returns what restores it. A tab of the owner's
+ * window has no emulated viewport: it is fitted from its window's size through CDP, and the
+ * override is cleared afterwards, so the tab is as it was. */
+async function fit(
+  page: Page,
+  ratio: { width: number; height: number } | null | undefined,
+): Promise<() => Promise<void>> {
+  if (!ratio) return async () => {};
+  const emulated = page.viewportSize();
+  const current =
+    emulated ??
+    (await page.evaluate(() => ({ width: innerWidth, height: innerHeight })).catch(() => null));
+  if (!current) return async () => {};
+  const fitted = fitToAspectRatio(current, ratio);
+  if (fitted.width === current.width && fitted.height === current.height) return async () => {};
+  if (emulated) {
+    await page.setViewportSize(fitted);
+    return async () => {
+      if (!page.isClosed()) await page.setViewportSize(emulated).catch(() => {});
+    };
+  }
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    ...fitted,
+    deviceScaleFactor: 0,
+    mobile: false,
+  });
+  return async () => {
+    await cdp.send("Emulation.clearDeviceMetricsOverride").catch(() => {});
+    await cdp.detach().catch(() => {});
+  };
+}
+
+/** A running recording; keep it in `state` to stop it or move it in later executions. */
+export class RecordingHandle {
+  private readonly executions: Span[] = [];
+  private readonly timer: ReturnType<typeof setTimeout> | undefined;
+  private done: Promise<RecordingResult> | undefined;
+
+  constructor(
+    private readonly capture: Capture,
+    private readonly ratio: { width: number; height: number } | null | undefined,
+    private restore: () => Promise<void>,
+    maxDurationMs: number,
+  ) {
+    handles.add(this);
+    this.timer =
+      maxDurationMs > 0
+        ? setTimeout(() => void this.stop().catch(() => {}), maxDurationMs)
+        : undefined;
+  }
+
+  get page(): Page {
+    return this.capture.page;
+  }
+  get clock(): Clock {
+    return this.capture.clock;
+  }
+  get outputPath(): string {
+    return this.capture.outputPath;
+  }
+  get startedAt(): number {
+    return this.capture.startedAt;
+  }
+  get isRecording(): boolean {
+    return this.capture.recording;
+  }
+
+  /** @internal */
+  executed(start: number, end: number): void {
+    this.executions.push({
+      start: Math.max(0, start - this.startedAt),
+      end: end - this.startedAt,
+    });
+  }
+
+  /** Films another tab from now on; the viewport fit and the ghost cursor move with it. */
+  async setPage(page: Page): Promise<void> {
+    if (page === this.page) return;
+    const restore = await fit(page, this.ratio);
+    try {
+      await this.capture.setPage(page);
+    } catch (error) {
+      await restore();
+      throw error;
+    }
+    await this.restore();
+    this.restore = restore;
+    await ghostCursor.show({ page }).catch(() => {});
+  }
+
+  /** The manual clock only: films the next `ms` of real time. */
+  wait(ms: number): Promise<void> {
+    return this.capture.wait(ms);
+  }
+
+  /** Finishes the file; the real clock also returns the executions' times for a demo cut. */
+  stop(): Promise<RecordingResult> {
+    this.done ??= (async () => {
+      clearTimeout(this.timer);
+      handles.delete(this);
+      try {
+        const result = await this.capture.stop();
+        return { ...result, executionTimestamps: this.clock === "real" ? this.executions : [] };
+      } finally {
+        await this.restore();
+      }
+    })();
+    return this.done;
+  }
+
+  /** Stops without keeping the file. */
+  async cancel(): Promise<void> {
+    clearTimeout(this.timer);
+    handles.delete(this);
+    await this.capture.cancel();
+    await this.restore();
+  }
+
+  [inspect.custom](): object {
+    return {
+      outputPath: this.outputPath,
+      clock: this.clock,
+      isRecording: this.isRecording,
+      page: this.page.isClosed() ? "(closed)" : this.page.url(),
+    };
+  }
+}
+
 async function start({
   page,
   outputPath,
-  frameRate = 30,
-  maxSize = 1920,
-  quality = 90,
+  aspectRatio,
   maxDurationMs = 15 * 60 * 1000,
-}: RecordingOptions): Promise<void> {
-  if (recordings.has(page)) throw new Error("this page is already recording");
-  if (!isAbsolute(outputPath)) throw new Error("outputPath must be an absolute path");
-  // The video keeps the size the page has now: later frames of another size are scaled into it
-  // and padded, with square pixels, so a resized viewport never reconfigures the encoder.
-  const { width, height } = await frameSize(page, maxSize);
-  const fit = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,setsar=1`;
-  const codec = outputPath.endsWith(".webm")
-    ? ["-c:v", "libvpx", "-b:v", "4M"]
-    : ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart"];
-  const ffmpeg = spawn(
-    "ffmpeg",
-    [
-      ...["-y", "-loglevel", "error", "-f", "image2pipe", "-use_wallclock_as_timestamps", "1"],
-      ...["-c:v", "mjpeg", "-i", "-"],
-      ...["-vf", `fps=${frameRate},${fit}`, ...codec, outputPath],
-    ],
-    { stdio: ["pipe", "ignore", "pipe"] },
-  );
-  let errors = "";
-  ffmpeg.stderr?.on("data", (chunk: Buffer) => {
-    errors = `${errors}${chunk}`.slice(-2000);
-  });
-  const encoded = new Promise<number>((done, failed) => {
-    ffmpeg.on("error", () => failed(new Error("recording needs ffmpeg on PATH")));
-    ffmpeg.on("close", (code) =>
-      code === 0 ? done(code) : failed(new Error(`ffmpeg failed: ${errors.trim()}`)),
-    );
-  });
-  encoded.catch(() => {});
-  const cdp = await page.context().newCDPSession(page);
-  const recording: Recording = {
-    cdp,
-    ffmpeg,
-    path: outputPath,
-    started: Date.now(),
-    executions: [],
-    timer: setTimeout(() => void stop({ page }).catch(() => {}), maxDurationMs || 2 ** 31 - 1),
-    encoded,
-  };
-  recordings.set(page, recording);
-  let frames = 0;
-  let firstFrame!: () => void;
-  const first = new Promise<void>((done) => {
-    firstFrame = done;
-  });
-  cdp.on("Page.screencastFrame", ({ data, sessionId }) => {
-    frames += 1;
-    recording.last = Buffer.from(data, "base64");
-    ffmpeg.stdin?.write(recording.last);
-    void cdp.send("Page.screencastFrameAck", { sessionId }).catch(() => {});
-    firstFrame();
-  });
-  page.once("close", () => void stop({ page }).catch(() => {}));
-  // The screencast starts first: it wakes the compositor where a screenshot would stall. A page
-  // that never paints sends no frame, so a screenshot seeds one, unless a live frame came first.
-  await cdp.send("Page.startScreencast", {
-    format: "jpeg",
-    quality,
-    maxWidth: maxSize,
-    maxHeight: maxSize,
-  });
-  if (frames === 0) {
-    const seed = cdp
-      .send("Page.captureScreenshot", { format: "jpeg", quality })
-      .then(({ data }) => {
-        if (frames === 0 && recordings.get(page) === recording) {
-          recording.last = Buffer.from(data, "base64");
-          ffmpeg.stdin?.write(recording.last);
-        }
-      })
-      .catch(() => {});
-    await Promise.race([first, seed]);
+  ...options
+}: RecordingOptions): Promise<RecordingHandle> {
+  if ([...handles].some((handle) => handle.page === page)) {
+    throw new Error("this page is already recording");
   }
+  const restore = await fit(page, aspectRatio);
+  let capture: Capture;
+  try {
+    capture = await Capture.start({ page, outputPath, ...options });
+  } catch (error) {
+    await restore();
+    throw error;
+  }
+  const handle = new RecordingHandle(capture, aspectRatio, restore, maxDurationMs);
   await ghostCursor.show({ page }).catch(() => {});
+  return handle;
 }
 
-/** The frame size of the page now, as the screencast delivers it: CSS pixels times the device
- * scale, fitted into `maxSize`, with even sides for yuv420p. */
-async function frameSize(page: Page, maxSize: number): Promise<{ width: number; height: number }> {
-  const viewport = await page
-    .evaluate(() => [innerWidth, innerHeight, devicePixelRatio] as const)
-    .catch(() => [1280, 720, 1] as const);
-  const [cssWidth, cssHeight, scale] = viewport;
-  const width = Math.max(2, cssWidth * scale);
-  const height = Math.max(2, cssHeight * scale);
-  const fit = Math.min(1, maxSize / Math.max(width, height));
-  const even = (value: number) => Math.max(2, 2 * Math.round((value * fit) / 2));
-  return { width: even(width), height: even(height) };
-}
-
-async function stop({ page }: { page: Page }): Promise<RecordingResult> {
-  const recording = recordings.get(page);
-  if (!recording) throw new Error("this page is not recording");
-  recordings.delete(page);
-  clearTimeout(recording.timer);
-  await recording.cdp.send("Page.stopScreencast").catch(() => {});
-  await recording.cdp.detach().catch(() => {});
-  // A page that stood still since its last frame keeps that frame until the end.
-  if (recording.last) recording.ffmpeg.stdin?.write(recording.last);
-  recording.ffmpeg.stdin?.end();
-  await recording.encoded;
-  const { size } = await stat(recording.path);
-  return {
-    path: recording.path,
-    duration: Date.now() - recording.started,
-    size,
-    executionTimestamps: recording.executions,
-  };
-}
-
-async function cancel({ page }: { page: Page }): Promise<void> {
-  const recording = recordings.get(page);
-  if (!recording) return;
-  await stop({ page }).catch(() => {});
-  await unlink(recording.path).catch(() => {});
+function find(page: Page): RecordingHandle | undefined {
+  return [...handles].find((handle) => handle.page === page);
 }
 
 export const recording = {
   start,
-  stop,
-  cancel,
-  isRecording: ({ page }: { page: Page }) => recordings.has(page),
+  /** The handle's own `stop()`, by its page. */
+  stop: async ({ page }: { page: Page }): Promise<RecordingResult> => {
+    const handle = find(page);
+    if (!handle) throw new Error("this page is not recording");
+    return handle.stop();
+  },
+  cancel: async ({ page }: { page: Page }): Promise<void> => {
+    await find(page)?.cancel();
+  },
+  isRecording: ({ page }: { page: Page }) => find(page) !== undefined,
 };
 
 type CursorStyle = "minimal" | "dot" | "screenstudio";

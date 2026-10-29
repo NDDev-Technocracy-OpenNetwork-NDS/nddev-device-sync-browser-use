@@ -10,6 +10,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -17,7 +18,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { type BrowserContext, chromium, type Page } from "playwright-core";
+import { type Browser, type BrowserContext, chromium, type Page } from "playwright-core";
 
 const windows = process.platform === "win32";
 const repository = resolve(import.meta.dir, "..");
@@ -50,15 +51,21 @@ const extensionId = "lcdkocghcaakekcaeopjanfbohpfacbk";
 const env: Record<string, string> = {
   ...(process.env as Record<string, string>),
   XDG_CONFIG_HOME: join(root, "config"),
+  XDG_STATE_HOME: join(root, "state"),
   NDS_BROWSER_USE_RUNTIME_DIR: runtime,
 };
 
 let observer: BrowserContext;
+// A plain CDP client of the test browser, there only to give downloads back their default
+// behavior, which Playwright's observer replaced with its own folder and file names.
+let defaults: Browser | undefined;
+const downloadsFolder = join(root, "downloads");
 // The CLI's configuration directory, beside the host configuration that `install` wrote.
 let configuration: string;
 let fixture: ReturnType<typeof Bun.serve>;
 let origin: string;
 let requests = 0;
+const served = { once: 0 };
 
 function required(name: string): string {
   const value = process.env[name];
@@ -149,6 +156,21 @@ async function observed(path: string): Promise<Page | undefined> {
   return observer.pages().find((page) => page.url() === `${origin}${path}`);
 }
 
+async function observation(profile: "full" | "standard" | "off"): Promise<void> {
+  const page = await observer.newPage();
+  await page.goto(`chrome-extension://${extensionId}/popup.html`);
+  await page.locator(`button[data-profile="${profile}"]`).click();
+  await page.waitForFunction((expected) => document.body.dataset.observation === expected, profile);
+  await page.close();
+  for (
+    let attempt = 0;
+    attempt < 100 && (await cli("status")).body.observation !== profile;
+    attempt++
+  ) {
+    await Bun.sleep(50);
+  }
+}
+
 async function ownerSwitch(enable: boolean): Promise<void> {
   const page = await observer.newPage();
   await page.goto(`chrome-extension://${extensionId}/popup.html`);
@@ -192,6 +214,16 @@ beforeAll(async () => {
         return Response.redirect(`http://localhost:${fixture?.port}/files/plain`, 302);
       }
       if (path === "/files/plain") return attachment("moved body", "moved.txt");
+      if (path === "/api/journal") {
+        return Response.json({ order: 7, items: ["shoe"], accessToken: "tok-should-not-stay" });
+      }
+      // Served once, as a signed link that expires on first use.
+      if (path === "/files/once") {
+        served.once += 1;
+        return served.once === 1
+          ? attachment("once body", "once.txt")
+          : new Response("gone", { status: 410 });
+      }
       if (path === "/files/post") {
         return request.method === "POST"
           ? attachment("posted body", "posted.txt")
@@ -209,7 +241,17 @@ beforeAll(async () => {
         "/fetch": `<button id="load" onclick="fetch('/api').then((r) => r.text()).then((t) => (out.textContent = t))">Load</button><span id="out"></span>`,
         "/api": "live",
         // The page revokes its blob URL later, as FileSaver does.
-        "/files": `<title>Files</title><a id="bytes" href="/files/bytes">Bytes</a><a id="moved" href="/files/moved">Moved</a><form method="post" action="/files/post"><button id="post">Post</button></form><button id="blob" onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['blob body'])); a.download = 'made.txt'; a.click(); setTimeout(() => window.URL.revokeObjectURL(a.href), 40000)">Blob</button>`,
+        // The blob button revokes its URL at once, the tab link and window.open open the file in a
+        // new tab, and the frame of another site offers its own link.
+        "/files": `<title>Files</title><a id="bytes" href="/files/bytes">Bytes</a><a id="moved" href="/files/moved">Moved</a><a id="once" href="/files/once">Once</a><form method="post" action="/files/post"><button id="post">Post</button></form><button id="blob" onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['blob body'])); a.download = 'made.txt'; a.click(); window.URL.revokeObjectURL(a.href)">Blob</button><a id="tab" href="/files/plain" target="_blank">Tab</a><button id="open" onclick="window.open('/files/once')">Open</button><iframe src="http://localhost:${fixture?.port}/files-frame"></iframe>`,
+        "/files-frame": `<a id="inner" href="/files/plain">Inner</a>`,
+        // A tone the page plays through Web Audio once a button is pressed.
+        "/tone": `<title>Tone</title><button id="tone" onclick="const audio = new AudioContext(); const tone = audio.createOscillator(); tone.frequency.value = 440; tone.connect(audio.destination); tone.start()">Tone</button>`,
+        // A form for the recorder: a password field whose label names no secret, and a status
+        // region that announces the save.
+        "/record": `<title>Record</title><input id="name" aria-label="Name"><input id="word" type="password" aria-label="Kennwort"><button id="save" onclick="document.getElementById('status').textContent = 'Saved ' + document.getElementById('name').value">Save</button><div role="status" id="status"></div>`,
+        // A page whose script calls the site's API, logs the same error twice and throws.
+        "/journal": `<title>Journal</title><input id="email" aria-label="Email"><input id="password" type="password" aria-label="Password"><script>fetch('/api/journal?id=7&token=abc').then((r) => r.json()); console.error('cart failed'); console.error('cart failed'); setTimeout(() => { throw new Error('late boom') });</script>`,
         // A different site (localhost vs 127.0.0.1) renders out of process.
         "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
         "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
@@ -278,16 +320,37 @@ beforeAll(async () => {
     "chrome-extension://lpnfnhkdjamhnoknoohhmjfhhjkeofio/",
   ]);
   writeFileSync(manifest, JSON.stringify({ ...registered, path: wrapper }));
+  // Downloads go to the profile's own folder under the names sites suggest, as in the owner's
+  // browser, never into the home of whoever runs the tests.
+  mkdirSync(join(profile, "Default"), { recursive: true });
+  mkdirSync(downloadsFolder, { recursive: true });
+  writeFileSync(
+    join(profile, "Default", "Preferences"),
+    JSON.stringify({
+      download: { default_directory: downloadsFolder, prompt_for_download: false },
+      savefile: { default_directory: downloadsFolder },
+    }),
+  );
   observer = await chromium.launchPersistentContext(profile, {
     executablePath: chrome,
     headless: true,
     env,
+    // Tabs keep their window's own size, as in the owner's browser: the observer emulates none.
+    viewport: null,
     args: [
+      "--remote-debugging-port=0",
       `--disable-extensions-except=${installed},${foreign}`,
       `--load-extension=${installed},${foreign}`,
       ...(process.env.NDS_E2E_DIAGNOSTICS === "1" ? ["--enable-logging=stderr"] : []),
     ],
   });
+  const port = readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0];
+  defaults = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  await (await defaults.newBrowserCDPSession()).send("Browser.setDownloadBehavior", {
+    behavior: "default",
+  });
+  // Only the setting is needed; the client itself would watch every tab beside the observer.
+  await defaults.close();
   // The observer stays passive: Playwright would otherwise dismiss every
   // dialog on pages it watches and race the agent's own handler.
   for (const page of observer.pages()) page.on("dialog", () => undefined);
@@ -305,6 +368,7 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  await defaults?.close().catch(() => undefined);
   await observer?.close().catch(() => undefined);
   fixture?.stop(true);
   // CI diagnostics: the host log carries event names and outcomes only, never page data.
@@ -805,6 +869,115 @@ async function recorded(): Promise<void> {
   expect((streams[0]?.width ?? 1) % 2).toBe(0);
 }
 
+// Recording parity with Playwriter: a handle to keep, a manual clock that films only `wait(ms)`, a
+// file that appears complete, other containers, another tab mid-recording, a viewport fitted to
+// an aspect ratio and restored, and the page's own sound. Skipped without ffmpeg.
+test.skipIf(Bun.which("ffmpeg") === null)(
+  "recordings film the manual clock, move between tabs and keep the page's sound",
+  async () => {
+    await opened("filming");
+    const probe = (path: string, entries: string) =>
+      JSON.parse(
+        Bun.spawnSync([
+          "ffprobe",
+          "-v",
+          "error",
+          "-show_entries",
+          entries,
+          "-of",
+          "json",
+          path,
+        ]).stdout.toString(),
+      ) as { format?: { duration?: string }; streams?: Record<string, unknown>[] };
+    try {
+      const manual = await run(
+        "filming",
+        `const fs = require("node:fs");
+         const page = await context.newPage(); await page.goto("${origin}/?manual");
+         const path = artifacts + "/manual.webm";
+         const handle = await recording.start({ page, outputPath: path, clock: "manual" });
+         const before = fs.existsSync(path);
+         await page.waitForTimeout(1500);
+         await handle.wait(1000);
+         await page.waitForTimeout(800);
+         const done = await handle.stop(); await page.close();
+         return JSON.stringify({ before, path: done.path, clock: handle.clock, recording: handle.isRecording })`,
+        "--timeout",
+        "20000",
+      );
+      expect(manual.body).toMatchObject({ failure: null });
+      const filmed = JSON.parse(String(manual.body.value));
+      expect(filmed).toMatchObject({ before: false, clock: "manual", recording: false });
+      const webm = probe(filmed.path, "format=duration:stream=codec_name");
+      expect(Number(webm.format?.duration)).toBeGreaterThan(0.8);
+      expect(Number(webm.format?.duration)).toBeLessThan(1.5);
+      expect(webm.streams?.[0]?.codec_name).toBe("vp8");
+
+      const moved = await run(
+        "filming",
+        `const first = await context.newPage(); await first.goto("${origin}/?first");
+         const second = await context.newPage(); await second.goto("${origin}/linked");
+         const inner = (page) => page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+         const size = await inner(first);
+         const handle = await recording.start({ page: first, outputPath: artifacts + "/moved.mp4", aspectRatio: { width: 1, height: 1 } });
+         const fitted = await inner(first);
+         await first.waitForTimeout(600);
+         await handle.setPage(second);
+         const back = await inner(first);
+         const square = await inner(second);
+         await second.waitForTimeout(600);
+         const done = await handle.stop();
+         const after = await inner(second);
+         await first.close(); await second.close();
+         return JSON.stringify({ size, fitted, back, square, after, page: handle.page === second, path: done.path })`,
+        "--timeout",
+        "20000",
+      );
+      expect(moved.body).toMatchObject({ failure: null });
+      const switched = JSON.parse(String(moved.body.value));
+      expect(switched.fitted.width).toBe(switched.fitted.height);
+      expect(switched.back).toEqual(switched.size);
+      expect(switched.square.width).toBe(switched.square.height);
+      expect(switched.after).toEqual(switched.size);
+      expect(switched.page).toBe(true);
+      const mp4 = probe(switched.path, "format=duration:stream=width,height");
+      expect(Number(mp4.format?.duration)).toBeGreaterThan(1);
+      expect(mp4.streams?.[0]?.width).toBe(mp4.streams?.[0]?.height);
+
+      const sound = await run(
+        "filming",
+        `const page = await context.newPage(); await page.goto("${origin}/tone");
+         const handle = await recording.start({ page, outputPath: artifacts + "/tone.mp4", audio: true });
+         await page.click("#tone");
+         await page.waitForTimeout(2000);
+         const done = await handle.stop(); await page.close();
+         return done.path`,
+        "--timeout",
+        "20000",
+      );
+      expect(sound.body).toMatchObject({ failure: null });
+      const audio = probe(String(sound.body.value), "stream=codec_type,codec_name");
+      expect(audio.streams?.map((stream) => stream.codec_type).sort()).toEqual(["audio", "video"]);
+      const volume = Bun.spawnSync([
+        "ffmpeg",
+        "-hide_banner",
+        "-i",
+        String(sound.body.value),
+        "-af",
+        "volumedetect",
+        "-f",
+        "null",
+        "-",
+      ]).stderr.toString();
+      const peak = Number(/max_volume: (-?[\d.]+) dB/.exec(volume)?.[1] ?? "-91");
+      expect(peak).toBeGreaterThan(-30);
+    } finally {
+      await cli("session", "close", "filming", "--close-tabs");
+    }
+  },
+  90_000,
+);
+
 // DevTools helpers over raw CDP: matched CSS rules, a live script edit, and a breakpoint with its
 // local variables and an expression evaluated in the paused frame.
 test("devtools helpers style, edit and debug an agent page", async () => {
@@ -854,43 +1027,71 @@ test("devtools helpers style, edit and debug an agent page", async () => {
   }
 });
 
-// The recorder: a person acts in an agent tab, and the agent reads a timeline of actions with
-// locators and a frame of the screen.
+// The recorder: a person acts in an agent tab, and the agent reads Playwright's codegen of each
+// action, the status message the page announced and a frame of the screen. A value typed into a
+// password field is never kept, whatever its label says.
 test("the recorder turns a person's actions in an agent tab into events and frames", async () => {
   await opened("recorder");
   try {
     const started = await run(
       "recorder",
-      `const page = await context.newPage(); await page.goto("${origin}/helpers?recorder"); return JSON.stringify(await recorder.start())`,
+      `const page = await context.newPage(); await page.goto("${origin}/record"); return JSON.stringify(await recorder.start())`,
     );
+    expect(started.body).toMatchObject({ failure: null });
     expect(JSON.parse(String(started.body.value)).path).toStartWith(
       join(runtime, "sessions", "recorder"),
     );
     // The CLI's recorder commands are the helper's calls.
     const status = await plain("-s", "recorder", "recorder", "status");
     expect(status.code).toBe(0);
-    // inspect escapes a Windows path's separators, so only its platform-neutral parts are compared.
-    expect(status.stdout).toContain("id: '1'");
     expect(status.stdout).toContain("recordings");
-    const tab = await observed("/helpers?recorder");
-    await tab?.click("#save");
+    const tab = await observed("/record");
     await tab?.fill("#name", "Ada");
+    await tab?.fill("#word", "hunter2");
+    await tab?.click("#save");
     await tab?.locator("#name").press("Tab");
-    await Bun.sleep(1000);
-    const result = await run(
-      "recorder",
-      `const stopped = await recorder.stop(); return JSON.stringify({ stopped, timeline: recorder.events(), first: recorder.frame({ eventId: 1 }) })`,
+    await Bun.sleep(1500);
+    const stopped = await run("recorder", `return JSON.stringify(await recorder.stop())`);
+    expect(stopped.body).toMatchObject({ failure: null });
+    expect(JSON.parse(String(stopped.body.value)).frames).toBeGreaterThan(0);
+    const listed = await plain("-s", "recorder", "recorder", "events");
+    expect(listed.code).toBe(0);
+    expect(listed.stdout).not.toContain("hunter2");
+    const events = listed.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const actions = events.filter((event) => event.type === "person-action");
+    expect(actions.map((event) => [event.action, event.value ?? event.key ?? null])).toEqual([
+      ["fill", "Ada"],
+      ["fill", "[redacted]"],
+      ["click", null],
+      ["press", "Tab"],
+    ]);
+    expect(String(actions[2]?.code)).toBe(
+      "await page.getByRole('button', { name: 'Save' }).click();",
     );
-    const seen = JSON.parse(String(result.body.value)) as {
-      stopped: { events: number; frames: number };
-      timeline: string;
-      first: string;
-    };
-    expect(seen.timeline).toContain('click getByRole("button", { name: "Save" })');
-    expect(seen.timeline).toContain('fill getByRole("textbox", { name: "Name" }) = "Ada"');
-    expect(seen.timeline).toContain("press");
-    expect(seen.stopped.frames).toBeGreaterThan(0);
-    expect(existsSync(seen.first)).toBe(true);
+    expect(String(actions[2]?.aria)).toContain('textbox "Name" [ref=e2]: Ada');
+    expect(String(actions[2]?.aria)).toContain('textbox "Kennwort" [ref=e3]: [redacted]');
+    expect(String(actions[1]?.code)).not.toContain("hunter2");
+    expect(events.some((event) => event.type === "toast" && event.text === "Saved Ada")).toBe(true);
+    const frame = await plain(
+      "-s",
+      "recorder",
+      "recorder",
+      "frame",
+      String(actions[2]?.seq),
+      "--offset",
+      "1000",
+    );
+    expect(frame.code).toBe(0);
+    expect(existsSync(frame.stdout.trim())).toBe(true);
+    // The same reading in agent code.
+    const inCode = await run(
+      "recorder",
+      `return (await recorder.events({ type: "person-action" })).split("\\n").length`,
+    );
+    expect(inCode.body.value).toBe("4");
     expect((await plain("-s", "recorder", "recorder", "status")).stdout).toBe(
       "[return value] null\n",
     );
@@ -898,6 +1099,68 @@ test("the recorder turns a person's actions in an agent tab into events and fram
   } finally {
     await cli("session", "close", "recorder", "--close-tabs");
   }
+});
+
+// A screenshot shows the page, not this module's ghost cursor; a labelled screenshot keeps its
+// labels. A bare `page` says how to get one.
+test("screenshots leave the ghost cursor out and a bare page says how to get one", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/record");
+     // A blank part of the page, so the pointer hovers nothing there.
+     const clip = { x: 0, y: 300, width: 60, height: 60 };
+     await page.evaluate(() => document.activeElement?.blur());
+     const plain = await page.screenshot({ clip, type: "jpeg", quality: 100 });
+     await ghostCursor.show({ page, style: "dot" });
+     await page.mouse.move(30, 330);
+     await page.waitForTimeout(400);
+     const shown = await page.evaluate(() => getComputedStyle(document.getElementById("nds-ghost-cursor")).display);
+     const withCursor = await page.screenshot({ clip, type: "jpeg", quality: 100 });
+     const after = await page.evaluate(() => [Boolean(document.getElementById("nds-ghost-cursor")), Boolean(document.getElementById("nds-screenshot-style"))]);
+     await ghostCursor.hide({ page });
+     await page.close();
+     return JSON.stringify({ shown, same: plain.equals(withCursor), after })`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body).toMatchObject({ failure: null });
+  expect(JSON.parse(String(result.body.value))).toEqual({
+    shown: "block",
+    same: true,
+    after: [true, false],
+  });
+  const bare = await run("acceptance", "page.url()");
+  expect(String(bare.body.output)).toContain("There is no global `page`");
+});
+
+// The guide's performance recipes work through the extension: buffered web vitals, CDP counters,
+// CPU throttling and measures of the agent's own steps.
+test("the guide's performance recipes measure an agent page", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/article");
+     const vitals = await page.evaluate(() => new Promise((done) => {
+       const seen = { paints: {}, cls: 0 };
+       new PerformanceObserver((list) => { for (const e of list.getEntries()) seen.paints[e.name] = e.startTime; }).observe({ type: "paint", buffered: true });
+       setTimeout(() => done(seen), 300);
+     }));
+     const cdp = await getCDPSession({ page });
+     await cdp.send("Performance.enable");
+     const metrics = Object.fromEntries((await cdp.send("Performance.getMetrics")).metrics.map((m) => [m.name, m.value]));
+     await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+     await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+     const measured = await page.evaluate(() => { performance.mark("a"); let x = 0; for (let i = 0; i < 1e6; i++) x += i; performance.mark("b"); return performance.measure("work", "a", "b").duration >= 0; });
+     await cdp.detach(); await page.close();
+     return JSON.stringify({ paint: "first-paint" in vitals.paints || "first-contentful-paint" in vitals.paints, nodes: metrics.Nodes > 0, measured })`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body).toMatchObject({ failure: null });
+  expect(JSON.parse(String(result.body.value))).toEqual({
+    paint: true,
+    nodes: true,
+    measured: true,
+  });
 });
 
 // Agent code loads modules, and reads the elements the owner pinned with right-click. The menu
@@ -1272,17 +1535,21 @@ async function plain(...args: string[]): Promise<{ code: number; stdout: string;
 }
 
 // A download of an agent tab reaches Playwright as its event, with the URL and the name the site
-// suggests, and the agent's copy of its file answers saveAs(), path(), createReadStream() and
-// failure(): with the page's cookies, across a redirect to another site, for a blob and after the
-// page closed, which waits for the copies still loading. A form's POST cannot be sent again, so
-// its file is refused, not replaced by a GET.
+// suggests, and its file is the browser's own, which the host keeps in the session: saveAs(),
+// path(), createReadStream() and failure() answer from it, also after the page closed. That covers
+// a file only the page's cookie opens, a redirect to another site, a blob the page revoked at once,
+// a form's POST, a link that works once, a frame of another site, and a file that opens in a new
+// tab, which is reported on the tab that opened it. The browser's own copies are gone afterwards.
 test("an agent tab's download is the agent's file", async () => {
-  const result = await run(
+  served.once = 0;
+  const get = `const get = async (selector, frame) => (await Promise.all([page.waitForEvent("download"), (frame ? page.frameLocator("iframe").locator(selector) : page.locator(selector)).click()]))[0];
+     const read = async (download) => require("node:fs").readFileSync(await download.path(), "utf8");`;
+  const first = await run(
     "acceptance",
     `const fs = require("node:fs");
      const page = await context.newPage(); await page.goto("${origin}/files");
      await page.evaluate(() => { document.cookie = "nds-e2e=1; path=/"; });
-     const get = async (selector) => (await Promise.all([page.waitForEvent("download"), page.click(selector)]))[0];
+     ${get}
      const bytes = await get("#bytes"), moved = await get("#moved"), made = await get("#blob");
      await Promise.all([bytes, moved, made].map((download) => download.path()));
      await page.close();
@@ -1295,13 +1562,13 @@ test("an agent tab's download is the agent's file", async () => {
        path: require("node:path").basename(await bytes.path()) === "bytes.bin" && fs.readFileSync(await bytes.path()).equals(saved),
        failure: await bytes.failure(),
        moved: Buffer.concat(chunks).toString(),
-       made: fs.readFileSync(await made.path(), "utf8"),
+       made: await read(made),
      })`,
     "--timeout",
     "20000",
   );
-  expect(result.body).toMatchObject({ failure: null });
-  expect(JSON.parse(String(result.body.value))).toEqual({
+  expect(first.body).toMatchObject({ failure: null });
+  expect(JSON.parse(String(first.body.value))).toEqual({
     name: "bytes.bin",
     bytes: true,
     path: true,
@@ -1309,24 +1576,124 @@ test("an agent tab's download is the agent's file", async () => {
     moved: "moved body",
     made: "blob body",
   });
-  const posted = await run(
+  const second = await run(
     "acceptance",
     `const page = await context.newPage(); await page.goto("${origin}/files");
-     const get = async (selector) => (await Promise.all([page.waitForEvent("download"), page.click(selector)]))[0];
-     const posted = await get("#post"), bytes = await get("#bytes");
-     await page.close();
-     await bytes.saveAs(\`\${artifacts}/closed.bin\`);
-     return JSON.stringify({
-       closed: require("node:fs").statSync(\`\${artifacts}/closed.bin\`).size,
-       posted: await posted.saveAs(\`\${artifacts}/posted.txt\`).then(() => "saved", (error) => error.message),
-     })`,
+     ${get}
+     const posted = await get("#post"), once = await get("#once"), inner = await get("#inner", true);
+     return JSON.stringify({ posted: await read(posted), once: await read(once), inner: await read(inner) })`,
     "--timeout",
     "20000",
   );
-  expect(posted.body).toMatchObject({ failure: null });
-  const after = JSON.parse(String(posted.body.value));
-  expect(after.closed).toBe(1024);
-  expect(after.posted).toContain("answered a form's POST");
+  expect(second.body).toMatchObject({ failure: null });
+  expect(JSON.parse(String(second.body.value))).toEqual({
+    posted: "posted body",
+    once: "once body",
+    inner: "moved body",
+  });
+  served.once = 0;
+  const third = await run(
+    "acceptance",
+    `const page = context.pages().find((each) => each.url().endsWith("/files"));
+     ${get}
+     const tab = await get("#tab"), opened = await get("#open");
+     const result = JSON.stringify({
+       tab: [tab.page() === page, tab.suggestedFilename(), await read(tab)],
+       opened: [opened.page() === page, await read(opened)],
+     });
+     await page.close();
+     return result`,
+    "--timeout",
+    "20000",
+  );
+  expect(third.body).toMatchObject({ failure: null });
+  expect(JSON.parse(String(third.body.value))).toEqual({
+    tab: [true, "moved.txt", "moved body"],
+    opened: [true, "once body"],
+  });
+  // The browser's list keeps none of these downloads and their files are gone.
+  const worker = observer.serviceWorkers().find((each) => each.url().includes(extensionId));
+  type Downloads = { search(query: object): Promise<{ url: string; exists: boolean }[]> };
+  const left = await worker?.evaluate(async (prefix) => {
+    const { downloads } = (globalThis as unknown as { chrome: { downloads: Downloads } }).chrome;
+    return (await downloads.search({})).filter((item) => item.url.startsWith(prefix) && item.exists)
+      .length;
+  }, origin);
+  expect(left).toBe(0);
+  expect(readdirSync(downloadsFolder)).toEqual([]);
+});
+
+// The activity journal (docs/observability.md) in the full profile: the execution with its typed
+// literals left out, the actions with safe values, the page's API request with its body stored
+// once and its secrets removed, a repeated console error folded and the page error. The popup's
+// Off stops it, and the CLI reads it without the host.
+test("the activity journal keeps what agents did and the popup's off stops it", async () => {
+  const activity = async (...flags: string[]) => {
+    const result = await plain("-s", "acceptance", "activity", "--all", "--full", ...flags);
+    return result.stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  };
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/journal");
+     await page.fill("#email", "ann@test"); await page.fill("#password", "hunter2");
+     await page.evaluate(() => alert("checkout?"));
+     await page.waitForTimeout(1500); await page.close(); return "journaled"`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body).toMatchObject({ failure: null });
+  await Bun.sleep(1500);
+  const records = await activity();
+  const text = JSON.stringify(records);
+  expect(text).not.toContain("hunter2");
+  expect(text).not.toContain("tok-should-not-stay");
+  expect(text).not.toContain("token=abc");
+  const execution = records.findLast((record) => record.type === "execution");
+  expect(execution).toMatchObject({ ok: true });
+  expect(String(execution?.code)).toContain('page.fill("#email", "[redacted]")');
+  const fills = records.filter((record) => record.type === "action" && record.api === "fill");
+  expect(fills.slice(-2).map((record) => [record.locator, record.value])).toEqual([
+    ["#email", "ann@test"],
+    ["#password", "[redacted]"],
+  ]);
+  const api = records.findLast(
+    (record) => record.type === "network" && String(record.url).includes("/api/journal"),
+  );
+  expect(api).toMatchObject({ method: "GET", status: 200, resource: "fetch" });
+  expect(String(api?.url)).toContain("token=[redacted]");
+  const hash = (api?.body as { hash?: string } | undefined)?.hash ?? "";
+  const body = await plain("-s", "acceptance", "activity", "body", hash);
+  expect(JSON.parse(body.stdout)).toEqual({ order: 7, items: ["shoe"], accessToken: "[redacted]" });
+  const errors = records.filter(
+    (record) => record.type === "console" && record.text === "cart failed",
+  );
+  expect(errors.at(-1)).toMatchObject({ level: "error", repeat: 2 });
+  expect(
+    records.some((record) => record.type === "page-error" && record.message === "late boom"),
+  ).toBe(true);
+  // Playwright still dismissed the dialog nobody handled; the host journaled it.
+  expect(
+    records.some(
+      (record) =>
+        record.type === "dialog" && record.kind === "alert" && record.text === "checkout?",
+    ),
+  ).toBe(true);
+  // The owner's popup turns it off: the next execution leaves nothing new.
+  await observation("off");
+  expect((await cli("status")).body.observation).toBe("off");
+  const before = (await activity()).length;
+  await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/journal"); await page.close(); return 1`,
+  );
+  await Bun.sleep(1500);
+  expect((await activity()).length).toBe(before);
+  await observation("full");
+  expect((await cli("status")).body.observation).toBe("full");
 });
 
 // Another device's browser is driven through that device's own CLI: here a device whose transport

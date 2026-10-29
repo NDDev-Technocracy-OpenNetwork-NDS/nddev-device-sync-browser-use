@@ -5,7 +5,9 @@
 //! executor stops, agent tabs are released by the extension and the private
 //! sockets are removed.
 
+mod downloads;
 mod executor;
+mod observation;
 mod relay;
 
 use crate::{
@@ -51,6 +53,8 @@ pub struct Config {
     pub runtime: PathBuf,
     pub bun: PathBuf,
     pub executor: PathBuf,
+    /// The activity journal's root: one directory per project (docs/observability.md).
+    pub activity: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -107,6 +111,10 @@ struct State {
     user_agent: String,
     sessions: HashMap<String, Session>,
     tabs: HashMap<i64, Tab>,
+    /// The connected extension names agent downloads' files (see [`downloads`]).
+    downloads: bool,
+    /// The owner's observation profile (see [`observation`]).
+    observation: observation::Observation,
     /// Child CDP sessions (frames, workers) and the agent tab that owns them.
     children: HashMap<String, i64>,
 }
@@ -127,6 +135,10 @@ struct Session {
     aliases: HashMap<String, relay::Alias>,
     /// Whether the current client asked for download events; it ends with the client.
     downloads: Option<relay::Downloads>,
+    /// Finished downloads the executor has not taken yet.
+    files: downloads::Files,
+    /// The session's activity journal, opened by its first record (docs/observability.md).
+    journal: Option<Arc<Mutex<crate::activity::Writer>>>,
 }
 
 struct Tab {
@@ -279,6 +291,15 @@ pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
         state: Mutex::default(),
     });
     tracing::info!(event.name = "browser.host.started", outcome = "ready");
+    // The activity journal keeps one week within its size bound (docs/observability.md).
+    let journal = host.config.activity.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::activity::prune(
+            &journal,
+            std::time::SystemTime::now(),
+            crate::activity::TOTAL_BYTES,
+        );
+    });
     let control_task = tokio::spawn(host.clone().serve_control(control));
     let relay_task = tokio::spawn(relay::serve(host.clone(), cdp));
     let sweep_task = tokio::spawn(host.clone().sweep());
@@ -576,12 +597,13 @@ impl Host {
             })
     }
 
-    fn on_extension(&self, message: Value) {
+    fn on_extension(self: &Arc<Self>, message: Value) {
         match message["type"].as_str() {
             Some("result") => self.on_result(&message),
             Some("event") => self.on_event(message),
             Some("attached") => self.on_attached(&message),
             Some("detached") => self.on_detached(&message),
+            Some("download") => self.on_download(&message),
             Some("telemetry") => match crate::protocol::extension_event(&message) {
                 Some(event) => match event.error {
                     None => tracing::info!(event.name = event.name, outcome = event.outcome),
@@ -598,6 +620,8 @@ impl Host {
                 state.connected = true;
                 state.enabled = message["enabled"].as_bool() == Some(true);
                 state.contract = message["contract"].as_u64();
+                state.downloads = message["downloads"].as_bool() == Some(true);
+                let profile = observation::Observation::parse(&message["observation"]);
                 state.user_agent = bounded(message["userAgent"].as_str().unwrap_or_default(), 512);
                 state.extension = bounded(message["version"].as_str().unwrap_or_default(), 32);
                 state.browser = state
@@ -619,7 +643,11 @@ impl Host {
                     tracing::warn!(event.name = "browser.extension.connected", outcome = "rejected", error.type = "contract");
                 }
                 drop(state);
+                self.observe(profile);
                 self.update();
+            }
+            Some("observation") => {
+                self.observe(observation::Observation::parse(&message["profile"]))
             }
             Some("control") => self.on_control(message["enabled"].as_bool() == Some(true)),
             // The extension gave up adopting a new agent tab after its retries.
@@ -709,6 +737,7 @@ impl Host {
             self.expire_pending(Instant::now());
             // Reuse this owned host task for switch/overflow cleanup. No detached cleanup.
             self.drain_closing().await;
+            self.tick_journals();
             self.close_idle(Instant::now()).await;
         }
     }
@@ -800,6 +829,11 @@ impl Host {
             entry.document = params["frame"]["loaderId"].as_str().map(str::to_owned);
         }
         let project = entry.project.clone();
+        if method == "Page.javascriptDialogOpening" {
+            // Dialogs are journaled here, not by a Playwright listener, which would keep them open.
+            let raw = json!({ "type": "dialog", "tab": tab, "kind": params["type"], "text": params["message"] });
+            Self::journal(&mut state, &self.config.activity, &project, &[raw]);
+        }
         match (method, params["sessionId"].as_str()) {
             ("Target.attachedToTarget", Some(id)) if state.children.len() < 4096 => {
                 state.children.insert(id.to_owned(), tab);
@@ -818,9 +852,9 @@ impl Host {
             let event = json!({ "method": method, "params": params, "sessionId": alias });
             deliver(&mut state, &project, event);
         }
-        if child.is_none()
-            && let Some(event) = relay::download_event(&mut state, &project, method, params)
-        {
+        // A frame of another site downloads through its own child session; Playwright finds the
+        // page by the frame either way.
+        if let Some(event) = relay::download_event(&mut state, &project, method, params) {
             deliver(&mut state, &project, event);
         }
         let session = child.unwrap_or_else(|| tab_session(tab));
@@ -1126,6 +1160,7 @@ impl Host {
                 let state = self.state();
                 Ok(Reply::Status(view::Status {
                     enabled: state.enabled,
+                    observation: Some(state.observation.as_str().to_owned()),
                     browser: state.browser.clone(),
                     extension: state.extension.clone(),
                     sessions: state
@@ -1260,6 +1295,8 @@ impl Host {
                 used: Instant::now(),
                 aliases: HashMap::new(),
                 downloads: None,
+                files: downloads::Files::default(),
+                journal: None,
             },
         );
         Ok(life)
@@ -1580,7 +1617,16 @@ impl Host {
             {
                 return Err(Refusal::SessionNotFound);
             }
-            state.sessions.remove(project);
+            if let Some(journal) = state
+                .sessions
+                .remove(project)
+                .and_then(|session| session.journal)
+            {
+                journal
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .flush();
+            }
             let tabs: Vec<i64> = state
                 .tabs
                 .iter()
