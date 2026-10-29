@@ -3,9 +3,7 @@
 // `recording.start()` returns a handle to keep in `state`: `stop()`, `cancel()`, `setPage(page)`
 // to film another tab, and `wait(ms)` for the manual clock.
 //
-// The handle API and the viewport fit are adapted from Playwriter's
-// playwriter/src/screen-recording.ts (MIT License, Copyright (c) 2026 Tommy D. Rossi,
-// https://github.com/remorses/playwriter).
+// The handle API and the viewport fit are adapted from MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md).
 import { spawn } from "node:child_process";
 import { inspect } from "node:util";
 import type { Page } from "playwright-core";

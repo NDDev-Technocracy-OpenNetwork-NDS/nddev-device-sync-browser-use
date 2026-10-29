@@ -39,13 +39,12 @@ const SETUP = new Set([
 ]);
 const SETUP_TIMEOUT_MS = 10_000;
 // While Chrome captures a screenshot of an agent tab, this worker's ghost cursor, the page's
-// scrollbars and the text caret stay out of it, as in Playwriter; the accessibility labels a
-// labelled screenshot draws stay in.
+// scrollbars and the text caret stay out of it; the accessibility labels a labelled screenshot
+// draws stay in.
 const SHOT_STYLE = "nds-screenshot-style";
 const SHOT_HIDE = `(() => { if (document.getElementById("${SHOT_STYLE}")) return; const style = document.createElement("style"); style.id = "${SHOT_STYLE}"; style.textContent = "#nds-ghost-cursor { display: none !important } html { scrollbar-width: none !important } ::-webkit-scrollbar { display: none !important } * { caret-color: transparent !important }"; (document.head ?? document.documentElement).append(style); })()`;
 const SHOT_SHOW = `document.getElementById("${SHOT_STYLE}")?.remove()`;
-// The ghost cursor shows each agent mouse action in an agent tab and fades after 5 s, as in
-// Playwriter. It moves only after the agent's own Input.dispatchMouseEvent, never with the owner's
+// The ghost cursor shows each agent mouse action in an agent tab and fades after 5 s. It moves only after the agent's own Input.dispatchMouseEvent, never with the owner's
 // mouse. A cursor the executor installed (ghostCursor.show) follows the mouse itself and is left
 // alone, and ghostCursor.hide turns this one off until the next show.
 const CURSOR = `((x, y, press) => { if (globalThis.__ndsCursorOff || !document.documentElement) return; let host = document.getElementById("nds-ghost-cursor"); if (host && !host.__ndsMove) return; if (!host) { host = document.createElement("div"); host.id = "nds-ghost-cursor"; host.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647"; const root = host.attachShadow({ mode: "closed" }); const dot = document.createElement("div"); dot.style.cssText = "position:fixed;left:0;top:0;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:rgba(0,0,0,.55);border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);opacity:0;transition:opacity .3s,transform .1s"; root.append(dot); document.documentElement.append(host); let idle; host.__ndsMove = (x, y, press) => { dot.style.left = x + "px"; dot.style.top = y + "px"; dot.style.opacity = "1"; if (press) { dot.style.transform = "scale(.7)"; setTimeout(() => { dot.style.transform = ""; }, 150); } clearTimeout(idle); idle = setTimeout(() => { dot.style.opacity = "0"; }, 5000); }; } host.__ndsMove(x, y, press); })`;

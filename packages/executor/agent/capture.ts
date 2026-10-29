@@ -14,8 +14,7 @@
 // another size, also from another page after `setPage`, are scaled into it and padded with
 // square pixels. The file appears at `outputPath` only when it is complete.
 //
-// Adapted from Playwriter's playwriter/src/screen-recording.ts and playwriter/src/ffmpeg.ts (MIT
-// License, Copyright (c) 2026 Tommy D. Rossi, https://github.com/remorses/playwriter).
+// Adapted from MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md).
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, rm, stat } from "node:fs/promises";

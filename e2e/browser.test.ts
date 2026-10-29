@@ -458,7 +458,7 @@ test("popups opened by an agent page join the agent session", async () => {
 });
 
 // A sign-in button opens its own popup window, which can hold no tab group; it joins the agent's
-// group as a tab of its opener's window, as Playwriter relocates such windows.
+// group as a tab of its opener's window.
 test("a popup window an agent page opens becomes an agent tab", async () => {
   const result = await run(
     "acceptance",
@@ -698,7 +698,7 @@ async function helpers(): Promise<void> {
   expect(seen.changed).toContain("+ ");
   expect(seen.changed).toContain('"Saved"');
   expect(seen.logs).toContain("[log] loaded helpers");
-  // As in Playwriter: an array, empty when nothing is new.
+  // An array, empty when nothing is new.
   expect(JSON.stringify(seen.none)).toBe("[]");
   expect(seen.box).toMatch(/Scroll Y: size=\d+ client=50 overflowing=true/);
   expect(seen.input).toContain('Input: value="x"');
@@ -906,7 +906,7 @@ async function recorded(): Promise<void> {
   expect((streams[0]?.width ?? 1) % 2).toBe(0);
 }
 
-// Recording parity with Playwriter: a handle to keep, a manual clock that films only `wait(ms)`, a
+// Recordings: a handle to keep, a manual clock that films only `wait(ms)`, a
 // file that appears complete, other containers, another tab mid-recording, a viewport fitted to
 // an aspect ratio and restored, and the page's own sound. Skipped without ffmpeg.
 test.skipIf(Bun.which("ffmpeg") === null)(
@@ -1138,8 +1138,8 @@ test("the recorder turns a person's actions in an agent tab into events and fram
   }
 });
 
-// The owner starts and stops the recorder from the extension's popup, as from Playwriter's
-// toolbar, for the agent group of their tab; the agent then reads the steps.
+// The owner starts and stops the recorder from the extension's popup, for the agent group of
+// their tab; the agent then reads the steps.
 test("the owner records their actions for the agent from the popup", async () => {
   await opened("showme");
   try {
@@ -1221,8 +1221,7 @@ test("screenshots leave the ghost cursor out and a bare page says how to get one
   expect(String(bare.body.output)).toContain("There is no global `page`");
 });
 
-// As in Playwriter, the ghost cursor shows each agent mouse action without a show(); it is the
-// extension's, moved only by the agent's own input, and ghostCursor.hide turns it off.
+// The ghost cursor shows each agent mouse action without a show(); it is the extension's, moved only by the agent's own input, and ghostCursor.hide turns it off.
 test("the ghost cursor shows agent mouse actions until the agent hides it", async () => {
   const result = await run(
     "acceptance",

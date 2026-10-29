@@ -2,8 +2,7 @@
 //! written, in every field that can carry one.
 //!
 //! The secret-name list, the URL and body redaction and the telemetry host list are adapted from
-//! Playwriter's playwriter/src/action-recorder.ts (MIT License, Copyright (c) 2026 Tommy D. Rossi,
-//! https://github.com/remorses/playwriter).
+//! MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md).
 
 use regex::Regex;
 use serde_json::{Map, Value};

@@ -18,8 +18,6 @@ On a phone the Rust phone link (`src/mobile`) takes the extension's place. It re
 browser's own DevTools socket as a client of the owner's ADB server, and the host, executor and
 CLI are the same.
 
-What it covers of Playwriter, row by row: [Playwriter parity](docs/playwriter-parity.md).
-
 Agent CLI: `nds-browser-use skill` prints the [agent guide](docs/agent-guide.md),
 which an agent reads once per task. `nds-browser-use session new <project>`, then
 `nds-browser-use -s <project> -e '<playwright code>'`; `status`,
@@ -32,9 +30,8 @@ starts with the session, and `session list` reports `executor: true` once it is
 ready; an execution that times out while the executor is still starting
 leaves the start running for the next one. `install` registers
 the host for one Chrome profile root; loading the unpacked extension stays the
-owner's action. Status: alpha work in progress. Linux, macOS and Windows are
-each accepted in CI with a real browser; none has been qualified on an owner
-device. Not a replacement for Playwriter in current NDS acceptance.
+owner's action. Status: alpha. Linux, macOS and Windows are each accepted in
+CI with a real browser, and Linux runs on the owner's own computers.
 
 Agent code runs as an async function body. It gets:
 - `context` and `browser`;
@@ -47,7 +44,7 @@ Agent code runs as an async function body. It gets:
 A single expression is returned; otherwise use `return`. `context.pages()` lists only the session's
 tabs, and `context.newCDPSession(page)` gives raw CDP for those tabs.
 
-- **Replies.** A reply is plain text in Playwriter's form: `[WARNING]` and `[PAGE ERROR]` lines,
+- **Replies.** A reply is plain text: `[WARNING]` and `[PAGE ERROR]` lines,
   then `Console output:`, then `[return value]`. It is cut at 10000 characters, and Playwright
   objects print as tags. `--json` gives the protocol answer with each tab's `target` and
   `document`; `--expect <target>:<document>` refuses to run against a replaced document.
@@ -73,7 +70,7 @@ for agents.
     process. `ref({ page, ref })` or `refToLocator({ ref, page })` reaches that element through
     its frame, until the next view that shows refs.
 - `getLatestLogs({ page, sinceLastCall, search, count })` returns the page's console messages
-  and errors as an array of lines, as in Playwriter, kept from the moment the session first saw
+  and errors as an array of lines, kept from the moment the session first saw
   the page. With `sinceLastCall` it returns only what is new, and `clearAllLogs()` forgets every
   page's logs.
 - `waitForPageLoad({ page, timeout })` waits until the document is complete
@@ -200,6 +197,18 @@ then runs `nds-browser-use phones` to list the phone's browsers, and
 `nds-browser-use phone serve <serial>` to serve one of them. Agents use
 `nds-browser-use --phone <serial> ...` (or `NDS_BROWSER_PHONE`) like any session command, and
 work only in tabs they open. See [docs/mobile.md](docs/mobile.md).
+
+## Left out, and why
+
+- **Streaming a tab to an outside service, cloud browsers, sharing the browser through a tunnel
+  and remote-debugging endpoints.** The owner's pages never leave the device, and nothing
+  listens; phones are reached through the owner's own ADB server instead.
+- **A bundled or headless browser.** Agents work in the owner's own Chrome, where the owner is
+  signed in and can step in; CI uses Chrome for Testing with the extension.
+- **An MCP server.** Agents use the CLI and the guide it prints.
+- **A file-system scope for agent code.** Agent code is the agent's own and may write where its
+  task needs; files for the owner go to `artifacts`.
+- **A shared screencast.** One recording per tab.
 
 ## Owned NDS sessions
 

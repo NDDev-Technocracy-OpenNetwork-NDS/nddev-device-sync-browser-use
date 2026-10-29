@@ -6,8 +6,7 @@
 // again and replays the setup Playwright sent on the tab's root session, so the page agents hold
 // stays usable. Pure rules only; the worker owns every chrome.* call.
 //
-// Adapted from Playwriter's extension/src/session-reattach.ts (MIT License, Copyright (c) 2026
-// Tommy D. Rossi, https://github.com/remorses/playwriter).
+// Adapted from MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md).
 
 // A setup command as sent to Chrome; an init script also keeps Chrome's current identifier.
 export type SetupCommand = {
