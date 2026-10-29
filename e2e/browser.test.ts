@@ -51,6 +51,7 @@ const extensionId = "lcdkocghcaakekcaeopjanfbohpfacbk";
 const env: Record<string, string> = {
   ...(process.env as Record<string, string>),
   XDG_CONFIG_HOME: join(root, "config"),
+  XDG_STATE_HOME: join(root, "state"),
   NDS_BROWSER_USE_RUNTIME_DIR: runtime,
 };
 
@@ -155,6 +156,21 @@ async function observed(path: string): Promise<Page | undefined> {
   return observer.pages().find((page) => page.url() === `${origin}${path}`);
 }
 
+async function observation(profile: "full" | "standard" | "off"): Promise<void> {
+  const page = await observer.newPage();
+  await page.goto(`chrome-extension://${extensionId}/popup.html`);
+  await page.locator(`button[data-profile="${profile}"]`).click();
+  await page.waitForFunction((expected) => document.body.dataset.observation === expected, profile);
+  await page.close();
+  for (
+    let attempt = 0;
+    attempt < 100 && (await cli("status")).body.observation !== profile;
+    attempt++
+  ) {
+    await Bun.sleep(50);
+  }
+}
+
 async function ownerSwitch(enable: boolean): Promise<void> {
   const page = await observer.newPage();
   await page.goto(`chrome-extension://${extensionId}/popup.html`);
@@ -198,6 +214,9 @@ beforeAll(async () => {
         return Response.redirect(`http://localhost:${fixture?.port}/files/plain`, 302);
       }
       if (path === "/files/plain") return attachment("moved body", "moved.txt");
+      if (path === "/api/journal") {
+        return Response.json({ order: 7, items: ["shoe"], accessToken: "tok-should-not-stay" });
+      }
       // Served once, as a signed link that expires on first use.
       if (path === "/files/once") {
         served.once += 1;
@@ -226,6 +245,8 @@ beforeAll(async () => {
         // new tab, and the frame of another site offers its own link.
         "/files": `<title>Files</title><a id="bytes" href="/files/bytes">Bytes</a><a id="moved" href="/files/moved">Moved</a><a id="once" href="/files/once">Once</a><form method="post" action="/files/post"><button id="post">Post</button></form><button id="blob" onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['blob body'])); a.download = 'made.txt'; a.click(); window.URL.revokeObjectURL(a.href)">Blob</button><a id="tab" href="/files/plain" target="_blank">Tab</a><button id="open" onclick="window.open('/files/once')">Open</button><iframe src="http://localhost:${fixture?.port}/files-frame"></iframe>`,
         "/files-frame": `<a id="inner" href="/files/plain">Inner</a>`,
+        // A page whose script calls the site's API, logs the same error twice and throws.
+        "/journal": `<title>Journal</title><input id="email" aria-label="Email"><input id="password" type="password" aria-label="Password"><script>fetch('/api/journal?id=7&token=abc').then((r) => r.json()); console.error('cart failed'); console.error('cart failed'); setTimeout(() => { throw new Error('late boom') });</script>`,
         // A different site (localhost vs 127.0.0.1) renders out of process.
         "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
         "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
@@ -1394,6 +1415,79 @@ test("an agent tab's download is the agent's file", async () => {
   }, origin);
   expect(left).toBe(0);
   expect(readdirSync(downloadsFolder)).toEqual([]);
+});
+
+// The activity journal (docs/observability.md) in the full profile: the execution with its typed
+// literals left out, the actions with safe values, the page's API request with its body stored
+// once and its secrets removed, a repeated console error folded and the page error. The popup's
+// Off stops it, and the CLI reads it without the host.
+test("the activity journal keeps what agents did and the popup's off stops it", async () => {
+  const activity = async (...flags: string[]) => {
+    const result = await plain("-s", "acceptance", "activity", "--all", "--full", ...flags);
+    return result.stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  };
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/journal");
+     await page.fill("#email", "ann@test"); await page.fill("#password", "hunter2");
+     await page.evaluate(() => alert("checkout?"));
+     await page.waitForTimeout(1500); await page.close(); return "journaled"`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body).toMatchObject({ failure: null });
+  await Bun.sleep(1500);
+  const records = await activity();
+  const text = JSON.stringify(records);
+  expect(text).not.toContain("hunter2");
+  expect(text).not.toContain("tok-should-not-stay");
+  expect(text).not.toContain("token=abc");
+  const execution = records.findLast((record) => record.type === "execution");
+  expect(execution).toMatchObject({ ok: true });
+  expect(String(execution?.code)).toContain('page.fill("#email", "[redacted]")');
+  const fills = records.filter((record) => record.type === "action" && record.api === "fill");
+  expect(fills.slice(-2).map((record) => [record.locator, record.value])).toEqual([
+    ["#email", "ann@test"],
+    ["#password", "[redacted]"],
+  ]);
+  const api = records.findLast(
+    (record) => record.type === "network" && String(record.url).includes("/api/journal"),
+  );
+  expect(api).toMatchObject({ method: "GET", status: 200, resource: "fetch" });
+  expect(String(api?.url)).toContain("token=[redacted]");
+  const hash = (api?.body as { hash?: string } | undefined)?.hash ?? "";
+  const body = await plain("-s", "acceptance", "activity", "body", hash);
+  expect(JSON.parse(body.stdout)).toEqual({ order: 7, items: ["shoe"], accessToken: "[redacted]" });
+  const errors = records.filter(
+    (record) => record.type === "console" && record.text === "cart failed",
+  );
+  expect(errors.at(-1)).toMatchObject({ level: "error", repeat: 2 });
+  expect(
+    records.some((record) => record.type === "page-error" && record.message === "late boom"),
+  ).toBe(true);
+  // Playwright still dismissed the dialog nobody handled; the host journaled it.
+  expect(
+    records.some(
+      (record) =>
+        record.type === "dialog" && record.kind === "alert" && record.text === "checkout?",
+    ),
+  ).toBe(true);
+  // The owner's popup turns it off: the next execution leaves nothing new.
+  await observation("off");
+  expect((await cli("status")).body.observation).toBe("off");
+  const before = (await activity()).length;
+  await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/journal"); await page.close(); return 1`,
+  );
+  await Bun.sleep(1500);
+  expect((await activity()).length).toBe(before);
+  await observation("full");
+  expect((await cli("status")).body.observation).toBe("full");
 });
 
 // Another device's browser is driven through that device's own CLI: here a device whose transport

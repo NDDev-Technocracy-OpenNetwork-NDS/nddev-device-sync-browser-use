@@ -44,6 +44,16 @@ pub(crate) enum Alias {
     Tab { tab: i64, parent: String },
 }
 
+/// The raw browser-level CDP sessions the current client opened (`newBrowserCDPSession`).
+pub(super) fn browser_aliases(session: &super::Session) -> Vec<String> {
+    session
+        .aliases
+        .iter()
+        .filter(|(_, alias)| matches!(alias, Alias::Browser))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 pub(super) fn tab_aliases(session: &super::Session, tab: i64) -> Vec<String> {
     session
         .aliases
@@ -448,6 +458,8 @@ impl Host {
             }
             "Browser.setDownloadBehavior" => self.set_downloads(project, &params),
             "NDS.takeDownload" => self.take_download(project, &params).await,
+            "NDS.observation" => Ok(self.observation()),
+            "NDS.activity" => Ok(self.activity(project, &params).await),
             "Target.setDiscoverTargets" => Ok(json!({})),
             "Target.setAutoAttach" => {
                 let mut state = self.state();
@@ -667,6 +679,7 @@ mod tests {
                 aliases,
                 downloads: None,
                 files: Default::default(),
+                journal: None,
             },
         );
         assert_eq!(tab_aliases(&state.sessions["nds"], 7), ["tab-7"]);

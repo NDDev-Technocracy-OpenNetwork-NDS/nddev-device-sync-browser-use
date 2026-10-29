@@ -279,6 +279,25 @@ one exists.
 - **Before a destructive action,** such as delete, send or pay, confirm the target with a snapshot
   or a labelled screenshot.
 
+## Activity
+
+In the owner's full observation profile, everything agents do in agent tabs is kept in an activity
+journal: each execution, the Playwright actions with their locators and values, navigations, the
+page's requests with their bodies, console errors and warnings, page errors, dialogs and downloads.
+Secrets are removed and repeats are folded. Read it instead of re-running steps to find out what
+happened:
+
+```bash
+nds-browser-use -s <project> activity                 # the latest executor's timeline, thin
+nds-browser-use -s <project> activity --errors        # failed requests, actions, console and page errors
+nds-browser-use -s <project> activity --type network --grep /api/ --full
+nds-browser-use -s <project> activity body <sha256>    # a request's stored body
+```
+
+`--all` reads the week the journal keeps, `--exec <id>` one execution's records and `--last <n>`
+the newest n. The owner can switch observation to standard or off in the extension's popup; then
+the journal and the recorder collect nothing.
+
 ## Network
 
 - **Watching requests.** Use `state.page.on("response", ...)` or

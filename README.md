@@ -152,6 +152,14 @@ session and the browser's copy and its list entry are removed, so agent code get
 `saveAs()`, `path()`, `createReadStream()` and `failure()` for every download. A
 download no agent tab announced is loaded again through the tab instead.
 
+## Observation
+
+The extension's popup has an observation switch: full (the default), standard and off. In full,
+the executor keeps an activity journal of agent tabs for agents to read with
+`nds-browser-use -s <project> activity`, with secrets removed and repeats folded; standard keeps
+only the host's metadata events; off collects nothing and stops the recorder. See
+[docs/observability.md](docs/observability.md).
+
 ## Devices
 
 An agent can drive the browser of another of the owner's devices: `nds-browser-use --device <name>

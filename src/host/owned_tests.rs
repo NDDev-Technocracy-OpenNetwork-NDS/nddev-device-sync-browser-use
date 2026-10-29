@@ -12,6 +12,7 @@ fn fixture() -> (Arc<Host>, mpsc::Receiver<Vec<u8>>, tempfile::TempDir) {
             runtime: runtime.clone(),
             bun: std::env::current_exe().unwrap(),
             executor: root.path().join("inert.ts"),
+            activity: root.path().join("activity"),
         },
         installed: None,
         cdp_socket: runtime.join("cdp.sock"),

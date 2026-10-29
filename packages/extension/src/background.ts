@@ -7,6 +7,10 @@ import { type FrameTree, Restore, restricted } from "./restore.js";
 const HOST = "ai.nddev.nds.browser_use";
 const PROTOCOL = "1.3";
 const ENABLED = "enabled";
+// The owner's observation profile (docs/observability.md): what agent activity is collected.
+const OBSERVATION = "observation";
+type Observation = "full" | "standard" | "off";
+const OBSERVATIONS: readonly Observation[] = ["full", "standard", "off"];
 const GROUPS = "groups";
 const RELOADED_FOR = "reloadedFor";
 const OWNER = "owner:";
@@ -56,11 +60,14 @@ type HostRequest =
   | { type: "tabs"; id: number; tabs: number[] }
   | { type: "forget"; id: number; download: number }
   | { type: "reload"; id?: undefined; version: string };
+// Every request but `reload`, which the worker answers by reloading, not with a result.
+type Answered = Exclude<HostRequest, { type: "reload" }>;
 
 class Refusal extends Error {}
 
 let port: chrome.runtime.Port | undefined;
 let enabled = true;
+let observation: Observation = "full";
 let retry = 1000;
 // Group key -> Chrome group id. Persisted for worker restarts in this browser session.
 let groups = new Map<string, number>();
@@ -126,8 +133,9 @@ async function command(
 }
 
 async function load(): Promise<void> {
-  const local = await chrome.storage.local.get(ENABLED);
+  const local = await chrome.storage.local.get([ENABLED, OBSERVATION]);
   enabled = local[ENABLED] !== false;
+  observation = OBSERVATIONS.find((profile) => profile === local[OBSERVATION]) ?? "full";
   const session = await chrome.storage.session.get(GROUPS);
   groups = new Map(Object.entries((session[GROUPS] ?? {}) as Record<string, number>));
   await badge();
@@ -188,6 +196,7 @@ function connect(): void {
     enabled,
     // The host takes agent downloads' files from this worker (see `downloads` below).
     downloads: chrome.downloads !== undefined,
+    observation,
   });
   void badge();
 }
@@ -201,7 +210,7 @@ async function reloadFor(version: string): Promise<void> {
   chrome.runtime.reload();
 }
 
-async function handle(message: HostRequest): Promise<void> {
+async function handle(message: Answered): Promise<void> {
   retry = 1000;
   try {
     send({ type: "result", id: message.id, result: await dispatch(message) });
@@ -455,7 +464,7 @@ function holding(group: string): Set<Life> {
   );
 }
 
-async function dispatch(message: HostRequest): Promise<unknown> {
+async function dispatch(message: Answered): Promise<unknown> {
   // Releasing stays possible while the owner's switch is off, so the host can finish closing, and
   // so does removing the browser's copy of an agent download the host already kept.
   if (!enabled && message.type !== "release" && message.type !== "forget") {
@@ -1255,6 +1264,12 @@ chrome.tabGroups.onRemoved.addListener((group) => {
 // The owner's switch in the action popup: disabling detaches every agent tab
 // and the host refuses new work until it is enabled again.
 // The intent reaches the host at once; ending the attachments may take longer or partly fail.
+async function setObservation(profile: Observation): Promise<void> {
+  observation = profile;
+  send({ type: "observation", profile });
+  await chrome.storage.local.set({ [OBSERVATION]: profile });
+}
+
 async function setEnabled(value: boolean): Promise<void> {
   enabled = value;
   if (!enabled) closeAll();
@@ -1266,19 +1281,27 @@ async function setEnabled(value: boolean): Promise<void> {
 }
 
 chrome.runtime.onMessage.addListener(
-  (message: { type?: string; enabled?: boolean }, sender, reply) => {
+  (message: { type?: string; enabled?: boolean; profile?: string }, sender, reply) => {
     // Only this extension's own pages (the popup) may change the switch.
     if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("")))
       return false;
     if (message.type === "set" && typeof message.enabled === "boolean") {
       void setEnabled(message.enabled).then(() =>
-        reply({ enabled, connected: port !== undefined }),
+        reply({ enabled, observation, connected: port !== undefined }),
+      );
+      return true;
+    }
+    const profile = OBSERVATIONS.find((each) => each === message.profile);
+    if (message.type === "observe" && profile) {
+      void setObservation(profile).then(() =>
+        reply({ enabled, observation, connected: port !== undefined }),
       );
       return true;
     }
     if (message.type === "get")
       reply({
         enabled,
+        observation,
         connected: port !== undefined,
         tabs: [...attached.keys()].filter(usable).length,
       });
