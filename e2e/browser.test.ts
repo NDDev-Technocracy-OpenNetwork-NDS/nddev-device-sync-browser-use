@@ -627,6 +627,29 @@ async function content(): Promise<void> {
   expect(seen.go).toBe('getByRole("button", { name: "Go", exact: true })');
 }
 
+// A locator that matches several elements fails with Playwright's strict mode error, which lists
+// every match with a locator of its own; the result keeps that list.
+test("a strict mode violation lists every match so the agent can pick one", async () => {
+  await opened("strict");
+  try {
+    const result = await run(
+      "strict",
+      `const page = await context.newPage();
+       await page.setContent('<div role="dialog"><button>From</button><button>Send</button><button>Discard</button></div>');
+       try { await page.locator("[role=dialog] button").click({ timeout: 1000 }); return "clicked"; }
+       finally { await page.close(); }`,
+    );
+    const text = String(result.body.output ?? "");
+    expect(text).toContain("strict mode violation");
+    expect(text).toContain("resolved to 3 elements");
+    for (const name of ["From", "Send", "Discard"]) {
+      expect(text).toContain(`getByRole('button', { name: '${name}' })`);
+    }
+  } finally {
+    await cli("session", "close", "strict", "--close-tabs");
+  }
+});
+
 // Recordings: screencast frames to video through ffmpeg with a ghost cursor, and a demo cut that
 // speeds up the time between executions. Skipped without ffmpeg.
 test.skipIf(Bun.which("ffmpeg") === null)(
@@ -691,6 +714,42 @@ async function recorded(): Promise<void> {
   );
   expect(existsSync(demo)).toBe(true);
   expect(seconds(demo)).toBeLessThan(seconds(result.path));
+
+  // A page that never repaints still gets frames, and a resized viewport keeps one frame size.
+  const still = await run(
+    "recording",
+    `const page = await context.newPage(); await page.setContent("<body style='background:#c33'>Static</body>");
+     const path = artifacts + "/still.mp4";
+     await recording.start({ page, outputPath: path });
+     await page.waitForTimeout(400);
+     await page.setViewportSize({ width: 640, height: 900 });
+     await page.waitForTimeout(400);
+     const done = await recording.stop({ page }); await page.close();
+     return done.path`,
+    "--timeout",
+    "20000",
+  );
+  const probe = Bun.spawnSync([
+    "ffprobe",
+    "-v",
+    "error",
+    "-count_frames",
+    "-show_entries",
+    "stream=width,height,sample_aspect_ratio,nb_read_frames",
+    "-of",
+    "json",
+    String(still.body.value),
+  ]);
+  const streams = JSON.parse(probe.stdout.toString()).streams as {
+    width: number;
+    height: number;
+    sample_aspect_ratio?: string;
+    nb_read_frames: string;
+  }[];
+  expect(streams).toHaveLength(1);
+  expect(Number(streams[0]?.nb_read_frames)).toBeGreaterThan(0);
+  expect(streams[0]?.sample_aspect_ratio ?? "1:1").toBe("1:1");
+  expect((streams[0]?.width ?? 1) % 2).toBe(0);
 }
 
 // DevTools helpers over raw CDP: matched CSS rules, a live script edit, and a breakpoint with its

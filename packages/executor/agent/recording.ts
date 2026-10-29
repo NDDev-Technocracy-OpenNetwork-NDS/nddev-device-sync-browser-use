@@ -1,6 +1,10 @@
 // Video of agent tabs: CDP screencast frames encoded by ffmpeg, which must be on PATH, with a
 // ghost cursor that follows the mouse events that agent actions dispatch, and a demo cut that
 // speeds up the time between executions.
+//
+// The fixed-size filter and the static-page start are adapted from Playwriter's
+// playwriter/src/screen-recording.ts (MIT License, Copyright (c) 2026 Tommy D. Rossi,
+// https://github.com/remorses/playwriter).
 import { type ChildProcess, spawn } from "node:child_process";
 import { stat, unlink } from "node:fs/promises";
 import { isAbsolute } from "node:path";
@@ -67,6 +71,10 @@ async function start({
 }: RecordingOptions): Promise<void> {
   if (recordings.has(page)) throw new Error("this page is already recording");
   if (!isAbsolute(outputPath)) throw new Error("outputPath must be an absolute path");
+  // The video keeps the size the page has now: later frames of another size are scaled into it
+  // and padded, with square pixels, so a resized viewport never reconfigures the encoder.
+  const { width, height } = await frameSize(page, maxSize);
+  const fit = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,setsar=1`;
   const codec = outputPath.endsWith(".webm")
     ? ["-c:v", "libvpx", "-b:v", "4M"]
     : ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart"];
@@ -75,7 +83,7 @@ async function start({
     [
       ...["-y", "-loglevel", "error", "-f", "image2pipe", "-use_wallclock_as_timestamps", "1"],
       ...["-c:v", "mjpeg", "-i", "-"],
-      ...["-vf", `fps=${frameRate},scale=trunc(iw/2)*2:trunc(ih/2)*2`, ...codec, outputPath],
+      ...["-vf", `fps=${frameRate},${fit}`, ...codec, outputPath],
     ],
     { stdio: ["pipe", "ignore", "pipe"] },
   );
@@ -101,19 +109,54 @@ async function start({
     encoded,
   };
   recordings.set(page, recording);
+  let frames = 0;
+  let firstFrame!: () => void;
+  const first = new Promise<void>((done) => {
+    firstFrame = done;
+  });
   cdp.on("Page.screencastFrame", ({ data, sessionId }) => {
+    frames += 1;
     recording.last = Buffer.from(data, "base64");
     ffmpeg.stdin?.write(recording.last);
     void cdp.send("Page.screencastFrameAck", { sessionId }).catch(() => {});
+    firstFrame();
   });
   page.once("close", () => void stop({ page }).catch(() => {}));
+  // The screencast starts first: it wakes the compositor where a screenshot would stall. A page
+  // that never paints sends no frame, so a screenshot seeds one, unless a live frame came first.
   await cdp.send("Page.startScreencast", {
     format: "jpeg",
     quality,
     maxWidth: maxSize,
     maxHeight: maxSize,
   });
+  if (frames === 0) {
+    const seed = cdp
+      .send("Page.captureScreenshot", { format: "jpeg", quality })
+      .then(({ data }) => {
+        if (frames === 0 && recordings.get(page) === recording) {
+          recording.last = Buffer.from(data, "base64");
+          ffmpeg.stdin?.write(recording.last);
+        }
+      })
+      .catch(() => {});
+    await Promise.race([first, seed]);
+  }
   await ghostCursor.show({ page }).catch(() => {});
+}
+
+/** The frame size of the page now, as the screencast delivers it: CSS pixels times the device
+ * scale, fitted into `maxSize`, with even sides for yuv420p. */
+async function frameSize(page: Page, maxSize: number): Promise<{ width: number; height: number }> {
+  const viewport = await page
+    .evaluate(() => [innerWidth, innerHeight, devicePixelRatio] as const)
+    .catch(() => [1280, 720, 1] as const);
+  const [cssWidth, cssHeight, scale] = viewport;
+  const width = Math.max(2, cssWidth * scale);
+  const height = Math.max(2, cssHeight * scale);
+  const fit = Math.min(1, maxSize / Math.max(width, height));
+  const even = (value: number) => Math.max(2, 2 * Math.round((value * fit) / 2));
+  return { width: even(width), height: even(height) };
 }
 
 async function stop({ page }: { page: Page }): Promise<RecordingResult> {
