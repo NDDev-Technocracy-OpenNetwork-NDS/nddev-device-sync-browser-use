@@ -1292,7 +1292,7 @@ test("an agent tab's download is the agent's file", async () => {
      return JSON.stringify({
        name: bytes.suggestedFilename(),
        bytes: saved.length === 1024 && saved.every((byte, index) => byte === index % 256),
-       path: (await bytes.path()).endsWith("/bytes.bin") && fs.readFileSync(await bytes.path()).equals(saved),
+       path: require("node:path").basename(await bytes.path()) === "bytes.bin" && fs.readFileSync(await bytes.path()).equals(saved),
        failure: await bytes.failure(),
        moved: Buffer.concat(chunks).toString(),
        made: fs.readFileSync(await made.path(), "utf8"),
