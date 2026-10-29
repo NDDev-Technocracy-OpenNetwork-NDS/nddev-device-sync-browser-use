@@ -197,9 +197,10 @@ async function ownerSwitch(enable: boolean): Promise<void> {
   await page.waitForFunction(
     () => !(document.getElementById("toggle") as HTMLButtonElement).disabled,
   );
-  if ((await toggle.getAttribute("data-enabled")) !== String(enable)) await toggle.click();
+  if ((await toggle.getAttribute("aria-checked")) !== String(enable)) await toggle.click();
   await page.waitForFunction(
-    (expected) => document.getElementById("toggle")?.dataset.enabled === String(expected),
+    (expected) =>
+      document.getElementById("toggle")?.getAttribute("aria-checked") === String(expected),
     enable,
   );
   await page.close();
@@ -1935,10 +1936,17 @@ test("a private site keeps its content out of the journal, and the popup shows t
   // The popup lists the group's newest steps, the private ones marked.
   await popup.reload();
   await popup.waitForFunction(() => Number(document.body.dataset.recent) > 0);
-  expect(await popup.locator("#recent").textContent()).toContain("action (private)  fill");
+  const step = popup.locator('#recent li[data-type="action"][data-private="true"]').first();
+  expect(await step.textContent()).toContain("fill");
+  await popup.screenshot({ path: join(root, "popup-agent-tab.png") });
+  if (process.env.NDS_E2E_SHOTS)
+    cpSync(
+      join(root, "popup-agent-tab.png"),
+      join(process.env.NDS_E2E_SHOTS, "popup-agent-tab.png"),
+    );
   // The owner keeps the site's content again.
   await popup.locator("#private li button").click();
-  await popup.waitForFunction(() => document.getElementById("private")?.children.length === 0);
+  await popup.waitForFunction(() => document.getElementById("private")?.dataset.count === "0");
   await popup.close();
   await run("acceptance", "await state.private.close(); delete state.private");
 });

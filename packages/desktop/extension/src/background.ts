@@ -123,12 +123,17 @@ type HostRequest =
   | { type: "reload"; id?: undefined; version: string }
   | ({ type: "recorded"; request: number } & OwnerRecording)
   | { type: "incompatible"; id?: undefined; contract: number }
-  | { type: "journaled"; id?: undefined; request: number; lines: string[] };
+  | { type: "journaled"; id?: undefined; request: number; lines: string[] }
+  | { type: "about"; id?: undefined; version: string; commit: string };
 // Every request but `reload`, which the worker answers by reloading, not with a result, and the
 // host's answer to the owner's recorder button.
 type Answered = Exclude<
   HostRequest,
-  { type: "reload" } | { type: "recorded" } | { type: "incompatible" } | { type: "journaled" }
+  | { type: "reload" }
+  | { type: "recorded" }
+  | { type: "incompatible" }
+  | { type: "journaled" }
+  | { type: "about" }
 >;
 // The recorder of the agent group that holds the owner's tab, as the popup shows it.
 type OwnerRecording = {
@@ -231,8 +236,18 @@ function saveGroups(): Promise<void> {
 let hostContract: number | undefined;
 const CONTRACT = 2;
 
+// The icon tells the owner the state at a glance: the number of agent tabs, OFF, a host that is
+// not running, or one that does not match.
 async function badge(): Promise<void> {
-  const text = !enabled ? "OFF" : !port ? "…" : hostContract !== undefined ? "!" : "";
+  const tabs = [...attached.keys()].filter(usable).length;
+  const [text, color] = !enabled
+    ? ["OFF", "#646b78"]
+    : !port
+      ? ["…", "#b26a00"]
+      : hostContract !== undefined
+        ? ["!", "#c4322b"]
+        : [tabs > 0 ? String(tabs) : "", "#0b7a8a"];
+  await chrome.action.setBadgeBackgroundColor({ color }).catch(() => undefined);
   await chrome.action.setBadgeText({ text });
 }
 
@@ -266,7 +281,10 @@ function connect(): void {
     if (message.type === "reload") void reloadFor(message.version);
     else if (message.type === "recorded") recorded.get(message.request)?.(message);
     else if (message.type === "journaled") journaled.get(message.request)?.(message.lines);
-    else if (message.type === "incompatible") {
+    else if (message.type === "about") {
+      hostBuild = { version: message.version, commit: message.commit };
+      for (const done of abouts.splice(0)) done();
+    } else if (message.type === "incompatible") {
       // The host speaks another contract: nothing an agent asks can work until one is updated.
       hostContract = message.contract;
       void badge();
@@ -276,6 +294,7 @@ function connect(): void {
     // The host owned every session; without it no agent may keep control.
     port = undefined;
     hostContract = undefined;
+    hostBuild = undefined;
     void detachAll().then(badge);
     setTimeout(connect, retry);
     retry = Math.min(retry * 2, 60_000);
@@ -834,6 +853,7 @@ function attach(tab: number, life: Life): Promise<unknown> {
           throw new Refusal("target_closed");
         }
         attachment.pending = false;
+        void badge();
         restore.startSession(tab);
         await remember(tab, () => usable(tab) === attachment);
       } else if (attachment.revoked || attachment.pending) {
@@ -896,6 +916,7 @@ function ended(tab: number, attachment: Attachment): void {
   if (attached.get(tab) !== attachment) return;
   attached.delete(tab);
   asleep(tab);
+  void badge();
   restore.endSession(tab);
   // No agent holds the tab any more, so nobody would clear its check or act on it.
   void chrome.notifications.clear(`${OWNER}${tab}`).catch(() => undefined);
@@ -1564,8 +1585,26 @@ async function setPrivate(sites: string[]): Promise<void> {
   await chrome.storage.local.set({ [PRIVATE]: privateSites });
 }
 
+// The connected host's build, asked for once per connection; the popup's footer names it.
+let hostBuild: { version: string; commit: string } | undefined;
+const abouts: (() => void)[] = [];
+
+async function about(): Promise<void> {
+  if (hostBuild || !port) return;
+  await new Promise<void>((done) => {
+    const timer = setTimeout(done, 1000);
+    abouts.push(() => {
+      clearTimeout(timer);
+      done();
+    });
+    send({ type: "about" });
+  });
+}
+
 async function status(tab: number | undefined): Promise<object> {
-  const site = siteOf((await tabOf(tab))?.url);
+  const [owner] = await Promise.all([tabOf(tab), about()]);
+  const site = siteOf(owner?.url);
+  const group = owner?.id === undefined ? undefined : usable(owner.id)?.life.group;
   return {
     enabled,
     observation,
@@ -1573,7 +1612,11 @@ async function status(tab: number | undefined): Promise<object> {
     hostContract,
     tabs: [...attached.keys()].filter(usable).length,
     privateSites,
+    version: chrome.runtime.getManifest().version,
+    hasTab: owner !== undefined,
+    ...(hostBuild ? { host: hostBuild } : {}),
     ...(site ? { site } : {}),
+    ...(group ? { group } : {}),
   };
 }
 

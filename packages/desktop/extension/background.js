@@ -156,8 +156,18 @@ function saveGroups() {
 // The contract of a connected host that refused this worker's, which the popup explains.
 let hostContract;
 const CONTRACT = 2;
+// The icon tells the owner the state at a glance: the number of agent tabs, OFF, a host that is
+// not running, or one that does not match.
 async function badge() {
-    const text = !enabled ? "OFF" : !port ? "…" : hostContract !== undefined ? "!" : "";
+    const tabs = [...attached.keys()].filter(usable).length;
+    const [text, color] = !enabled
+        ? ["OFF", "#646b78"]
+        : !port
+            ? ["…", "#b26a00"]
+            : hostContract !== undefined
+                ? ["!", "#c4322b"]
+                : [tabs > 0 ? String(tabs) : "", "#0b7a8a"];
+    await chrome.action.setBadgeBackgroundColor({ color }).catch(() => undefined);
     await chrome.action.setBadgeText({ text });
 }
 function send(message) {
@@ -183,6 +193,11 @@ function connect() {
             recorded.get(message.request)?.(message);
         else if (message.type === "journaled")
             journaled.get(message.request)?.(message.lines);
+        else if (message.type === "about") {
+            hostBuild = { version: message.version, commit: message.commit };
+            for (const done of abouts.splice(0))
+                done();
+        }
         else if (message.type === "incompatible") {
             // The host speaks another contract: nothing an agent asks can work until one is updated.
             hostContract = message.contract;
@@ -195,6 +210,7 @@ function connect() {
         // The host owned every session; without it no agent may keep control.
         port = undefined;
         hostContract = undefined;
+        hostBuild = undefined;
         void detachAll().then(badge);
         setTimeout(connect, retry);
         retry = Math.min(retry * 2, 60_000);
@@ -751,6 +767,7 @@ function attach(tab, life) {
                 throw new Refusal("target_closed");
             }
             attachment.pending = false;
+            void badge();
             restore.startSession(tab);
             await remember(tab, () => usable(tab) === attachment);
         }
@@ -817,6 +834,7 @@ function ended(tab, attachment) {
         return;
     attached.delete(tab);
     asleep(tab);
+    void badge();
     restore.endSession(tab);
     // No agent holds the tab any more, so nobody would clear its check or act on it.
     void chrome.notifications.clear(`${OWNER}${tab}`).catch(() => undefined);
@@ -1443,8 +1461,25 @@ async function setPrivate(sites) {
     send({ type: "private", sites: privateSites });
     await chrome.storage.local.set({ [PRIVATE]: privateSites });
 }
+// The connected host's build, asked for once per connection; the popup's footer names it.
+let hostBuild;
+const abouts = [];
+async function about() {
+    if (hostBuild || !port)
+        return;
+    await new Promise((done) => {
+        const timer = setTimeout(done, 1000);
+        abouts.push(() => {
+            clearTimeout(timer);
+            done();
+        });
+        send({ type: "about" });
+    });
+}
 async function status(tab) {
-    const site = siteOf((await tabOf(tab))?.url);
+    const [owner] = await Promise.all([tabOf(tab), about()]);
+    const site = siteOf(owner?.url);
+    const group = owner?.id === undefined ? undefined : usable(owner.id)?.life.group;
     return {
         enabled,
         observation,
@@ -1452,7 +1487,11 @@ async function status(tab) {
         hostContract,
         tabs: [...attached.keys()].filter(usable).length,
         privateSites,
+        version: chrome.runtime.getManifest().version,
+        hasTab: owner !== undefined,
+        ...(hostBuild ? { host: hostBuild } : {}),
         ...(site ? { site } : {}),
+        ...(group ? { group } : {}),
     };
 }
 chrome.runtime.onMessage.addListener((message, sender, reply) => {

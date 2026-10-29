@@ -142,6 +142,7 @@ class Browser {
         setBadgeText: async ({ text }: { text: string }) => {
           this.badge = text;
         },
+        setBadgeBackgroundColor: async () => {},
       },
       runtime: {
         id: "worker",

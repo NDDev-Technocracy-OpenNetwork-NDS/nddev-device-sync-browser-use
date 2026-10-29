@@ -1,5 +1,7 @@
-// Owner-facing switches for agent control and for what agent activity is collected; the worker
-// applies and reports both.
+// The owner's control of agents: the switch, the tab the owner looks at (its agent group, the
+// recorder, keeping its site private), the agent's newest steps there, what agent activity is
+// collected, and the private sites. The worker applies and reports all of it; this page only shows
+// it, in the owner's language.
 type Observation = "full" | "standard" | "off";
 type Status = {
   enabled: boolean;
@@ -8,72 +10,205 @@ type Status = {
   tabs?: number;
   // The contract of a host that refused this extension's.
   hostContract?: number;
-  // The owner's private sites, and the site of the owner's tab.
+  // The connected host's build.
+  host?: { version: string; commit: string };
+  version?: string;
   privateSites?: string[];
+  // The owner's tab: its site, and the agent group it belongs to.
   site?: string;
+  group?: string;
+  hasTab?: boolean;
 };
+type Recording = {
+  recording?: boolean;
+  id?: string;
+  events?: number;
+  error?: string;
+  message?: string;
+};
+type Language = "en" | "ru";
+type Messages = Record<string, { message: string }>;
 
 // A popup opened as a page of its own, as in tests, names the tab it acts for.
 const forTab = Number(new URLSearchParams(location.search).get("tab")) || undefined;
-const state = document.getElementById("state");
-const toggle = document.getElementById("toggle") as HTMLButtonElement | null;
-const profiles = [...document.querySelectorAll<HTMLButtonElement>("button[data-profile]")];
-const described = document.getElementById("observation");
+const LANGUAGE = "popupLanguage";
+const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T | null;
+
+let language: Language = "en";
+let messages: Messages = {};
+let last: Status | undefined;
+let lastRecording: Recording = {};
+let lastSteps: { lines?: string[]; error?: string } = {};
+
+function t(key: string, ...values: (string | number)[]): string {
+  const text = messages[key]?.message ?? key;
+  return text.replace(/\$(\d)/g, (_, index: string) => String(values[Number(index) - 1] ?? ""));
+}
+
+async function loadLanguage(): Promise<void> {
+  const stored = await chrome.storage.local
+    .get(LANGUAGE)
+    .then((values) => values[LANGUAGE] as unknown)
+    .catch(() => undefined);
+  const wanted =
+    stored === "en" || stored === "ru"
+      ? stored
+      : chrome.i18n.getUILanguage().toLowerCase().startsWith("ru")
+        ? "ru"
+        : "en";
+  language = wanted;
+  messages = (await fetch(chrome.runtime.getURL(`_locales/${language}/messages.json`)).then(
+    (response) => response.json(),
+  )) as Messages;
+  document.documentElement.lang = language;
+  for (const node of document.querySelectorAll<HTMLElement>("[data-i18n]")) {
+    node.textContent = t(node.dataset.i18n ?? "");
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-language]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.language === language));
+  }
+}
+
+for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-language]")) {
+  button.addEventListener("click", async () => {
+    await chrome.storage.local.set({ [LANGUAGE]: button.dataset.language }).catch(() => undefined);
+    await loadLanguage();
+    render();
+  });
+}
+
 const DESCRIPTIONS: Record<Observation, string> = {
-  full: "Agents' actions, pages' network and console, kept for agents to read; secrets removed.",
-  standard: "Only names, timings and outcomes of agent actions; no page content.",
-  off: "Nothing is collected; the recorder is off.",
+  full: "observationFull",
+  standard: "observationStandard",
+  off: "observationOff",
 };
 
 function show(status: Status): void {
-  if (!state || !toggle) return;
-  const host = status.connected ? "host connected" : "host not connected";
-  state.textContent =
-    status.hostContract !== undefined
-      ? `The NDS host and this extension do not match (host contract ${status.hostContract}): update the extension, or run \`nds-browser-use install\` for a newer host.`
-      : `${status.enabled ? "Enabled" : "Disabled"} · ${host}`;
-  document.body.dataset.compatible = String(status.hostContract === undefined);
-  toggle.textContent = status.enabled ? "Disable agent control" : "Enable agent control";
-  toggle.dataset.enabled = String(status.enabled);
-  toggle.disabled = false;
+  last = status;
+  render();
+}
+
+function render(): void {
+  if (last) renderStatus(last);
+  renderRecording(lastRecording);
+  renderSteps(lastSteps);
+}
+
+function renderStatus(status: Status): void {
+  const mismatch = status.hostContract !== undefined;
+  const link = mismatch ? "mismatch" : !status.connected ? "down" : status.enabled ? "ok" : "off";
+  document.body.dataset.link = link;
+  document.body.dataset.compatible = String(!mismatch);
+  const linkText = element("link");
+  if (linkText) {
+    linkText.textContent = t(
+      { ok: "linkOk", off: "linkOff", down: "linkDown", mismatch: "linkMismatch" }[link],
+    );
+  }
+  const notice = element("mismatch");
+  if (notice) {
+    notice.hidden = !mismatch;
+    notice.textContent = mismatch ? t("mismatch", status.hostContract ?? "") : "";
+  }
+  const toggle = element<HTMLButtonElement>("toggle");
+  if (toggle) {
+    toggle.setAttribute("aria-checked", String(status.enabled));
+    toggle.disabled = false;
+  }
+  const control = element("control-note");
+  if (control) {
+    control.textContent = status.enabled
+      ? `${t("controlOn")}${status.tabs ? ` ${t("agentTabs", status.tabs)}` : ""}`
+      : t("controlOff");
+  }
   const current = status.observation ?? "full";
   for (const button of profiles) {
     button.setAttribute("aria-pressed", String(button.dataset.profile === current));
     button.disabled = false;
   }
-  if (described) described.textContent = DESCRIPTIONS[current];
+  const described = element("observation");
+  if (described) described.textContent = t(DESCRIPTIONS[current]);
   document.body.dataset.observation = current;
-  showPrivate(status);
+  renderTab(status);
+  renderPrivate(status);
+  const versions = element("versions");
+  if (versions) {
+    const own = status.version ?? chrome.runtime.getManifest().version;
+    versions.textContent = status.host
+      ? t("versions", own, `${status.host.version} ${status.host.commit.slice(0, 7)}`)
+      : t("versionsNoHost", own);
+  }
+}
+
+function renderTab(status: Status): void {
+  const state = element("tab-state");
+  const note = element("tab-note");
+  if (!state || !note) return;
+  state.replaceChildren();
+  if (status.group) {
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = t("tabAgent", status.group);
+    state.append(badge);
+    note.textContent = t("tabAgentNote");
+  } else {
+    state.textContent = status.hasTab === false ? t("tabNone") : t("tabOwner");
+    note.textContent = status.hasTab === false ? "" : t("tabOwnerNote");
+  }
+  if (status.site) {
+    const site = document.createElement("span");
+    site.className = "site";
+    site.textContent = status.site;
+    state.append(site);
+  }
+  // Recording and the agent's steps belong to agent tabs; elsewhere they would only explain why
+  // they do not work.
+  const agentTab = Boolean(status.group);
+  document.body.dataset.agentTab = String(agentTab);
+  for (const id of ["record", "recording", "activity"]) {
+    const part = element(id);
+    if (part) part.hidden = !agentTab;
+  }
 }
 
 // Private sites: the owner adds the site of the tab and removes any listed one.
-const privateList = document.getElementById("private");
-const privateAdd = document.getElementById("private-add") as HTMLButtonElement | null;
-
-function showPrivate(status: Status): void {
-  if (!privateList || !privateAdd) return;
+function renderPrivate(status: Status): void {
+  const list = element("private");
+  const add = element<HTMLButtonElement>("private-add");
+  if (!list || !add) return;
   const sites = status.privateSites ?? [];
-  privateList.replaceChildren(
+  list.replaceChildren(
     ...sites.map((site) => {
       const item = document.createElement("li");
       item.textContent = site;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "×";
-      remove.title = `Keep content of ${site} again`;
+      remove.title = t("privateRemove", site);
+      remove.setAttribute("aria-label", t("privateRemove", site));
       remove.addEventListener("click", () => void changePrivate("remove", site));
       item.append(remove);
       return item;
     }),
   );
+  if (sites.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "empty";
+    empty.textContent = t("privateEmpty");
+    empty.style.border = "0";
+    empty.style.background = "transparent";
+    empty.style.paddingLeft = "0";
+    list.append(empty);
+  }
+  list.dataset.count = String(sites.length);
   const site = status.site;
-  privateAdd.disabled = !site || sites.includes(site);
-  privateAdd.dataset.site = site ?? "";
-  privateAdd.textContent = site
+  add.disabled = !site || sites.includes(site);
+  add.dataset.site = site ?? "";
+  add.textContent = site
     ? sites.includes(site)
-      ? `${site} is private`
-      : `Keep ${site} private`
-    : "Keep this site private";
+      ? t("privateIs", site)
+      : t("privateAdd", site)
+    : t("privateAddAny");
 }
 
 async function changePrivate(action: "add" | "remove", site: string): Promise<void> {
@@ -82,17 +217,19 @@ async function changePrivate(action: "add" | "remove", site: string): Promise<vo
   );
 }
 
-privateAdd?.addEventListener("click", () => {
-  const site = privateAdd.dataset.site;
+element<HTMLButtonElement>("private-add")?.addEventListener("click", (event) => {
+  const site = (event.currentTarget as HTMLButtonElement).dataset.site;
   if (site) void changePrivate("add", site);
 });
 
+const toggle = element<HTMLButtonElement>("toggle");
 toggle?.addEventListener("click", async () => {
   toggle.disabled = true;
-  const enabled = toggle.dataset.enabled !== "true";
-  show((await chrome.runtime.sendMessage({ type: "set", enabled })) as Status);
+  const enabled = toggle.getAttribute("aria-checked") !== "true";
+  show((await chrome.runtime.sendMessage({ type: "set", enabled, tab: forTab })) as Status);
 });
 
+const profiles = [...document.querySelectorAll<HTMLButtonElement>("button[data-profile]")];
 for (const button of profiles) {
   button.addEventListener("click", async () => {
     for (const each of profiles) each.disabled = true;
@@ -100,104 +237,158 @@ for (const button of profiles) {
       (await chrome.runtime.sendMessage({
         type: "observe",
         profile: button.dataset.profile,
+        tab: forTab,
       })) as Status,
     );
   });
 }
 
-// The owner's recorder for the agent group of this tab: what the owner does there becomes a
-// timeline the agent reads with `recorder events`, for example to write a skill from it.
-type Recording = {
-  recording?: boolean;
-  id?: string;
-  events?: number;
-  error?: string;
-  message?: string;
-};
-const record = document.getElementById("record") as HTMLButtonElement | null;
-const recording = document.getElementById("recording");
+// The recorder of the agent group of this tab: what the owner does there becomes a timeline the
+// agent reads with `recorder events`, for example to write a skill from it.
 const REFUSED: Record<string, string> = {
-  no_agent_tab: "Open a tab of an agent group to record what you do there.",
-  session_not_found: "This agent group has no open session.",
-  busy: "The agent is running code; try again in a moment.",
-  permission_required: "Agent control is disabled.",
-  extension_unavailable: "The NDS host is not connected.",
-  timeout: "The NDS host did not answer.",
+  no_agent_tab: "refusedNoAgentTab",
+  session_not_found: "refusedSession",
+  busy: "refusedBusy",
+  permission_required: "refusedPermission",
+  extension_unavailable: "refusedHost",
+  timeout: "refusedTimeout",
 };
 
-function recorded(answer: Recording): void {
-  if (!record || !recording) return;
+function renderRecording(answer: Recording): void {
+  const record = element<HTMLButtonElement>("record");
+  const label = element("record-label");
+  const note = element("recording");
+  if (!record || !label || !note) return;
   const active = answer.recording === true;
-  record.textContent = active ? "Stop recording" : "Record what I do";
+  label.textContent = t(active ? "stopRecord" : "record");
+  record.classList.toggle("recording", active);
+  record.classList.toggle("primary", !active);
   record.dataset.recording = String(active);
   record.disabled = answer.error === "no_agent_tab";
   document.body.dataset.recording = answer.error ? "error" : String(active);
-  recording.textContent = answer.error
-    ? (REFUSED[answer.error] ?? answer.message ?? answer.error)
+  note.textContent = answer.error
+    ? REFUSED[answer.error]
+      ? t(REFUSED[answer.error] ?? "")
+      : (answer.message ?? answer.error)
     : active
-      ? `Recording your actions in this agent group${answer.events ? ` (${answer.events} so far)` : ""}.`
+      ? t("recordingNow", answer.events ?? 0)
       : answer.id
-        ? `Recorded ${answer.events ?? 0} actions; the agent reads them with \`recorder events\`.`
-        : "Your clicks, typing and navigations in this group become steps the agent can replay.";
+        ? t("recordedDone", answer.events ?? 0)
+        : t("recordHint");
 }
 
 async function ask(action: "start" | "stop" | "status"): Promise<void> {
-  recorded(
-    (await chrome.runtime.sendMessage({ type: "record", action, tab: forTab })) as Recording,
-  );
+  lastRecording = (await chrome.runtime.sendMessage({
+    type: "record",
+    action,
+    tab: forTab,
+  })) as Recording;
+  renderRecording(lastRecording);
 }
 
-record?.addEventListener("click", () => {
+element<HTMLButtonElement>("record")?.addEventListener("click", (event) => {
+  const record = event.currentTarget as HTMLButtonElement;
   record.disabled = true;
   void ask(record.dataset.recording === "true" ? "stop" : "start");
 });
 
 // The newest steps of the agent group of the owner's tab, as its activity journal holds them.
-const recentList = document.getElementById("recent");
-const recentNote = document.getElementById("recent-note");
+const KINDS: Record<string, string> = {
+  action: "kindAction",
+  navigation: "kindNavigation",
+  page: "kindPage",
+  network: "kindNetwork",
+  execution: "kindExecution",
+  download: "kindDownload",
+  console: "kindConsole",
+  dialog: "kindDialog",
+  "page-error": "kindPageError",
+  recording: "kindRecording",
+  "person-action": "kindPersonAction",
+  toast: "kindToast",
+};
 
-function step(line: string): string {
-  try {
-    const record = JSON.parse(line) as Record<string, unknown>;
-    const time = typeof record.at === "string" ? record.at.slice(11, 19) : "";
-    const what = [record.api, record.method, record.locator, record.url, record.text, record.name]
-      .filter((part) => typeof part === "string" && part !== "")
-      .join(" ");
-    return `${time}  ${String(record.type)}${record.private ? " (private)" : ""}  ${what}`;
-  } catch {
-    return line;
-  }
+function ago(at: unknown): string {
+  const time = typeof at === "string" ? Date.parse(at) : Number.NaN;
+  if (Number.isNaN(time)) return "";
+  const seconds = Math.round((time - Date.now()) / 1000);
+  const format = new Intl.RelativeTimeFormat(language, { numeric: "auto", style: "narrow" });
+  if (Math.abs(seconds) < 60) return format.format(seconds, "second");
+  if (Math.abs(seconds) < 3600) return format.format(Math.round(seconds / 60), "minute");
+  if (Math.abs(seconds) < 86_400) return format.format(Math.round(seconds / 3600), "hour");
+  return format.format(Math.round(seconds / 86_400), "day");
 }
 
-async function showRecent(): Promise<void> {
-  if (!recentList || !recentNote) return;
-  const answer = (await chrome.runtime.sendMessage({ type: "recent", tab: forTab })) as {
-    lines?: string[];
-    error?: string;
-  };
-  const lines = answer.lines ?? [];
-  recentList.replaceChildren(
-    ...lines
-      .slice()
-      .reverse()
-      .map((line) => {
-        const item = document.createElement("li");
-        item.textContent = step(line);
-        return item;
-      }),
+function step(line: string): HTMLLIElement {
+  const item = document.createElement("li");
+  let record: Record<string, unknown> = {};
+  try {
+    record = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    record = { type: "other", text: line };
+  }
+  const type = typeof record.type === "string" ? record.type : "other";
+  item.dataset.type = type;
+  item.dataset.private = String(record.private === true);
+  item.dataset.error = String(
+    record.ok === false || typeof record.error === "string" || typeof record.failure === "string",
   );
-  recentNote.textContent = answer.error
-    ? answer.error === "no_agent_tab"
-      ? "Open a tab of an agent group to see what its agent did."
-      : "The NDS host did not answer."
+  const when = document.createElement("span");
+  when.className = "when";
+  when.textContent = ago(record.at);
+  const kind = document.createElement("span");
+  kind.className = "kind";
+  kind.textContent = t(KINDS[type] ?? "kindOther");
+  const what = document.createElement("span");
+  what.className = "what";
+  const summary = [
+    record.api,
+    record.action,
+    record.method,
+    record.locator,
+    record.url,
+    record.text,
+    record.name,
+    record.message,
+  ]
+    .filter((part) => typeof part === "string" && part !== "")
+    .join(" ");
+  what.textContent = record.private === true ? `${t("private")} ${summary}`.trim() : summary;
+  what.title = what.textContent;
+  item.append(when, kind, what);
+  return item;
+}
+
+function renderSteps(answer: { lines?: string[]; error?: string }): void {
+  const list = element("recent");
+  const note = element("recent-note");
+  if (!list || !note) return;
+  const lines = answer.lines ?? [];
+  list.replaceChildren(...lines.slice().reverse().map(step));
+  note.textContent = answer.error
+    ? t(answer.error === "no_agent_tab" ? "activityNoTab" : "activityHost")
     : lines.length === 0
-      ? "Nothing yet; the journal keeps agents' steps in the full observation profile."
-      : "Newest first. Agents read all of it with `nds-browser-use -s <project> activity`.";
+      ? t("activityNone")
+      : t("activityHint");
   document.body.dataset.recent = String(lines.length);
 }
 
-void chrome.runtime
-  .sendMessage({ type: "get", tab: forTab })
-  .then((status) => show(status as Status));
-void showRecent();
-void ask("status");
+async function refreshSteps(): Promise<void> {
+  lastSteps = (await chrome.runtime.sendMessage({ type: "recent", tab: forTab })) as {
+    lines?: string[];
+    error?: string;
+  };
+  renderSteps(lastSteps);
+}
+
+void loadLanguage()
+  .catch(() => undefined)
+  .then(async () => {
+    show((await chrome.runtime.sendMessage({ type: "get", tab: forTab })) as Status);
+    await Promise.all([ask("status"), refreshSteps()]);
+  });
+// While the popup stays open, the agent's newest steps and the recorder keep current.
+setInterval(() => {
+  void refreshSteps();
+  if (lastRecording.recording) void ask("status");
+}, 2000);
