@@ -727,6 +727,18 @@ impl Host {
                 self.update();
             }
             Some("private") => self.state().private_sites = observation::sites(&message["sites"]),
+            // The popup names the host's build.
+            Some("about") => {
+                let body = serde_json::to_vec(&json!({
+                    "type": "about",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "commit": option_env!("NDS_SOURCE_COMMIT").unwrap_or("unknown"),
+                }))
+                .unwrap_or_default();
+                if let Some(framed) = frame(&body) {
+                    let _ = self.outbound.try_send(framed);
+                }
+            }
             Some("journal") => {
                 let host = self.clone();
                 tokio::spawn(async move { host.recent(&message).await });

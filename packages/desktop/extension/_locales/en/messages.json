@@ -1,0 +1,200 @@
+{
+  "extensionName": {
+    "message": "NDDev OpenNetwork NDS browser-use"
+  },
+  "extensionDescription": {
+    "message": "Lets NDS agents work in their own tab groups of your browser, through the NDS host on this device."
+  },
+  "actionTitle": {
+    "message": "NDS agent"
+  },
+  "title": {
+    "message": "NDS agent"
+  },
+  "linkOk": {
+    "message": "Connected"
+  },
+  "linkOff": {
+    "message": "Agents paused"
+  },
+  "linkDown": {
+    "message": "Host not running"
+  },
+  "linkMismatch": {
+    "message": "Update needed"
+  },
+  "mismatch": {
+    "message": "The NDS host speaks contract $1 and this extension does not. Update the extension, or run `nds-browser-use install` for a newer host."
+  },
+  "controlTitle": {
+    "message": "Agent control"
+  },
+  "controlOn": {
+    "message": "Agents may work in their own tab groups."
+  },
+  "controlOff": {
+    "message": "Agents cannot act, and their tabs are released."
+  },
+  "agentTabs": {
+    "message": "Agent tabs open: $1."
+  },
+  "tabTitle": {
+    "message": "This tab"
+  },
+  "tabAgent": {
+    "message": "Agent group “$1”"
+  },
+  "tabOwner": {
+    "message": "Your own tab"
+  },
+  "tabNone": {
+    "message": "No tab"
+  },
+  "tabAgentNote": {
+    "message": "An agent works here. What you do here, you can record for it."
+  },
+  "tabOwnerNote": {
+    "message": "Agents cannot use it. Move it into an agent's group to share it."
+  },
+  "record": {
+    "message": "Record what I do"
+  },
+  "stopRecord": {
+    "message": "Stop recording"
+  },
+  "recordingNow": {
+    "message": "Recording your actions: $1 so far."
+  },
+  "recordedDone": {
+    "message": "Recorded $1 actions. The agent reads them with `recorder events`."
+  },
+  "recordHint": {
+    "message": "Your clicks, typing and navigations here become steps the agent can replay."
+  },
+  "refusedNoAgentTab": {
+    "message": "Open a tab of an agent group to record what you do there."
+  },
+  "refusedSession": {
+    "message": "This agent group has no open session."
+  },
+  "refusedBusy": {
+    "message": "The agent is running code; try again in a moment."
+  },
+  "refusedPermission": {
+    "message": "Agent control is off."
+  },
+  "refusedHost": {
+    "message": "The NDS host is not connected."
+  },
+  "refusedTimeout": {
+    "message": "The NDS host did not answer."
+  },
+  "privateAdd": {
+    "message": "Keep $1 private"
+  },
+  "privateIs": {
+    "message": "$1 is private"
+  },
+  "privateAddAny": {
+    "message": "Keep this site private"
+  },
+  "privateTitle": {
+    "message": "Private sites"
+  },
+  "privateNote": {
+    "message": "Agents still work there, but their activity journal keeps no content of them."
+  },
+  "privateEmpty": {
+    "message": "None yet."
+  },
+  "privateRemove": {
+    "message": "Keep the content of $1 again"
+  },
+  "activityTitle": {
+    "message": "What the agent did here"
+  },
+  "activityNone": {
+    "message": "Nothing yet. Steps appear here in the full observation profile."
+  },
+  "activityNoTab": {
+    "message": "Open a tab of an agent group to see what its agent did."
+  },
+  "activityHost": {
+    "message": "The NDS host did not answer."
+  },
+  "activityHint": {
+    "message": "Newest first. Agents read all of it with `nds-browser-use -s <project> activity`."
+  },
+  "kindAction": {
+    "message": "action"
+  },
+  "kindNavigation": {
+    "message": "page"
+  },
+  "kindPage": {
+    "message": "tab"
+  },
+  "kindNetwork": {
+    "message": "request"
+  },
+  "kindExecution": {
+    "message": "run"
+  },
+  "kindDownload": {
+    "message": "download"
+  },
+  "kindConsole": {
+    "message": "console"
+  },
+  "kindDialog": {
+    "message": "dialog"
+  },
+  "kindPageError": {
+    "message": "error"
+  },
+  "kindRecording": {
+    "message": "recording"
+  },
+  "kindPersonAction": {
+    "message": "you"
+  },
+  "kindToast": {
+    "message": "message"
+  },
+  "kindOther": {
+    "message": "event"
+  },
+  "private": {
+    "message": "private"
+  },
+  "observationTitle": {
+    "message": "Observation"
+  },
+  "full": {
+    "message": "Full"
+  },
+  "standard": {
+    "message": "Standard"
+  },
+  "off": {
+    "message": "Off"
+  },
+  "observationFull": {
+    "message": "Agents' actions, pages' network and console, kept on this device for agents to read; secrets removed."
+  },
+  "observationStandard": {
+    "message": "Only names, timings and outcomes of agent actions; no page content."
+  },
+  "observationOff": {
+    "message": "Nothing is collected, and the recorder is off."
+  },
+  "guide": {
+    "message": "Agent guide"
+  },
+  "versions": {
+    "message": "Extension $1 · host $2"
+  },
+  "versionsNoHost": {
+    "message": "Extension $1"
+  }
+}

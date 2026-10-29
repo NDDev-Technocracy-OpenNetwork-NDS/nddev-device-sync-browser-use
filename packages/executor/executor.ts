@@ -200,7 +200,12 @@ const sandbox = vm.createContext({
   clearTimeout,
   setInterval: agentSetInterval,
   clearInterval,
+  setImmediate,
+  clearImmediate,
+  queueMicrotask,
   structuredClone,
+  // For timing an agent's own steps; the page's clock is page.evaluate(() => performance.now()).
+  performance,
 });
 // No default page: a bare `page` says how to get one. It is defined inside the context, because a
 // host-side getter's error would only read as "page is not defined".
