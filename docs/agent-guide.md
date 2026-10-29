@@ -328,7 +328,8 @@ one exists.
       .observe({ type: "paint", buffered: true });
     new PerformanceObserver((list) => { for (const e of list.getEntries()) if (!e.hadRecentInput) vitals.cls += e.value; })
       .observe({ type: "layout-shift", buffered: true });
-    setTimeout(() => done(vitals), 500);
+    // Paints come once Chrome draws a frame, later on a busy machine or in a background tab.
+    setTimeout(() => done(vitals), 3000);
   }));
   ```
 - **Counters.** `const cdp = await getCDPSession({ page: state.page }); await cdp.send("Performance.enable");`
