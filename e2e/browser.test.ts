@@ -988,6 +988,38 @@ test("the recorder turns a person's actions in an agent tab into events and fram
   }
 });
 
+// A screenshot shows the page, not this module's ghost cursor; a labelled screenshot keeps its
+// labels. A bare `page` says how to get one.
+test("screenshots leave the ghost cursor out and a bare page says how to get one", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/record");
+     // A blank part of the page, so the pointer hovers nothing there.
+     const clip = { x: 0, y: 300, width: 60, height: 60 };
+     await page.evaluate(() => document.activeElement?.blur());
+     const plain = await page.screenshot({ clip, type: "jpeg", quality: 100 });
+     await ghostCursor.show({ page, style: "dot" });
+     await page.mouse.move(30, 330);
+     await page.waitForTimeout(400);
+     const shown = await page.evaluate(() => getComputedStyle(document.getElementById("nds-ghost-cursor")).display);
+     const withCursor = await page.screenshot({ clip, type: "jpeg", quality: 100 });
+     const after = await page.evaluate(() => [Boolean(document.getElementById("nds-ghost-cursor")), Boolean(document.getElementById("nds-screenshot-style"))]);
+     await ghostCursor.hide({ page });
+     await page.close();
+     return JSON.stringify({ shown, same: plain.equals(withCursor), after })`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body).toMatchObject({ failure: null });
+  expect(JSON.parse(String(result.body.value))).toEqual({
+    shown: "block",
+    same: true,
+    after: [true, false],
+  });
+  const bare = await run("acceptance", "page.url()");
+  expect(String(bare.body.output)).toContain("There is no global `page`");
+});
+
 // Agent code loads modules, and reads the elements the owner pinned with right-click. The menu
 // itself is browser chrome, so the pin is applied the way the extension applies it.
 test("agent code loads modules and lists the elements the owner pinned", async () => {

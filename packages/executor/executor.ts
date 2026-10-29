@@ -201,6 +201,14 @@ const sandbox = vm.createContext({
   clearInterval,
   structuredClone,
 });
+// No default page: a bare `page` says how to get one. It is defined inside the context, because a
+// host-side getter's error would only read as "page is not defined".
+vm.runInContext(
+  `Object.defineProperty(globalThis, "page", { get() { throw new ReferenceError(${JSON.stringify(
+    'There is no global `page`. Open one with `state.page = await context.newPage()`, or reuse one with `state.page = context.pages().findLast((page) => page.url().includes("example.com"))`, and keep it in `state.page` across executions.',
+  )}); }, configurable: true })`,
+  sandbox,
+);
 // `signal` is the calling script's own: aborted once its execution timed out.
 Object.defineProperty(sandbox, "signal", {
   get: () => scope.getStore()?.signal,

@@ -11,6 +11,7 @@ form or why it is left out.
 | --- | --- |
 | `context`, `browser`, `state`, `console`, `require`, `import()` | Same. `import()` and `require` resolve relative paths in `artifacts`. |
 | `signal` | Same: the script's own AbortSignal. |
+| No global `page`, with a hint | Same: a bare `page` says to keep one in `state.page`. |
 | `process` (with `exit`, `chdir` refused) | Same; `cwd()` is `artifacts`. |
 | `importModule` | Same name for `import()`. Playwriter limits it to an allowlist; ours loads what `import()` loads. |
 | Timers, `fetch`, `Buffer`, `crypto`, `AbortController`, `AbortSignal`, `structuredClone`, URL and text codecs | Same. An aborted script's intervals stop with it. |
@@ -64,4 +65,5 @@ form or why it is left out.
 | Per-command deadlines, noisy network events dropped | Same. |
 | Download events | Same: `waitForEvent("download")` gives the URL and suggested name. |
 | Download files | Better. Chrome refuses an extension's `Page.setDownloadBehavior` in both, so Playwriter's `saveAs()` finds no file. Here the extension's `downloads` permission names the browser's file of each download an agent tab, or a tab it opened, started; the host keeps a copy in the session and removes the browser's copy and list entry. `saveAs()`, `path()`, `createReadStream()` and `failure()` answer from it, also after the page closed, for a form's POST, a one-time link, a revoked `blob:`, a frame of another site and a file that opens in a new tab (reported on the opener). A download no agent tab announced is loaded again through the tab. |
+| Screenshot without own UI, scrollbars and caret | Same: the extension hides the ghost cursor, scrollbars and caret while Chrome captures, and the labels of a labelled screenshot stay. |
 | Screencast shared between clients | Not shared: one recording per tab. |

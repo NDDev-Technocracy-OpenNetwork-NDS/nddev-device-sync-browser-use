@@ -38,6 +38,12 @@ const SETUP = new Set([
     "Target.setAutoAttach",
 ]);
 const SETUP_TIMEOUT_MS = 10_000;
+// While Chrome captures a screenshot of an agent tab, this worker's ghost cursor, the page's
+// scrollbars and the text caret stay out of it, as in Playwriter; the accessibility labels a
+// labelled screenshot draws stay in.
+const SHOT_STYLE = "nds-screenshot-style";
+const SHOT_HIDE = `(() => { if (document.getElementById("${SHOT_STYLE}")) return; const style = document.createElement("style"); style.id = "${SHOT_STYLE}"; style.textContent = "#nds-ghost-cursor { display: none !important } html { scrollbar-width: none !important } ::-webkit-scrollbar { display: none !important } * { caret-color: transparent !important }"; (document.head ?? document.documentElement).append(style); })()`;
+const SHOT_SHOW = `document.getElementById("${SHOT_STYLE}")?.remove()`;
 class Refusal extends Error {
 }
 let port;
@@ -417,6 +423,15 @@ async function dispatch(message) {
             }
             if (message.session)
                 return (await command(target, message.method, message.params)) ?? {};
+            if (message.method === "Page.captureScreenshot") {
+                await command(target, "Runtime.evaluate", { expression: SHOT_HIDE }).catch(() => undefined);
+                try {
+                    return (await command(target, message.method, message.params)) ?? {};
+                }
+                finally {
+                    await command(target, "Runtime.evaluate", { expression: SHOT_SHOW }).catch(() => undefined);
+                }
+            }
             // Setup that would outgrow what a reattach can restore is refused before Chrome sees it; the
             // room is held from here until the answer, so concurrent setup shares the bounds.
             const release = restore.reserve(message.tab, message.method, message.params);
