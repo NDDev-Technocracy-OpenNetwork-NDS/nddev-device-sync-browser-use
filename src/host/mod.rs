@@ -145,6 +145,9 @@ struct Session {
     files: downloads::Files,
     /// The session's activity journal, opened by its first record (docs/observability.md).
     journal: Option<Arc<Mutex<crate::activity::Writer>>>,
+    /// The recorder's current recording, as its journal records report it: its id and the
+    /// owner's actions so far. The popup reads it without running anything in the session.
+    recording: Option<(String, u64)>,
 }
 
 struct Tab {
@@ -764,6 +767,31 @@ impl Host {
             return;
         };
         let project = message["group"].as_str().unwrap_or_default();
+        if action == "status" {
+            // Answered from what the session's journal records said, so opening the popup runs
+            // nothing in the agent's session and never waits for the agent.
+            let mut answer = match self.execution_life(project, None) {
+                Err(refusal) => json!({ "error": refusal.code() }),
+                Ok(_) => match self
+                    .state()
+                    .sessions
+                    .get(project)
+                    .and_then(|s| s.recording.clone())
+                {
+                    Some((id, events)) => json!({ "recording": true, "id": id, "events": events }),
+                    None => json!({ "recording": false }),
+                },
+            };
+            answer["type"] = "recorded".into();
+            answer["request"] = message["request"].clone();
+            if let Some(framed) = serde_json::to_vec(&answer)
+                .ok()
+                .and_then(|body| frame(&body))
+            {
+                let _ = self.outbound.try_send(framed);
+            }
+            return;
+        }
         let code = format!("return JSON.stringify(await recorder.{action}())");
         let reply = match self.execution_life(project, None) {
             Ok(life) => self.execute(project, &life, &code, RECORD_MS, None).await,
@@ -1426,6 +1454,7 @@ impl Host {
                 downloads: None,
                 files: downloads::Files::default(),
                 journal: None,
+                recording: None,
             },
         );
         Ok(life)
@@ -2035,6 +2064,26 @@ mod owned_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_recording_is_followed_through_its_journal_records() {
+        let mut recording = None;
+        observation::follow_recording(
+            &mut recording,
+            &[
+                json!({ "type": "recording", "event": "started", "recording": "r1" }),
+                json!({ "type": "person-action", "action": "fill" }),
+                json!({ "type": "person-action", "action": "fill", "update": true }),
+                json!({ "type": "person-action", "action": "click" }),
+            ],
+        );
+        assert_eq!(recording, Some(("r1".to_owned(), 2)));
+        observation::follow_recording(
+            &mut recording,
+            &[json!({ "type": "recording", "event": "stopped", "recording": "r1" })],
+        );
+        assert_eq!(recording, None);
+    }
 
     #[test]
     fn private_sites_are_lowercase_host_names() {

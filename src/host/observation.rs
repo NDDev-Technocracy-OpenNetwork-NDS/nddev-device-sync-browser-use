@@ -93,6 +93,30 @@ const SITES_LIMIT: usize = 256;
 /// The newest journal records the popup shows of an agent group.
 const RECENT: usize = 12;
 
+/// Follows the session's recording through its journal records: started, the owner's actions,
+/// stopped.
+pub(super) fn follow_recording(recording: &mut Option<(String, u64)>, records: &[Value]) {
+    for record in records {
+        match (record["type"].as_str(), record["event"].as_str()) {
+            (Some("recording"), Some("started")) => {
+                *recording = record["recording"]
+                    .as_str()
+                    .filter(|id| id.len() <= 64)
+                    .map(|id| (id.to_owned(), 0));
+            }
+            (Some("recording"), Some("stopped")) => *recording = None,
+            (Some("person-action"), _) => {
+                if let Some((_, events)) = recording.as_mut()
+                    && record["update"].as_bool() != Some(true)
+                {
+                    *events += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The owner's private sites from the extension: lowercase host names, each with its subdomains.
 pub(super) fn sites(value: &Value) -> Vec<String> {
     let mut sites: Vec<String> = value
@@ -160,6 +184,9 @@ impl Host {
                 return json!({ "kept": false });
             }
             let sites = state.private_sites.clone();
+            if let Some(session) = state.sessions.get_mut(project) {
+                follow_recording(&mut session.recording, &records);
+            }
             Self::open_journal(&mut state, &self.config.activity, project)
                 .map(|journal| (journal, sites))
         };
