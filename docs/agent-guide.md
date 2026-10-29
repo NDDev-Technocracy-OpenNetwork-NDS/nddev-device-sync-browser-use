@@ -307,10 +307,14 @@ one exists.
 
 ## Performance
 
-- **Web vitals.** Paints and layout shifts come from the page's own buffered entries:
+- **Web vitals.** Load timing, paints and layout shifts come from the page's own buffered entries.
+  Agent tabs open in the background, and Chrome records paints only for a page that was shown, so
+  `paints` stays empty while `document.visibilityState` is `hidden`; the navigation entry is
+  always there:
   ```js
   await state.page.evaluate(() => new Promise((done) => {
-    const vitals = { paints: {}, cls: 0 };
+    const [navigation] = performance.getEntriesByType("navigation");
+    const vitals = { load: navigation.loadEventEnd, visible: document.visibilityState, paints: {}, cls: 0 };
     new PerformanceObserver((list) => { for (const e of list.getEntries()) vitals.paints[e.name] = e.startTime; })
       .observe({ type: "paint", buffered: true });
     new PerformanceObserver((list) => { for (const e of list.getEntries()) if (!e.hadRecentInput) vitals.cls += e.value; })
