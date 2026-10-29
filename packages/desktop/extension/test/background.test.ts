@@ -68,6 +68,8 @@ class Browser {
   readonly navigationTarget = new Event();
   readonly posted: Message[] = [];
   readonly port = { onMessage: new Event(), onDisconnect: new Event() };
+  // The execution context of each Runtime.evaluate: 7 is the worker's isolated world.
+  readonly worlds: (number | undefined)[] = [];
   // The action badge as the worker last set it, and messages from the extension's own pages.
   badge = "";
   readonly popup = new Event();
@@ -214,16 +216,20 @@ class Browser {
         sendCommand: async (
           { tabId, sessionId }: Session,
           method: string,
-          params?: { expression?: string },
+          params?: { expression?: string; contextId?: number },
         ) => {
           if (!this.sessions.has(tabId)) throw new Error("Debugger is not attached.");
           this.commands.push(`${method} ${tabId}${sessionId ? `/${sessionId}` : ""}`);
           await this.heldCommands.get(method)?.promise;
           if (this.failing.has(method)) throw new Error(`${method} failed.`);
           if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
+          if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
           if (method === "Runtime.evaluate" && params?.expression) {
             this.evaluated.push(params.expression);
-            if (params.expression.includes("ndsPinnedElem")) return { result: { value: 1 } };
+            this.worlds.push(params.contextId);
+            if (params.expression.includes('setAttribute("data-nds-pin"')) {
+              return { result: { value: 1 } };
+            }
           }
           return method === "Target.getTargetInfo" ? { targetInfo: { targetId: `t${tabId}` } } : {};
         },
@@ -405,10 +411,13 @@ test("the owner pins an element only in an agent tab", async () => {
     [9, -1],
   ]);
   await send({ type: "claim", group: "p" })();
-  // Attaching installs the listener that remembers the element of a right-click.
-  expect(browser.evaluated.some((expression) => expression.includes("__ndsContextTarget"))).toBe(
-    true,
+  // Attaching installs the listener that remembers the element of a right-click, in the worker's
+  // isolated world, which the page cannot see.
+  const listener = browser.evaluated.findIndex((expression) =>
+    expression.includes("__ndsContextTarget"),
   );
+  expect(listener).toBeGreaterThanOrEqual(0);
+  expect(browser.worlds[listener]).toBe(7);
   browser.menu.fire({ menuItemId: "nds-pin" }, { id: 1 });
   await until(() => browser.notifications.find((note) => note.id === "pin:1"));
   expect(browser.notifications.find((note) => note.id === "pin:1")?.message).toBe(
@@ -420,9 +429,12 @@ test("the owner pins an element only in an agent tab", async () => {
   expect(browser.notifications.find((note) => note.id === "pin:9")?.message).toContain(
     "Only tabs in an NDS agent group",
   );
-  expect(
-    browser.evaluated.filter((expression) => expression.includes("ndsPinnedElem")),
-  ).toHaveLength(1);
+  // Only the pin itself reaches the page's own world, by its one name.
+  const named = browser.evaluated.filter((expression) => expression.includes("ndsPinnedElem"));
+  expect(named).toEqual([
+    `globalThis.ndsPinnedElem1 = document.querySelector('[data-nds-pin="1"]')`,
+  ]);
+  expect(browser.worlds[browser.evaluated.indexOf(named[0] ?? "")]).toBeUndefined();
 });
 
 test("an owner notification ends with the agent's hold on its tab", async () => {

@@ -20,8 +20,12 @@ const OWNER = "owner:";
 const PIN = "nds-pin";
 // Installed in every agent tab: remembers the element of the last right-click, for pinning.
 const CONTEXT = `if (!globalThis.__ndsContext) { globalThis.__ndsContext = true; addEventListener("contextmenu", (event) => { globalThis.__ndsContextTarget = event.target; }, true); }`;
-// Pins that element as ndsPinnedElemN and marks it, so agent code can reach it by locator.
-const PINNING = `(() => { const target = globalThis.__ndsContextTarget; if (!(target instanceof Element)) return 0; const pins = (globalThis.__ndsPins ??= []); if (!pins.includes(target)) pins.push(target); const number = pins.indexOf(target) + 1; globalThis["ndsPinnedElem" + number] = target; target.setAttribute("data-nds-pin", String(number)); return number; })()`;
+// Marks that element as the next pin, `[data-nds-pin="N"]`, or names the pin it already is.
+const PINNING = `(() => { const target = globalThis.__ndsContextTarget; if (!(target instanceof Element)) return 0; const known = Number(target.getAttribute("data-nds-pin")); if (known) return known; const number = Math.max(0, ...[...document.querySelectorAll("[data-nds-pin]")].map((pin) => Number(pin.getAttribute("data-nds-pin")) || 0)) + 1; target.setAttribute("data-nds-pin", String(number)); return number; })()`;
+// This worker's scripts in agent tabs (the right-click listener, the pin marker, the ghost cursor)
+// run in an isolated world of this name: the page sees none of their globals or properties, and
+// shares only the DOM with them.
+const WORLD = "nds";
 
 // Events no agent uses that flood native messaging on busy pages.
 const NOISY = new Set(["Network.dataReceived", "Network.resourceChangedPriority"]);
@@ -54,7 +58,7 @@ const SHOT_SHOW = `document.getElementById("${SHOT_STYLE}")?.remove()`;
 // The ghost cursor shows each agent mouse action in an agent tab and fades after 5 s. It moves only after the agent's own Input.dispatchMouseEvent, never with the owner's
 // mouse. A cursor the executor installed (ghostCursor.show) follows the mouse itself and is left
 // alone, and ghostCursor.hide turns this one off until the next show.
-const CURSOR = `((x, y, press) => { if (globalThis.__ndsCursorOff || !document.documentElement) return; let host = document.getElementById("nds-ghost-cursor"); if (host && !host.__ndsMove) return; if (!host) { host = document.createElement("div"); host.id = "nds-ghost-cursor"; host.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647"; const root = host.attachShadow({ mode: "closed" }); const dot = document.createElement("div"); dot.style.cssText = "position:fixed;left:0;top:0;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:rgba(0,0,0,.55);border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);opacity:0;transition:opacity .3s,transform .1s"; root.append(dot); document.documentElement.append(host); let idle; host.__ndsMove = (x, y, press) => { dot.style.left = x + "px"; dot.style.top = y + "px"; dot.style.opacity = "1"; if (press) { dot.style.transform = "scale(.7)"; setTimeout(() => { dot.style.transform = ""; }, 150); } clearTimeout(idle); idle = setTimeout(() => { dot.style.opacity = "0"; }, 5000); }; } host.__ndsMove(x, y, press); })`;
+const CURSOR = `((x, y, press) => { if (!document.documentElement || document.documentElement.hasAttribute("data-nds-cursor-off")) return; let host = document.getElementById("nds-ghost-cursor"); if (host && !host.__ndsMove) return; if (!host) { host = document.createElement("div"); host.id = "nds-ghost-cursor"; host.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647"; const root = host.attachShadow({ mode: "closed" }); const dot = document.createElement("div"); dot.style.cssText = "position:fixed;left:0;top:0;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:rgba(0,0,0,.55);border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);opacity:0;transition:opacity .3s,transform .1s"; root.append(dot); document.documentElement.append(host); let idle; host.__ndsMove = (x, y, press) => { dot.style.left = x + "px"; dot.style.top = y + "px"; dot.style.opacity = "1"; if (press) { dot.style.transform = "scale(.7)"; setTimeout(() => { dot.style.transform = ""; }, 150); } clearTimeout(idle); idle = setTimeout(() => { dot.style.opacity = "0"; }, 5000); }; } host.__ndsMove(x, y, press); })`;
 
 type HostRequest =
   | {
@@ -117,6 +121,8 @@ type Attachment = {
   ending?: Promise<void> | undefined;
   // The tab's target, which a reattached session must still report.
   target?: string | undefined;
+  // The execution context of this worker's isolated world in the tab's current document.
+  world?: number | undefined;
 };
 
 // Group key -> its current life.
@@ -989,13 +995,58 @@ function liveIn(groupId: number | undefined): Life | undefined {
 }
 
 // Moves the ghost cursor to an agent mouse event's point; it never delays or fails the event.
+// The cursor's moves of one tab, in the order the agent's mouse events came.
+const cursorSteps = new Map<number, Promise<unknown>>();
+
 function point(tab: number, params: object | undefined): void {
   const { type, x, y } = (params ?? {}) as { type?: unknown; x?: unknown; y?: unknown };
   if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x + y)) return;
   const expression = `${CURSOR}(${x}, ${y}, ${type === "mousePressed"})`;
-  void chrome.debugger
-    .sendCommand({ tabId: tab }, "Runtime.evaluate", { expression })
+  const next = (cursorSteps.get(tab) ?? Promise.resolve())
+    .then(() => inWorld(tab, expression))
     .catch(() => undefined);
+  cursorSteps.set(tab, next);
+  void next.then(() => {
+    if (cursorSteps.get(tab) === next) cursorSteps.delete(tab);
+  });
+}
+
+// Evaluates in this worker's isolated world of the tab's main frame. Chrome keeps one world of a
+// name per frame, the one `remember` installs into; its context changes with each document, so a
+// stale one is asked for again once.
+async function inWorld(
+  tab: number,
+  expression: string,
+  returnByValue = false,
+): Promise<{ result?: { value?: unknown } }> {
+  const attachment = attached.get(tab);
+  if (!attachment) throw new Refusal("target_closed");
+  for (let attempt = 0; ; attempt++) {
+    if (attachment.world === undefined) {
+      const { frameTree } = (await chrome.debugger.sendCommand(
+        { tabId: tab },
+        "Page.getFrameTree",
+      )) as {
+        frameTree: { frame: { id: string } };
+      };
+      const { executionContextId } = (await chrome.debugger.sendCommand(
+        { tabId: tab },
+        "Page.createIsolatedWorld",
+        { frameId: frameTree.frame.id, worldName: WORLD },
+      )) as { executionContextId: number };
+      attachment.world = executionContextId;
+    }
+    try {
+      return (await chrome.debugger.sendCommand({ tabId: tab }, "Runtime.evaluate", {
+        expression,
+        contextId: attachment.world,
+        returnByValue,
+      })) as { result?: { value?: unknown } };
+    } catch (error) {
+      attachment.world = undefined;
+      if (attempt > 0) throw error;
+    }
+  }
 }
 
 // A check in an agent tab that only a person passes, such as a CAPTCHA. One notification per tab
@@ -1045,12 +1096,13 @@ async function clearOwner(tab: number): Promise<object> {
 async function remember(tab: number, admitted: () => boolean): Promise<void> {
   if (!admitted()) return;
   await chrome.debugger
-    .sendCommand({ tabId: tab }, "Page.addScriptToEvaluateOnNewDocument", { source: CONTEXT })
+    .sendCommand({ tabId: tab }, "Page.addScriptToEvaluateOnNewDocument", {
+      source: CONTEXT,
+      worldName: WORLD,
+    })
     .catch(() => undefined);
   if (!admitted()) return;
-  await chrome.debugger
-    .sendCommand({ tabId: tab }, "Runtime.evaluate", { expression: CONTEXT })
-    .catch(() => undefined);
+  await inWorld(tab, CONTEXT).catch(() => undefined);
 }
 
 // The owner points an agent at an element: right-click, "Pin this element for the NDS agent".
@@ -1068,11 +1120,17 @@ async function pin(tab: number): Promise<void> {
     });
     return;
   }
-  const { result } = (await chrome.debugger.sendCommand({ tabId: tab }, "Runtime.evaluate", {
-    expression: PINNING,
-    returnByValue: true,
-  })) as { result?: { value?: number } };
-  const number = result?.value ?? 0;
+  const { result } = await inWorld(tab, PINNING, true);
+  const number = typeof result?.value === "number" ? result.value : 0;
+  // Agent code reaches the pin as `globalThis.ndsPinnedElemN` too: the page's own world gets that
+  // one name, only once the owner pinned.
+  if (number > 0) {
+    await chrome.debugger
+      .sendCommand({ tabId: tab }, "Runtime.evaluate", {
+        expression: `globalThis.ndsPinnedElem${number} = document.querySelector('[data-nds-pin="${number}"]')`,
+      })
+      .catch(() => undefined);
+  }
   await chrome.notifications.create(id, {
     type: "basic",
     iconUrl: "icons/icon-128.png",

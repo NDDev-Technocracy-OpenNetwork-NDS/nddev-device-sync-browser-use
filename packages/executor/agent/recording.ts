@@ -226,7 +226,7 @@ type CursorStyle = "minimal" | "dot" | "screenstudio";
 function install(style: CursorStyle): void {
   const id = "nds-ghost-cursor";
   // Replaces the extension's cursor of agent mouse actions, which then stays off until hidden.
-  delete (globalThis as { __ndsCursorOff?: boolean }).__ndsCursorOff;
+  document.documentElement.removeAttribute("data-nds-cursor-off");
   document.getElementById(id)?.remove();
   const host = document.createElement("div");
   host.id = id;
@@ -283,7 +283,7 @@ export const ghostCursor = {
     shown.delete(page);
     await page.evaluate(() => {
       // The extension's cursor of agent mouse actions stays off too, until the next show().
-      (globalThis as { __ndsCursorOff?: boolean }).__ndsCursorOff = true;
+      document.documentElement.setAttribute("data-nds-cursor-off", "");
       const host = document.getElementById("nds-ghost-cursor") as
         | (HTMLElement & { stop?: () => void })
         | null;

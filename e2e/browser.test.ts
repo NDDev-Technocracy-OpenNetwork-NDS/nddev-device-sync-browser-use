@@ -1235,7 +1235,9 @@ test("the ghost cursor shows agent mouse actions until the agent hides it", asyn
   const result = await run(
     "acceptance",
     `const page = await context.newPage(); await page.goto("${origin}/");
-     const cursor = () => page.evaluate(() => { const host = document.getElementById("nds-ghost-cursor"); return host === null ? "none" : typeof host.__ndsMove === "function" ? "extension" : "executor"; });
+     const cursor = () => page.evaluate(() => { const host = document.getElementById("nds-ghost-cursor"); return host === null ? "none" : typeof host.stop === "function" ? "executor" : "extension"; });
+     // The extension's scripts live in their own world: the page sees none of their names.
+     const hidden = await page.evaluate(() => ["__ndsContext", "__ndsContextTarget", "__ndsPins", "__ndsCursorOff"].filter((name) => name in globalThis));
      const before = await cursor();
      await page.click("#inc");
      await page.waitForTimeout(300);
@@ -1243,19 +1245,20 @@ test("the ghost cursor shows agent mouse actions until the agent hides it", asyn
      await ghostCursor.hide({ page });
      await page.click("#inc");
      await page.waitForTimeout(300);
-     const hidden = await cursor();
+     const off = await cursor();
      await ghostCursor.show({ page });
      await page.mouse.move(20, 20);
      const shown = await cursor();
      await page.close();
-     return JSON.stringify({ before, clicked, hidden, shown })`,
+     return JSON.stringify({ hidden, before, clicked, off, shown })`,
     "--timeout",
     "20000",
   );
   expect(JSON.parse(String(result.body.value))).toEqual({
+    hidden: [],
     before: "none",
     clicked: "extension",
-    hidden: "none",
+    off: "none",
     shown: "executor",
   });
 });
@@ -1312,12 +1315,13 @@ test("agent code loads modules and lists the elements the owner pinned", async (
     await (await observed("/helpers?pins"))?.click("#save", { button: "right" });
     const result = await run(
       "pins",
-      `const remembered = await state.page.evaluate(() => globalThis.__ndsContextTarget?.id);
-       await state.page.evaluate(() => { const target = globalThis.__ndsContextTarget; globalThis.__ndsPins = [target]; globalThis.ndsPinnedElem1 = target; target.setAttribute("data-nds-pin", "1"); });
-       return JSON.stringify({ remembered, pinned: await pinnedElements({ page: state.page }) })`,
+      `// The extension remembers the right-click in its own world, which the page cannot see.
+       const visible = await state.page.evaluate(() => "__ndsContextTarget" in globalThis);
+       await state.page.evaluate(() => { const target = document.getElementById("save"); target.setAttribute("data-nds-pin", "1"); globalThis.ndsPinnedElem1 = target; });
+       return JSON.stringify({ visible, pinned: await pinnedElements({ page: state.page }) })`,
     );
-    const seen = JSON.parse(String(result.body.value)) as { remembered: string; pinned: string };
-    expect(seen.remembered).toBe("save");
+    const seen = JSON.parse(String(result.body.value)) as { visible: boolean; pinned: string };
+    expect(seen.visible).toBe(false);
     const inspected = await run(
       "pins",
       `state.page = undefined; const found = await inspectPinnedElement(${JSON.stringify(`${origin}/helpers?pins`)}, "globalThis.ndsPinnedElem1"); return JSON.stringify({ html: found.outerHTML, page: state.page?.url() })`,
