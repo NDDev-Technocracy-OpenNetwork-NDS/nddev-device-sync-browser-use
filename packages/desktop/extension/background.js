@@ -102,8 +102,12 @@ async function load() {
 function saveGroups() {
     return chrome.storage.session.set({ [GROUPS]: Object.fromEntries(groups) });
 }
+// The contract of a connected host that refused this worker's, which the popup explains.
+let hostContract;
+const CONTRACT = 2;
 async function badge() {
-    await chrome.action.setBadgeText({ text: enabled ? (port ? "" : "…") : "OFF" });
+    const text = !enabled ? "OFF" : !port ? "…" : hostContract !== undefined ? "!" : "";
+    await chrome.action.setBadgeText({ text });
 }
 function send(message) {
     port?.postMessage(message);
@@ -126,12 +130,18 @@ function connect() {
             void reloadFor(message.version);
         else if (message.type === "recorded")
             recorded.get(message.request)?.(message);
+        else if (message.type === "incompatible") {
+            // The host speaks another contract: nothing an agent asks can work until one is updated.
+            hostContract = message.contract;
+            void badge();
+        }
         else
             void handle(message);
     });
     next.onDisconnect.addListener(() => {
         // The host owned every session; without it no agent may keep control.
         port = undefined;
+        hostContract = undefined;
         void detachAll().then(badge);
         setTimeout(connect, retry);
         retry = Math.min(retry * 2, 60_000);
@@ -141,7 +151,7 @@ function connect() {
         protocol: PROTOCOL,
         version: chrome.runtime.getManifest().version,
         // The host admits only this contract: every cdp and close request names its group.
-        contract: 2,
+        contract: CONTRACT,
         userAgent: navigator.userAgent,
         enabled,
         // The host takes agent downloads' files from this worker (see `downloads` below).
@@ -1264,12 +1274,12 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("")))
         return false;
     if (message.type === "set" && typeof message.enabled === "boolean") {
-        void setEnabled(message.enabled).then(() => reply({ enabled, observation, connected: port !== undefined }));
+        void setEnabled(message.enabled).then(() => reply({ enabled, observation, connected: port !== undefined, hostContract }));
         return true;
     }
     const profile = OBSERVATIONS.find((each) => each === message.profile);
     if (message.type === "observe" && profile) {
-        void setObservation(profile).then(() => reply({ enabled, observation, connected: port !== undefined }));
+        void setObservation(profile).then(() => reply({ enabled, observation, connected: port !== undefined, hostContract }));
         return true;
     }
     if (message.type === "record" &&
@@ -1282,6 +1292,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
             enabled,
             observation,
             connected: port !== undefined,
+            hostContract,
             tabs: [...attached.keys()].filter(usable).length,
         });
     return false;

@@ -32,3 +32,12 @@ inside the tab groups that the owner grants them. Phones are described in [mobil
 - Loading the unpacked extension is the owner's action. After that, an install reloads it through
   the host.
 - The Chrome Web Store build is the same extension without the pinned `key`.
+
+## Versions
+
+- `nds-browser-use status` names the host's build (`host.version` and the source commit
+  `host.commit`) beside the connected extension's version.
+- The host and the extension speak one contract. When they do not match, for example a store
+  extension older than the host, the host refuses it, `status` reports `compatible: false`, and
+  the extension shows `!` on its icon and explains in its popup which side to update.
+

@@ -68,6 +68,9 @@ class Browser {
   readonly navigationTarget = new Event();
   readonly posted: Message[] = [];
   readonly port = { onMessage: new Event(), onDisconnect: new Event() };
+  // The action badge as the worker last set it, and messages from the extension's own pages.
+  badge = "";
+  readonly popup = new Event();
   readonly events = {
     tabsCreated: new Event(),
     tabsUpdated: new Event(),
@@ -133,7 +136,11 @@ class Browser {
         local: { get: async () => ({}), set: async () => {} },
         session: { get: async () => ({ groups: this.groups }), set: async () => {} },
       },
-      action: { setBadgeText: async () => {} },
+      action: {
+        setBadgeText: async ({ text }: { text: string }) => {
+          this.badge = text;
+        },
+      },
       runtime: {
         id: "worker",
         getURL: (path: string) => `chrome-extension://worker/${path}`,
@@ -144,7 +151,7 @@ class Browser {
           onMessage: this.port.onMessage,
           onDisconnect: this.port.onDisconnect,
         }),
-        onMessage: event(),
+        onMessage: this.popup,
         onStartup: event(),
         onInstalled: event(),
       },
@@ -838,6 +845,21 @@ test("a command or close of another group never acts on the tab", async () => {
   expect(
     await send({ type: "cdp", group: "q", tab: 1, method: "Runtime.evaluate" })(),
   ).toMatchObject({ result: {} });
+});
+
+// A host of another contract says so; the badge and the popup tell the owner why nothing works.
+test("a host of another contract is shown to the owner", async () => {
+  const { browser } = await worker({ p: P }, [[1, P]]);
+  browser.port.onMessage.fire({ type: "incompatible", contract: 3 });
+  await until(() => browser.badge === "!");
+  const status = await new Promise<Record<string, unknown>>((reply) =>
+    browser.popup.fire(
+      { type: "get" },
+      { id: "worker", url: "chrome-extension://worker/popup.html" },
+      reply,
+    ),
+  );
+  expect(status).toMatchObject({ connected: true, hostContract: 3 });
 });
 
 // An agent tab's download is told to the host with its finished file, and only the host's word

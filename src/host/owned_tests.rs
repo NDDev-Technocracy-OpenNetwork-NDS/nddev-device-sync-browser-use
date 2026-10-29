@@ -915,6 +915,18 @@ async fn an_extension_of_another_contract_admits_nothing_and_confirms_no_close()
         "userAgent": "Chrome/157.0.0.0",
         "contract": 1,
     }));
+    // It learns why nothing works, and the owner's status says so.
+    assert_eq!(
+        message(&mut queue).await,
+        json!({ "type": "incompatible", "contract": 2 })
+    );
+    assert!(matches!(
+        host.handle(Request::Status).await,
+        Reply::Status(view::Status {
+            compatible: Some(false),
+            ..
+        })
+    ));
     assert!(matches!(
         host.reserve("other", false),
         Err(Refusal::ExtensionUnavailable)
@@ -946,6 +958,11 @@ async fn any_other_contract_seals_open_lives_and_a_later_supported_hello_revives
             hello["contract"] = contract.clone();
         }
         host.on_extension(hello);
+        assert_eq!(
+            message(&mut queue).await["type"],
+            "incompatible",
+            "contract {contract}"
+        );
         // The bound client's target creation is refused before anything reaches the extension.
         let opened = host
             .session_request(

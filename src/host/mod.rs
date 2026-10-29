@@ -698,6 +698,15 @@ impl Host {
                     // and the lives it met end here, so a later supported hello revives none.
                     Self::seal(&mut state);
                     tracing::warn!(event.name = "browser.extension.connected", outcome = "rejected", error.type = "contract");
+                    // The owner sees it in the popup instead of an extension that silently does
+                    // nothing.
+                    let body = serde_json::to_vec(
+                        &json!({ "type": "incompatible", "contract": CONTRACT }),
+                    )
+                    .unwrap_or_default();
+                    if let Some(framed) = frame(&body) {
+                        let _ = self.outbound.try_send(framed);
+                    }
                 }
                 drop(state);
                 self.observe(profile);
@@ -1264,6 +1273,14 @@ impl Host {
                         .values()
                         .filter(|session| !session.closing)
                         .count(),
+                    host: Some(view::Build {
+                        version: env!("CARGO_PKG_VERSION").to_owned(),
+                        commit: option_env!("NDS_SOURCE_COMMIT")
+                            .unwrap_or("unknown")
+                            .to_owned(),
+                    }),
+                    compatible: (state.connected && state.contract != Some(CONTRACT))
+                        .then_some(false),
                 }))
             }
             Request::Update => {

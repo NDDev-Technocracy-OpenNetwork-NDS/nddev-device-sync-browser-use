@@ -70,10 +70,14 @@ type HostRequest =
   | { type: "tabs"; id: number; tabs: number[] }
   | { type: "forget"; id: number; download: number }
   | { type: "reload"; id?: undefined; version: string }
-  | ({ type: "recorded"; request: number } & OwnerRecording);
+  | ({ type: "recorded"; request: number } & OwnerRecording)
+  | { type: "incompatible"; id?: undefined; contract: number };
 // Every request but `reload`, which the worker answers by reloading, not with a result, and the
 // host's answer to the owner's recorder button.
-type Answered = Exclude<HostRequest, { type: "reload" } | { type: "recorded" }>;
+type Answered = Exclude<
+  HostRequest,
+  { type: "reload" } | { type: "recorded" } | { type: "incompatible" }
+>;
 // The recorder of the agent group that holds the owner's tab, as the popup shows it.
 type OwnerRecording = {
   recording?: boolean;
@@ -165,8 +169,13 @@ function saveGroups(): Promise<void> {
   return chrome.storage.session.set({ [GROUPS]: Object.fromEntries(groups) });
 }
 
+// The contract of a connected host that refused this worker's, which the popup explains.
+let hostContract: number | undefined;
+const CONTRACT = 2;
+
 async function badge(): Promise<void> {
-  await chrome.action.setBadgeText({ text: enabled ? (port ? "" : "…") : "OFF" });
+  const text = !enabled ? "OFF" : !port ? "…" : hostContract !== undefined ? "!" : "";
+  await chrome.action.setBadgeText({ text });
 }
 
 function send(message: object): void {
@@ -198,11 +207,16 @@ function connect(): void {
   next.onMessage.addListener((message: HostRequest) => {
     if (message.type === "reload") void reloadFor(message.version);
     else if (message.type === "recorded") recorded.get(message.request)?.(message);
-    else void handle(message);
+    else if (message.type === "incompatible") {
+      // The host speaks another contract: nothing an agent asks can work until one is updated.
+      hostContract = message.contract;
+      void badge();
+    } else void handle(message);
   });
   next.onDisconnect.addListener(() => {
     // The host owned every session; without it no agent may keep control.
     port = undefined;
+    hostContract = undefined;
     void detachAll().then(badge);
     setTimeout(connect, retry);
     retry = Math.min(retry * 2, 60_000);
@@ -212,7 +226,7 @@ function connect(): void {
     protocol: PROTOCOL,
     version: chrome.runtime.getManifest().version,
     // The host admits only this contract: every cdp and close request names its group.
-    contract: 2,
+    contract: CONTRACT,
     userAgent: navigator.userAgent,
     enabled,
     // The host takes agent downloads' files from this worker (see `downloads` below).
@@ -1370,14 +1384,14 @@ chrome.runtime.onMessage.addListener(
       return false;
     if (message.type === "set" && typeof message.enabled === "boolean") {
       void setEnabled(message.enabled).then(() =>
-        reply({ enabled, observation, connected: port !== undefined }),
+        reply({ enabled, observation, connected: port !== undefined, hostContract }),
       );
       return true;
     }
     const profile = OBSERVATIONS.find((each) => each === message.profile);
     if (message.type === "observe" && profile) {
       void setObservation(profile).then(() =>
-        reply({ enabled, observation, connected: port !== undefined }),
+        reply({ enabled, observation, connected: port !== undefined, hostContract }),
       );
       return true;
     }
@@ -1395,6 +1409,7 @@ chrome.runtime.onMessage.addListener(
         enabled,
         observation,
         connected: port !== undefined,
+        hostContract,
         tabs: [...attached.keys()].filter(usable).length,
       });
     return false;

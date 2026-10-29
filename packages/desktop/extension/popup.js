@@ -12,7 +12,11 @@ function show(status) {
     if (!state || !toggle)
         return;
     const host = status.connected ? "host connected" : "host not connected";
-    state.textContent = `${status.enabled ? "Enabled" : "Disabled"} · ${host}`;
+    state.textContent =
+        status.hostContract !== undefined
+            ? `The NDS host and this extension do not match (host contract ${status.hostContract}): update the extension, or run \`nds-browser-use install\` for a newer host.`
+            : `${status.enabled ? "Enabled" : "Disabled"} · ${host}`;
+    document.body.dataset.compatible = String(status.hostContract === undefined);
     toggle.textContent = status.enabled ? "Disable agent control" : "Enable agent control";
     toggle.dataset.enabled = String(status.enabled);
     toggle.disabled = false;

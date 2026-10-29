@@ -1,7 +1,14 @@
 // Owner-facing switches for agent control and for what agent activity is collected; the worker
 // applies and reports both.
 type Observation = "full" | "standard" | "off";
-type Status = { enabled: boolean; observation?: Observation; connected: boolean; tabs?: number };
+type Status = {
+  enabled: boolean;
+  observation?: Observation;
+  connected: boolean;
+  tabs?: number;
+  // The contract of a host that refused this extension's.
+  hostContract?: number;
+};
 
 const state = document.getElementById("state");
 const toggle = document.getElementById("toggle") as HTMLButtonElement | null;
@@ -16,7 +23,11 @@ const DESCRIPTIONS: Record<Observation, string> = {
 function show(status: Status): void {
   if (!state || !toggle) return;
   const host = status.connected ? "host connected" : "host not connected";
-  state.textContent = `${status.enabled ? "Enabled" : "Disabled"} · ${host}`;
+  state.textContent =
+    status.hostContract !== undefined
+      ? `The NDS host and this extension do not match (host contract ${status.hostContract}): update the extension, or run \`nds-browser-use install\` for a newer host.`
+      : `${status.enabled ? "Enabled" : "Disabled"} · ${host}`;
+  document.body.dataset.compatible = String(status.hostContract === undefined);
   toggle.textContent = status.enabled ? "Disable agent control" : "Enable agent control";
   toggle.dataset.enabled = String(status.enabled);
   toggle.disabled = false;
