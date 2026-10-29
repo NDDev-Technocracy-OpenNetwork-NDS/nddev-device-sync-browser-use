@@ -89,6 +89,10 @@ static TYPED: LazyLock<Regex> = LazyLock::new(|| {
     ))
     .expect("static pattern")
 });
+/// Any string literal in code.
+static LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`"#).expect("static pattern")
+});
 /// A locator naming a field whose typed value is a secret.
 static SECRET_FIELD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)pass|pwd|otp|one-?time|passcode|\bpin\b|cvv|cvc|card|secret|token|api.?key")
@@ -252,6 +256,33 @@ pub fn code(value: &str, limit: usize) -> String {
     text(&typed, limit)
 }
 
+/// An editable field's line in an aria snapshot, with its value after the colon.
+static FIELD_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^(\s*-\s+(?:textbox|searchbox|combobox|spinbutton)\b[^\n:]*(?:\[[^\]\n]*\])*\s*): (.+)$")
+        .expect("static pattern")
+});
+
+/// An aria snapshot, or text that may hold one, with each editable field's value redacted unless
+/// it is one the journal already keeps as typed into a field that is no secret.
+pub fn aria(value: &str, allowed: &std::collections::HashSet<String>, limit: usize) -> String {
+    let fields = FIELD_LINE.replace_all(value, |found: &regex::Captures| {
+        let shown = found[2].trim();
+        if allowed.contains(shown) || shown.trim_matches('"').is_empty() {
+            found[0].to_owned()
+        } else {
+            format!("{}: {REDACTED}", &found[1])
+        }
+    });
+    text(&fields, limit)
+}
+
+/// Code with every string literal left out, for an action typed into a secret field.
+pub fn typed_all(value: &str) -> String {
+    LITERAL
+        .replace_all(value, format!("\"{REDACTED}\""))
+        .into_owned()
+}
+
 /// Request headers without credentials, each value bounded.
 pub fn headers(value: &Value) -> Value {
     value
@@ -370,6 +401,16 @@ mod tests {
         assert_eq!(
             code(r#"const key = "sk-proj-0123456789abcdefghij";"#, 100),
             r#"const key = "[redacted]";"#
+        );
+    }
+
+    #[test]
+    fn a_snapshot_keeps_values_typed_into_plain_fields_only() {
+        let snapshot = "- generic [ref=e1]:\n  - textbox \"Name\" [ref=e2]: Ada\n  - textbox \"Kennwort\" [active] [ref=e3]: hunter2\n  - searchbox \"Find\": prefilled\n  - button \"Save\" [ref=e4]\n  - textbox \"Empty\"";
+        let allowed = std::collections::HashSet::from(["Ada".to_owned()]);
+        assert_eq!(
+            aria(snapshot, &allowed, 8000),
+            "- generic [ref=e1]:\n  - textbox \"Name\" [ref=e2]: Ada\n  - textbox \"Kennwort\" [active] [ref=e3]: [redacted]\n  - searchbox \"Find\": [redacted]\n  - button \"Save\" [ref=e4]\n  - textbox \"Empty\""
         );
     }
 

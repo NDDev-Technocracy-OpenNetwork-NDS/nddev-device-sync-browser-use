@@ -460,6 +460,7 @@ impl Host {
             "NDS.takeDownload" => self.take_download(project, &params).await,
             "NDS.observation" => Ok(self.observation()),
             "NDS.activity" => Ok(self.activity(project, &params).await),
+            "NDS.recording" => Ok(self.recording(project, &params).await),
             "Target.setDiscoverTargets" => Ok(json!({})),
             "Target.setAutoAttach" => {
                 let mut state = self.state();

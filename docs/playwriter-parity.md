@@ -24,7 +24,7 @@ form or why it is left out.
 | `inspectPinnedElement`, right-click pinning | Same, with "Pin this element for the NDS agent" and `pinnedElements({ page })`. |
 | `recording`, `ghostCursor`, `createDemoVideo` | Same. |
 | `getCDPSession`, `createDebugger`, `createEditor`, `getStylesForLocator`, `formatStylesAsText`, `getReactComponentInfo`, `getReactSource` | Same. |
-| Human-action recorder | `recorder` in code, and `-s <project> recorder start|stop|status` on the CLI. |
+| Human-action recorder | Same engine: Playwright's codegen recorder gives each action its locator, code and aria snapshot, with live-region messages and frames. Better on secrets: Playwriter hides every typed value; here a value stays unless its field is a password, one-time-code or card field by what it is, and a snapshot shows field values only when they were typed into such plain fields. The timeline lives in the activity journal beside the pages' requests, and needs the full observation profile. |
 | `resetPlaywright` | Left out: a stuck script is aborted at its deadline, and an executor that cannot answer is replaced on fresh debugger sessions. |
 | `stream` (live RTMP streaming) | Left out: it sends the owner's tab to an outside service. `recording` keeps video on the device. |
 | `chrome` (Ghost Browser APIs) | Left out: Ghost Browser only. |
@@ -46,7 +46,7 @@ form or why it is left out.
 | `session new`, `session list`, `session delete` | `session new`, `session list`, `session close [--keep-tabs]`; idle sessions close after 30 minutes. |
 | `-e`, `-f`, `--timeout` | Same, plus `-f -` (stdin), `--expect <target>:<document>` and `--json`. |
 | `skill` | Same: prints the agent guide. |
-| `recorder start`, `recorder stop`, `recorder status` | `-s <project> recorder start|stop|status`. |
+| `recorder start`, `recorder stop`, `recorder status`, `recorder events`, `recorder frame` | `-s <project> recorder start|stop|status`; `recorder events [ids] [--type] [--errors] [--exclude] [--full]` and `recorder frame <id> [--offset]` read the journal in Rust, also without the host. |
 | `browser list`, other browsers | `devices` and `--device <name>`: another of the owner's devices runs the command beside its browser, over the owner's own ssh. |
 | `session update` (rename, colour), `session reset` | Left out: a session's group is named by its project; resets happen at deadlines. |
 | `browser start`, `browser install` (bundled Chromium) | Left out for now: agents use the owner's own Chrome. CI uses Chrome for Testing with the extension. |

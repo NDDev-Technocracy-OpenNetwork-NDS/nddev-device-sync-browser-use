@@ -245,6 +245,9 @@ beforeAll(async () => {
         // new tab, and the frame of another site offers its own link.
         "/files": `<title>Files</title><a id="bytes" href="/files/bytes">Bytes</a><a id="moved" href="/files/moved">Moved</a><a id="once" href="/files/once">Once</a><form method="post" action="/files/post"><button id="post">Post</button></form><button id="blob" onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['blob body'])); a.download = 'made.txt'; a.click(); window.URL.revokeObjectURL(a.href)">Blob</button><a id="tab" href="/files/plain" target="_blank">Tab</a><button id="open" onclick="window.open('/files/once')">Open</button><iframe src="http://localhost:${fixture?.port}/files-frame"></iframe>`,
         "/files-frame": `<a id="inner" href="/files/plain">Inner</a>`,
+        // A form for the recorder: a password field whose label names no secret, and a status
+        // region that announces the save.
+        "/record": `<title>Record</title><input id="name" aria-label="Name"><input id="word" type="password" aria-label="Kennwort"><button id="save" onclick="document.getElementById('status').textContent = 'Saved ' + document.getElementById('name').value">Save</button><div role="status" id="status"></div>`,
         // A page whose script calls the site's API, logs the same error twice and throws.
         "/journal": `<title>Journal</title><input id="email" aria-label="Email"><input id="password" type="password" aria-label="Password"><script>fetch('/api/journal?id=7&token=abc').then((r) => r.json()); console.error('cart failed'); console.error('cart failed'); setTimeout(() => { throw new Error('late boom') });</script>`,
         // A different site (localhost vs 127.0.0.1) renders out of process.
@@ -911,43 +914,71 @@ test("devtools helpers style, edit and debug an agent page", async () => {
   }
 });
 
-// The recorder: a person acts in an agent tab, and the agent reads a timeline of actions with
-// locators and a frame of the screen.
+// The recorder: a person acts in an agent tab, and the agent reads Playwright's codegen of each
+// action, the status message the page announced and a frame of the screen. A value typed into a
+// password field is never kept, whatever its label says.
 test("the recorder turns a person's actions in an agent tab into events and frames", async () => {
   await opened("recorder");
   try {
     const started = await run(
       "recorder",
-      `const page = await context.newPage(); await page.goto("${origin}/helpers?recorder"); return JSON.stringify(await recorder.start())`,
+      `const page = await context.newPage(); await page.goto("${origin}/record"); return JSON.stringify(await recorder.start())`,
     );
+    expect(started.body).toMatchObject({ failure: null });
     expect(JSON.parse(String(started.body.value)).path).toStartWith(
       join(runtime, "sessions", "recorder"),
     );
     // The CLI's recorder commands are the helper's calls.
     const status = await plain("-s", "recorder", "recorder", "status");
     expect(status.code).toBe(0);
-    // inspect escapes a Windows path's separators, so only its platform-neutral parts are compared.
-    expect(status.stdout).toContain("id: '1'");
     expect(status.stdout).toContain("recordings");
-    const tab = await observed("/helpers?recorder");
-    await tab?.click("#save");
+    const tab = await observed("/record");
     await tab?.fill("#name", "Ada");
+    await tab?.fill("#word", "hunter2");
+    await tab?.click("#save");
     await tab?.locator("#name").press("Tab");
-    await Bun.sleep(1000);
-    const result = await run(
-      "recorder",
-      `const stopped = await recorder.stop(); return JSON.stringify({ stopped, timeline: recorder.events(), first: recorder.frame({ eventId: 1 }) })`,
+    await Bun.sleep(1500);
+    const stopped = await run("recorder", `return JSON.stringify(await recorder.stop())`);
+    expect(stopped.body).toMatchObject({ failure: null });
+    expect(JSON.parse(String(stopped.body.value)).frames).toBeGreaterThan(0);
+    const listed = await plain("-s", "recorder", "recorder", "events");
+    expect(listed.code).toBe(0);
+    expect(listed.stdout).not.toContain("hunter2");
+    const events = listed.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const actions = events.filter((event) => event.type === "person-action");
+    expect(actions.map((event) => [event.action, event.value ?? event.key ?? null])).toEqual([
+      ["fill", "Ada"],
+      ["fill", "[redacted]"],
+      ["click", null],
+      ["press", "Tab"],
+    ]);
+    expect(String(actions[2]?.code)).toBe(
+      "await page.getByRole('button', { name: 'Save' }).click();",
     );
-    const seen = JSON.parse(String(result.body.value)) as {
-      stopped: { events: number; frames: number };
-      timeline: string;
-      first: string;
-    };
-    expect(seen.timeline).toContain('click getByRole("button", { name: "Save" })');
-    expect(seen.timeline).toContain('fill getByRole("textbox", { name: "Name" }) = "Ada"');
-    expect(seen.timeline).toContain("press");
-    expect(seen.stopped.frames).toBeGreaterThan(0);
-    expect(existsSync(seen.first)).toBe(true);
+    expect(String(actions[2]?.aria)).toContain('textbox "Name" [ref=e2]: Ada');
+    expect(String(actions[2]?.aria)).toContain('textbox "Kennwort" [ref=e3]: [redacted]');
+    expect(String(actions[1]?.code)).not.toContain("hunter2");
+    expect(events.some((event) => event.type === "toast" && event.text === "Saved Ada")).toBe(true);
+    const frame = await plain(
+      "-s",
+      "recorder",
+      "recorder",
+      "frame",
+      String(actions[2]?.seq),
+      "--offset",
+      "1000",
+    );
+    expect(frame.code).toBe(0);
+    expect(existsSync(frame.stdout.trim())).toBe(true);
+    // The same reading in agent code.
+    const inCode = await run(
+      "recorder",
+      `return (await recorder.events({ type: "person-action" })).split("\\n").length`,
+    );
+    expect(inCode.body.value).toBe("4");
     expect((await plain("-s", "recorder", "recorder", "status")).stdout).toBe(
       "[return value] null\n",
     );

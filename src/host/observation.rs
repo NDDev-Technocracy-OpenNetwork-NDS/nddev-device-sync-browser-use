@@ -123,6 +123,56 @@ impl Host {
         json!({ "kept": true })
     }
 
+    /// `NDS.recording { frame, words }`: the recorder's events or one event's frame for agent
+    /// code, read from the journal as `recorder events` and `recorder frame` read it.
+    pub(super) async fn recording(&self, project: &str, params: &Value) -> Value {
+        let frame = params["frame"].as_bool() == Some(true);
+        let words: Vec<String> = params["words"]
+            .as_array()
+            .map(|words| {
+                words
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .take(64)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let journal = self
+            .state()
+            .sessions
+            .get(project)
+            .and_then(|session| session.journal.clone());
+        let directory = self.config.activity.join(project);
+        let answer = tokio::task::spawn_blocking(move || {
+            if let Some(journal) = journal {
+                journal
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .flush();
+            }
+            let words: Vec<&str> = words.iter().map(String::as_str).collect();
+            let Some(query) = crate::activity::Recorder::parse(frame, &words) else {
+                return json!({ "error": "invalid_request" });
+            };
+            let found = if frame {
+                crate::activity::recorder_frame(&directory, &query)
+                    .map(|path| vec![path.display().to_string()])
+            } else {
+                crate::activity::recorder_events(&directory, &query)
+            };
+            match found {
+                Ok(lines) => json!({ "lines": lines }),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    json!({ "error": "not_found" })
+                }
+                Err(_) => json!({ "error": "unavailable" }),
+            }
+        })
+        .await;
+        answer.unwrap_or_else(|_| json!({ "error": "unavailable" }))
+    }
+
     /// Writes records the host itself observed, in the full profile only.
     pub(super) fn journal(
         state: &mut State,

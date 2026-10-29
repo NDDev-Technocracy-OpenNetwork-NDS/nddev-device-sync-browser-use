@@ -207,11 +207,18 @@ one exists.
 - **`createDemoVideo({ recordingPath, durationMs, executionTimestamps })`** speeds up the waits
   between executions. Keep its promise in `state` and await it in a later execution.
   Recording needs ffmpeg.
-- **`recorder.start()`** records what the owner does in the session's tabs, for writing a skill.
+- **`recorder.start()`** records what the owner does in the session's tabs, for writing a skill,
+  with Playwright's codegen engine: each action carries the locator and the code codegen would
+  write. It needs the full observation profile.
   - **`recorder.stop()`** ends the recording.
-  - **`recorder.events({ errors?, type?, ids? })`** prints the timeline.
-  - **`recorder.frame({ eventId, offset })`** names a screenshot of that moment.
-  - Copy a recording out of `artifacts` before closing the session, or pass `outputDir`.
+  - **`await recorder.events({ errors?, type?, ids?, exclude?, full? })`**, or
+    `nds-browser-use -s <project> recorder events`, gives the timeline as JSON lines: the person's
+    actions (`person-action`), live-region messages (`toast`) and what the pages did meanwhile.
+    Each record's `seq` is its id.
+  - **`await recorder.frame({ eventId, offset })`**, or `recorder frame <id> --offset 1000`, names
+    the screenshot of that moment; an offset of 1000 shows the result of a click.
+  - A value typed into a password, one-time-code or card field is never kept.
+  - Copy frames out of `artifacts` before closing the session, or pass `outputDir`.
 - **`getCDPSession({ page })`** gives raw CDP; `context.newCDPSession(page)` works too.
 - **`createDebugger({ cdp })`** sets breakpoints, steps, reads local variables and evaluates in a
   paused frame. Give it its own CDP session.

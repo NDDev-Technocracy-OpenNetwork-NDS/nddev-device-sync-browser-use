@@ -39,7 +39,12 @@ pub struct Writer {
     sequence: u64,
     full: bool,
     held: Option<Held>,
+    /// Values typed into fields that are no secret: aria snapshots may show them.
+    typed: std::collections::HashSet<String>,
 }
+
+/// How many typed values a journal remembers for its snapshots.
+const TYPED_LIMIT: usize = 256;
 
 struct Held {
     key: String,
@@ -65,6 +70,18 @@ fn text(value: &Value, limit: usize) -> Option<Value> {
     value.as_str().map(|text| clean::text(text, limit).into())
 }
 
+/// File names only, never the paths they came from.
+fn names(value: &Value) -> Option<Value> {
+    value.as_array().map(|files| {
+        files
+            .iter()
+            .filter_map(Value::as_str)
+            .take(32)
+            .map(|path| clean::bounded(path.rsplit(['/', '\\']).next().unwrap_or_default(), 256))
+            .collect()
+    })
+}
+
 fn url(value: &Value) -> Option<Value> {
     value.as_str().map(|url| clean::url(url).into())
 }
@@ -79,6 +96,14 @@ impl Writer {
             sequence: 0,
             full: false,
             held: None,
+            typed: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Remembers a value typed into a field that is no secret, so snapshots may show it.
+    fn typed(&mut self, value: &str) {
+        if self.typed.len() < TYPED_LIMIT && !value.is_empty() && value.len() <= 500 {
+            self.typed.insert(value.to_owned());
         }
     }
 
@@ -90,6 +115,15 @@ impl Writer {
         if let (Some(key), Some(held)) = (&fold, self.held.as_mut())
             && held.key == *key
         {
+            // Playwright's recorder reports a fill again with each keystroke: the newest wins.
+            if raw["update"].as_bool() == Some(true) {
+                for (name, value) in record {
+                    if name != "at" {
+                        held.record.insert(name, value);
+                    }
+                }
+                return;
+            }
             let repeat = held
                 .record
                 .get("repeat")
@@ -170,7 +204,12 @@ impl Writer {
                         .as_str()
                         .map(|code| clean::code(code, CODE_CHARS).into()),
                 );
-                put("output", text(&raw["output"], TEXT_CHARS));
+                put(
+                    "output",
+                    raw["output"]
+                        .as_str()
+                        .map(|output| clean::aria(output, &self.typed, TEXT_CHARS).into()),
+                );
                 None
             }
             "action" => {
@@ -182,10 +221,15 @@ impl Writer {
                 );
                 put("url", url(&raw["url"]));
                 put("key", text(&raw["key"], 32));
+                let secret_action = raw["secret"].as_bool() == Some(true)
+                    || locator.is_some_and(clean::secret_field);
+                if let (false, Some(value)) = (secret_action, raw["value"].as_str()) {
+                    self.typed(value);
+                }
                 put(
                     "value",
                     raw["value"].as_str().map(|value| {
-                        if locator.is_some_and(clean::secret_field) {
+                        if secret_action {
                             clean::REDACTED.into()
                         } else {
                             clean::text(value, 500).into()
@@ -251,10 +295,111 @@ impl Writer {
                 put("text", Some(message.clone().into()));
                 Some(format!("console {level} {message}"))
             }
+            "toast" => {
+                let message = clean::text(raw["text"].as_str().unwrap_or_default(), TEXT_CHARS);
+                put("text", Some(message.clone().into()));
+                Some(format!("toast {message}"))
+            }
             "page-error" => {
                 let message = clean::text(raw["message"].as_str().unwrap_or_default(), TEXT_CHARS);
                 put("message", Some(message.clone().into()));
                 Some(format!("error {message}"))
+            }
+            "recording" => {
+                put(
+                    "event",
+                    raw["event"]
+                        .as_str()
+                        .filter(|event| matches!(*event, "started" | "stopped"))
+                        .map(Value::from),
+                );
+                put("recording", class(&raw["recording"], 64));
+                put(
+                    "dir",
+                    raw["dir"]
+                        .as_str()
+                        .map(|dir| clean::bounded(dir, 1024).into()),
+                );
+                put("reason", class(&raw["reason"], 32));
+                None
+            }
+            "person-action" => {
+                let locator = raw["locator"].as_str();
+                let recording = class(&raw["recording"], 64);
+                let action = class(&raw["action"], 32);
+                let secret = raw["secret"].as_bool() == Some(true)
+                    || locator.is_some_and(clean::secret_field);
+                let key = format!(
+                    "person {} {} {} {}",
+                    recording
+                        .as_ref()
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    raw["page"].as_u64().unwrap_or_default(),
+                    action.as_ref().and_then(Value::as_str).unwrap_or_default(),
+                    locator.unwrap_or_default(),
+                );
+                put("recording", recording);
+                put("action", action);
+                put(
+                    "locator",
+                    locator.map(|locator| clean::text(locator, 500).into()),
+                );
+                put(
+                    "value",
+                    raw["value"].as_str().map(|value| {
+                        if secret {
+                            clean::REDACTED.into()
+                        } else {
+                            clean::text(value, 500).into()
+                        }
+                    }),
+                );
+                put("key", text(&raw["key"], 32));
+                put(
+                    "options",
+                    raw["options"].as_array().map(|options| {
+                        options
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .take(32)
+                            .map(|option| clean::text(option, 200))
+                            .collect()
+                    }),
+                );
+                put("files", names(&raw["files"]));
+                if let (false, Some(value)) = (secret, raw["value"].as_str()) {
+                    self.typed(value);
+                }
+                put(
+                    "aria",
+                    raw["aria"]
+                        .as_str()
+                        .filter(|_| !secret)
+                        .map(|aria| clean::aria(aria, &self.typed, 8000).into()),
+                );
+                put("clickCount", raw["clickCount"].as_u64().map(Value::from));
+                put("button", class(&raw["button"], 16));
+                put("url", url(&raw["url"]));
+                put(
+                    "code",
+                    raw["code"].as_str().map(|code| {
+                        let kept = clean::code(code, 2000);
+                        if secret {
+                            clean::typed_all(&kept)
+                        } else {
+                            kept
+                        }
+                        .into()
+                    }),
+                );
+                Some(key)
+            }
+            "person-signal" => {
+                put("recording", class(&raw["recording"], 64));
+                put("signal", class(&raw["signal"], 32));
+                put("url", url(&raw["url"]));
+                None
             }
             "network" => return self.network(raw, record),
             _ => return None,
@@ -507,6 +652,41 @@ mod tests {
             json!({ "cart": [7], "token": "[redacted]" })
         );
         assert_eq!(records[1]["status"], 404);
+    }
+
+    #[test]
+    fn a_persons_fill_keeps_its_newest_value_and_a_secret_field_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut writer = Writer::new(directory.path(), "j.jsonl");
+        let now = Instant::now();
+        let fill = |value: &str, update: bool| {
+            json!({ "type": "person-action", "recording": "r1", "page": 1, "action": "fill",
+                "locator": "internal:role=textbox[name=\"Name\"i]", "value": value, "update": update,
+                "code": format!("await page.getByRole('textbox', {{ name: 'Name' }}).fill('{value}');") })
+        };
+        writer.ingest(&fill("A", false), now);
+        writer.ingest(&fill("Ad", true), now);
+        writer.ingest(&fill("Ada", true), now);
+        writer.ingest(
+            &json!({ "type": "person-action", "recording": "r1", "page": 1, "action": "fill", "locator": "#code",
+                "secret": true, "value": "481516", "code": "await page.locator('#code').fill('481516');" }),
+            now,
+        );
+        writer.flush();
+        let records = lines(directory.path());
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["value"], "Ada");
+        assert_eq!(records[0].get("repeat"), None);
+        assert_eq!(records[1]["value"], "[redacted]");
+        assert_eq!(
+            records[1]["code"],
+            "await page.locator(\"[redacted]\").fill(\"[redacted]\");"
+        );
+        assert!(
+            !std::fs::read_to_string(directory.path().join("j.jsonl"))
+                .unwrap()
+                .contains("481516")
+        );
     }
 
     #[test]
