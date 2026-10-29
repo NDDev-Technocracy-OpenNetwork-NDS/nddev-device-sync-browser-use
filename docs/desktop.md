@@ -25,6 +25,23 @@ inside the tab groups that the owner grants them. Phones are described in [mobil
 - **Owner actions.** The owner hands a tab to an agent by moving it into the agent's group, and
   pins an element with the context menu.
 
+## Browsers
+
+`install --browser` registers the host for one browser's user profile root:
+
+| Name | Browser |
+|---|---|
+| `chrome`, `chrome-beta`, `chrome-dev`, `chrome-canary` | Google Chrome and its channels |
+| `chrome-for-testing`, `chromium` | Unbranded builds |
+| `edge`, `edge-beta`, `edge-dev` | Microsoft Edge and its channels |
+| `brave` | Brave |
+
+Other Chromium browsers can use `--host-dir <their NativeMessagingHosts folder>`, but two are
+known not to work:
+- **Vivaldi:** its stable version gives extensions no tab groups. The agent groups depend on
+  them.
+- **Opera:** it turns tab groups into its own tab islands.
+
 ## Install
 
 - `just install` puts the host's `bin/` and the unpacked `extension/` under one prefix, and

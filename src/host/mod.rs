@@ -460,6 +460,23 @@ fn owner_recording(reply: &Reply) -> Value {
     }
 }
 
+/// The browser and version a user agent names: `Edge/<version>` for Edge, which names Chrome too,
+/// else `Chrome/<version>` (also Brave's and Chromium's, which do not name themselves).
+fn browser_name(user_agent: &str) -> String {
+    let parts = || user_agent.split(' ');
+    if let Some(version) = parts().find_map(|part| part.strip_prefix("Edg/")) {
+        return format!("Edge/{version}");
+    }
+    parts()
+        .find_map(|part| {
+            part.strip_prefix("Headless")
+                .or(Some(part))
+                .filter(|part| part.starts_with("Chrome/"))
+        })
+        .unwrap_or("Chrome")
+        .to_owned()
+}
+
 fn tab_session(tab: i64) -> String {
     format!("nds-tab-{tab}")
 }
@@ -681,16 +698,7 @@ impl Host {
                 let profile = observation::Observation::parse(&message["observation"]);
                 state.user_agent = bounded(message["userAgent"].as_str().unwrap_or_default(), 512);
                 state.extension = bounded(message["version"].as_str().unwrap_or_default(), 32);
-                state.browser = state
-                    .user_agent
-                    .split(' ')
-                    .find_map(|part| {
-                        part.strip_prefix("Headless")
-                            .or(Some(part))
-                            .filter(|part| part.starts_with("Chrome/"))
-                    })
-                    .unwrap_or("Chrome")
-                    .to_owned();
+                state.browser = browser_name(&state.user_agent);
                 if state.contract == Some(CONTRACT) {
                     tracing::info!(event.name = "browser.extension.connected", outcome = "ok");
                 } else {
@@ -2019,6 +2027,21 @@ mod owned_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browsers_are_named_from_their_user_agents() {
+        let chrome = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36";
+        assert_eq!(browser_name(chrome), "Chrome/157.0.0.0");
+        assert_eq!(
+            browser_name(&format!("{chrome} Edg/157.0.3400.1")),
+            "Edge/157.0.3400.1"
+        );
+        assert_eq!(
+            browser_name("Mozilla/5.0 HeadlessChrome/156.0.0.0 Safari/537.36"),
+            "Chrome/156.0.0.0"
+        );
+        assert_eq!(browser_name(""), "Chrome");
+    }
 
     #[test]
     fn the_owner_recorder_answer_names_the_recording_or_why_it_did_not_run() {

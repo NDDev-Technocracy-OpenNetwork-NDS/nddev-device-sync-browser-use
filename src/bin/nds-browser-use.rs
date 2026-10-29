@@ -26,7 +26,7 @@ const USAGE: &str = "usage:
   nds-browser-use [--device <name>] -s <project> recorder frame <id> [--offset <ms>] [--recording <id>]
   nds-browser-use [--device <name>] -s <project> activity [--all] [--type <type>] [--errors] [--grep <text>] [--exec <id>] [--last <n, at most 10000>] [--full]
   nds-browser-use [--device <name>] -s <project> activity body <sha256>
-  nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)
+  nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-dev|chrome-canary|chrome-for-testing|chromium|edge|edge-beta|edge-dev|brave> | --host-dir <path>)
   nds-browser-use phones
   nds-browser-use phone serve <serial> [--socket <name>] [--observation <full|standard|off>]
   nds-browser-use --phone <serial> <any session command above>

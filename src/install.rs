@@ -17,17 +17,44 @@ use std::{
 pub enum Browser {
     Chrome,
     ChromeBeta,
+    ChromeDev,
+    ChromeCanary,
     ChromeForTesting,
     Chromium,
+    Edge,
+    EdgeBeta,
+    EdgeDev,
+    Brave,
 }
 
 impl Browser {
+    /// Every browser `install --browser` names. Vivaldi and Opera are left out: stable Vivaldi
+    /// gives extensions no tab groups, and Opera turns them into its own tab islands.
+    pub const NAMES: [&str; 10] = [
+        "chrome",
+        "chrome-beta",
+        "chrome-dev",
+        "chrome-canary",
+        "chrome-for-testing",
+        "chromium",
+        "edge",
+        "edge-beta",
+        "edge-dev",
+        "brave",
+    ];
+
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "chrome" => Some(Self::Chrome),
             "chrome-beta" => Some(Self::ChromeBeta),
+            "chrome-dev" => Some(Self::ChromeDev),
+            "chrome-canary" => Some(Self::ChromeCanary),
             "chrome-for-testing" => Some(Self::ChromeForTesting),
             "chromium" => Some(Self::Chromium),
+            "edge" => Some(Self::Edge),
+            "edge-beta" => Some(Self::EdgeBeta),
+            "edge-dev" => Some(Self::EdgeDev),
+            "brave" => Some(Self::Brave),
             _ => None,
         }
     }
@@ -38,8 +65,14 @@ impl Browser {
         match self {
             Self::Chrome => "google-chrome",
             Self::ChromeBeta => "google-chrome-beta",
+            Self::ChromeDev => "google-chrome-unstable",
+            Self::ChromeCanary => "google-chrome-canary",
             Self::ChromeForTesting => "google-chrome-for-testing",
             Self::Chromium => "chromium",
+            Self::Edge => "microsoft-edge",
+            Self::EdgeBeta => "microsoft-edge-beta",
+            Self::EdgeDev => "microsoft-edge-dev",
+            Self::Brave => "BraveSoftware/Brave-Browser",
         }
     }
 
@@ -48,19 +81,30 @@ impl Browser {
         match self {
             Self::Chrome => "Google/Chrome",
             Self::ChromeBeta => "Google/Chrome Beta",
+            Self::ChromeDev => "Google/Chrome Dev",
+            Self::ChromeCanary => "Google/Chrome Canary",
             Self::ChromeForTesting => "Google/Chrome for Testing",
             Self::Chromium => "Chromium",
+            Self::Edge => "Microsoft Edge",
+            Self::EdgeBeta => "Microsoft Edge Beta",
+            Self::EdgeDev => "Microsoft Edge Dev",
+            Self::Brave => "BraveSoftware/Brave-Browser",
         }
     }
 
     /// The user registry key under which the browser looks up native messaging hosts on
     /// Windows. It follows the build's branding: every Google Chrome channel reads the Google
-    /// Chrome key, and unbranded builds, Chromium and Chrome for Testing, read the Chromium key.
+    /// Chrome key, unbranded builds, Chromium and Chrome for Testing, read the Chromium key, and
+    /// every Edge channel reads Edge's.
     #[cfg(windows)]
     fn registry_key(self) -> String {
         let product = match self {
-            Self::Chrome | Self::ChromeBeta => r"Google\Chrome",
+            Self::Chrome | Self::ChromeBeta | Self::ChromeDev | Self::ChromeCanary => {
+                r"Google\Chrome"
+            }
             Self::ChromeForTesting | Self::Chromium => "Chromium",
+            Self::Edge | Self::EdgeBeta | Self::EdgeDev => r"Microsoft\Edge",
+            Self::Brave => r"BraveSoftware\Brave-Browser",
         };
         format!(r"Software\{product}\NativeMessagingHosts\{NATIVE_HOST}")
     }
@@ -319,6 +363,20 @@ mod tests {
             Some(expected)
         );
         assert_eq!(Browser::parse("firefox"), None);
+        assert_eq!(Browser::parse("vivaldi"), None);
+        // Every named browser parses, to its own profile root.
+        let roots: std::collections::HashSet<&str> = Browser::NAMES
+            .iter()
+            .map(|name| Browser::parse(name).unwrap().profile_root())
+            .collect();
+        assert_eq!(roots.len(), Browser::NAMES.len());
+        let (edge, brave) = if cfg!(target_os = "macos") {
+            ("Microsoft Edge", "BraveSoftware/Brave-Browser")
+        } else {
+            ("microsoft-edge", "BraveSoftware/Brave-Browser")
+        };
+        assert_eq!(Browser::Edge.profile_root(), edge);
+        assert_eq!(Browser::Brave.profile_root(), brave);
     }
 
     #[cfg(target_os = "macos")]
@@ -345,6 +403,14 @@ mod tests {
         assert_eq!(
             Browser::Chromium.registry_key(),
             r"Software\Chromium\NativeMessagingHosts\ai.nddev.nds.browser_use"
+        );
+        assert_eq!(
+            Browser::EdgeDev.registry_key(),
+            r"Software\Microsoft\Edge\NativeMessagingHosts\ai.nddev.nds.browser_use"
+        );
+        assert_eq!(
+            Browser::Brave.registry_key(),
+            r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\ai.nddev.nds.browser_use"
         );
         assert!(
             host_directory(Browser::Chrome)
