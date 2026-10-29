@@ -130,11 +130,17 @@ Telemetry follows the desktop host's. The link adds:
 The ADB client and the link also have unit tests against a fake ADB server and a fake browser
 (`src/mobile`).
 
-On the Android emulator, the link was checked against the WebView shell:
-- the listing;
-- the ADB transport;
-- the DevTools handshake;
-- a session with its executor;
-- the WebView's refusal to open a tab.
+It was also checked live on an Android 16 emulator over the real ADB server.
 
-It has not yet been checked against Chrome on a phone.
+- **Content Shell**, Chromium's own Android browser shell (snapshot 1730053), worked end to end:
+  - the agent opened a tab and clicked in it, in the phone's layout viewport (980×1649), with an
+    Android user agent and a touch pointer;
+  - a screenshot;
+  - a `target=_blank` popup joined the session;
+  - `notifyOwner` posted an Android notification and `clearOwner` removed it;
+  - closing the session closed the agent's two tabs and left the owner's;
+  - Ctrl-C ended the link in order.
+- **The WebView shell:** listing, the DevTools handshake, a session with its executor, and the
+  WebView's refusal to open a tab.
+
+Chrome itself has not been checked on a phone yet.
