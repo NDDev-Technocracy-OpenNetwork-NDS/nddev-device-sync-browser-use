@@ -1,24 +1,31 @@
 // A download's file for agent code. Chrome refuses an extension's `Page.setDownloadBehavior`, so
 // the browser keeps the file in its own folder and Playwright's `path()`, `saveAs()` and
 // `createReadStream()` would find nothing where they look; and once the tab closes, its download
-// events stop, so Playwright would wait for the end of the download forever. Each download is
-// therefore loaded a second time as soon as it begins, through the tab's own network stack with
-// the page's cookies and no CORS rule in the way (`Network.loadNetworkResource`), and that copy
-// is the agent's file: `path()`, `saveAs()`, `createReadStream()` and `failure()` answer from it,
-// also after the page closed. A `blob:` URL is read in its page and a `data:` URL decoded. A
-// form's POST cannot be sent again, so its download refuses instead of saving whatever a GET of
-// that URL returns. Closing the page waits for the copies still loading from it.
+// events stop, so Playwright would wait for the end of the download forever. The extension names
+// the browser's finished file and the host keeps a copy in the session (`NDS.takeDownload`): that
+// copy is the agent's file, and `path()`, `saveAs()`, `createReadStream()` and `failure()` answer
+// from it, also after the page closed. A download the host does not get, because no agent tab
+// announced it, is loaded a second time through the tab's own network stack instead, with the
+// page's cookies and no CORS rule in the way (`Network.loadNetworkResource`); a `blob:` URL is
+// read in its page and a `data:` URL decoded. A form's POST cannot be sent again, so that path
+// refuses its download instead of saving whatever a GET of that URL returns. Closing the page
+// waits for the copies still loading from it.
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { copyFile, mkdir, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import type { Download, Page } from "playwright-core";
+import type { CDPSession, Download, Page } from "playwright-core";
 
 // Bytes per `IO.read`, so a large file never crosses CDP as one reply.
 const CHUNK = 1 << 20;
 // Navigations a page sent other than as GET, newest last; a download of one cannot be loaded again.
 const POSTED_LIMIT = 32;
+// How long one question to the host waits, how long after the browser finished a download the
+// host may still not know it, and how long any download may take at all.
+const ASK_MS = 2000;
+const UNKNOWN_MS = 5000;
+const LONGEST_MS = 15 * 60 * 1000;
 
 const posted = new WeakMap<Page, string[]>();
 
@@ -44,13 +51,8 @@ export function attach(page: Page): void {
     const folder = join(tmpdir(), ".downloads", randomUUID());
     const local = join(folder, basename(download.suggestedFilename()) || "download");
     const stop = new AbortController();
-    const file = sent.includes(download.url())
-      ? Promise.reject(
-          new Error(
-            `The download ${download.suggestedFilename()} answered a form's POST, which cannot be sent again; the browser kept the file in its own download folder`,
-          ),
-        )
-      : stage(download, folder, local, stop.signal).then(() => local);
+    const path = download.path.bind(download);
+    const file = obtain(download, path, sent.includes(download.url()), folder, local, stop.signal);
     // A failure shows when agent code asks for the file, not as an unhandled rejection.
     const settled = file.catch(() => undefined);
     loading.add(settled);
@@ -78,6 +80,83 @@ export function attach(page: Page): void {
       await rm(folder, { recursive: true, force: true });
     };
   });
+}
+
+// The host's copy of the download; otherwise, once the host cannot get it, the URL loaded again.
+async function obtain(
+  download: Download,
+  path: () => Promise<string>,
+  post: boolean,
+  folder: string,
+  local: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const kept = await fromHost(download, path, signal);
+  if (kept) return kept;
+  if (post) {
+    throw new Error(
+      `The download ${download.suggestedFilename()} answered a form's POST, which cannot be sent again; the browser kept the file in its own download folder`,
+    );
+  }
+  await stage(download, folder, local, signal);
+  return local;
+}
+
+let browserSession: Promise<CDPSession | undefined> | undefined;
+
+type Kept = {
+  file?: string;
+  error?: string;
+  pending?: boolean;
+  copying?: boolean;
+  unsupported?: boolean;
+};
+
+async function fromHost(
+  download: Download,
+  path: () => Promise<string>,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  browserSession ??= Promise.resolve(download.page().context().browser()?.newBrowserCDPSession())
+    .then((session) => session ?? undefined)
+    .catch(() => undefined);
+  const cdp = await browserSession;
+  if (!cdp) return undefined;
+  const ask = cdp.send.bind(cdp) as unknown as (method: string, params: object) => Promise<Kept>;
+  // The browser's own end of the download: once it is long past and the host still knows nothing,
+  // the host never will.
+  let ended: number | undefined;
+  let failure: unknown;
+  void path().then(
+    () => {
+      ended = Date.now();
+    },
+    (error: unknown) => {
+      ended = Date.now();
+      failure = error;
+    },
+  );
+  const started = Date.now();
+  for (;;) {
+    signal.throwIfAborted();
+    const answer = await ask("NDS.takeDownload", { url: download.url(), waitMs: ASK_MS }).catch(
+      () => ({ unsupported: true }) as Kept,
+    );
+    if (answer.file) return answer.file;
+    if (answer.error) {
+      throw new Error(
+        `The download ${download.suggestedFilename()} did not finish in the browser (${answer.error})`,
+      );
+    }
+    if (answer.unsupported) return undefined;
+    if (!answer.copying && ended !== undefined && Date.now() - ended > UNKNOWN_MS) {
+      if (failure) throw failure;
+      return undefined;
+    }
+    if (Date.now() - started > LONGEST_MS) {
+      throw new Error(`The download ${download.suggestedFilename()} did not finish in 15 minutes`);
+    }
+  }
 }
 
 async function stage(

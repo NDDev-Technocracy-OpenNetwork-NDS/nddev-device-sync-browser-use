@@ -5,6 +5,7 @@
 //! executor stops, agent tabs are released by the extension and the private
 //! sockets are removed.
 
+mod downloads;
 mod executor;
 mod relay;
 
@@ -107,6 +108,8 @@ struct State {
     user_agent: String,
     sessions: HashMap<String, Session>,
     tabs: HashMap<i64, Tab>,
+    /// The connected extension names agent downloads' files (see [`downloads`]).
+    downloads: bool,
     /// Child CDP sessions (frames, workers) and the agent tab that owns them.
     children: HashMap<String, i64>,
 }
@@ -127,6 +130,8 @@ struct Session {
     aliases: HashMap<String, relay::Alias>,
     /// Whether the current client asked for download events; it ends with the client.
     downloads: Option<relay::Downloads>,
+    /// Finished downloads the executor has not taken yet.
+    files: downloads::Files,
 }
 
 struct Tab {
@@ -576,12 +581,13 @@ impl Host {
             })
     }
 
-    fn on_extension(&self, message: Value) {
+    fn on_extension(self: &Arc<Self>, message: Value) {
         match message["type"].as_str() {
             Some("result") => self.on_result(&message),
             Some("event") => self.on_event(message),
             Some("attached") => self.on_attached(&message),
             Some("detached") => self.on_detached(&message),
+            Some("download") => self.on_download(&message),
             Some("telemetry") => match crate::protocol::extension_event(&message) {
                 Some(event) => match event.error {
                     None => tracing::info!(event.name = event.name, outcome = event.outcome),
@@ -598,6 +604,7 @@ impl Host {
                 state.connected = true;
                 state.enabled = message["enabled"].as_bool() == Some(true);
                 state.contract = message["contract"].as_u64();
+                state.downloads = message["downloads"].as_bool() == Some(true);
                 state.user_agent = bounded(message["userAgent"].as_str().unwrap_or_default(), 512);
                 state.extension = bounded(message["version"].as_str().unwrap_or_default(), 32);
                 state.browser = state
@@ -818,9 +825,9 @@ impl Host {
             let event = json!({ "method": method, "params": params, "sessionId": alias });
             deliver(&mut state, &project, event);
         }
-        if child.is_none()
-            && let Some(event) = relay::download_event(&mut state, &project, method, params)
-        {
+        // A frame of another site downloads through its own child session; Playwright finds the
+        // page by the frame either way.
+        if let Some(event) = relay::download_event(&mut state, &project, method, params) {
             deliver(&mut state, &project, event);
         }
         let session = child.unwrap_or_else(|| tab_session(tab));
@@ -1260,6 +1267,7 @@ impl Host {
                 used: Instant::now(),
                 aliases: HashMap::new(),
                 downloads: None,
+                files: downloads::Files::default(),
             },
         );
         Ok(life)

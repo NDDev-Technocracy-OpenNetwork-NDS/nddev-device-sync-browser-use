@@ -145,10 +145,12 @@ Limits: Chrome serves WebAuthn only to a focused page, so a passkey step needs
 extension out of `chrome://` pages and the Chrome Web Store. Browser-chrome
 and OS dialogs, real authenticators' user verification, browser-wide cookies, new
 browser contexts and permission grants are outside `chrome.debugger`. Chrome also
-refuses an extension's `Page.setDownloadBehavior`, so a download stays in the
-browser's folder; the executor loads its URL again through the tab with the page's
-cookies, which gives agent code `saveAs()`, `path()`, `createReadStream()` and `failure()` for
-every download except one that answered a form's POST or that a site serves only once.
+refuses an extension's `Page.setDownloadBehavior`, so a download is saved in the
+browser's folder. The extension's `downloads` permission names that file for a
+download an agent tab started, or a tab one opened: the host keeps a copy in the
+session and the browser's copy and its list entry are removed, so agent code gets
+`saveAs()`, `path()`, `createReadStream()` and `failure()` for every download. A
+download no agent tab announced is loaded again through the tab instead.
 
 ## Devices
 

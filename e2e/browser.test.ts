@@ -10,6 +10,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -17,7 +18,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { type BrowserContext, chromium, type Page } from "playwright-core";
+import { type Browser, type BrowserContext, chromium, type Page } from "playwright-core";
 
 const windows = process.platform === "win32";
 const repository = resolve(import.meta.dir, "..");
@@ -54,11 +55,16 @@ const env: Record<string, string> = {
 };
 
 let observer: BrowserContext;
+// A plain CDP client of the test browser, there only to give downloads back their default
+// behavior, which Playwright's observer replaced with its own folder and file names.
+let defaults: Browser | undefined;
+const downloadsFolder = join(root, "downloads");
 // The CLI's configuration directory, beside the host configuration that `install` wrote.
 let configuration: string;
 let fixture: ReturnType<typeof Bun.serve>;
 let origin: string;
 let requests = 0;
+const served = { once: 0 };
 
 function required(name: string): string {
   const value = process.env[name];
@@ -192,6 +198,13 @@ beforeAll(async () => {
         return Response.redirect(`http://localhost:${fixture?.port}/files/plain`, 302);
       }
       if (path === "/files/plain") return attachment("moved body", "moved.txt");
+      // Served once, as a signed link that expires on first use.
+      if (path === "/files/once") {
+        served.once += 1;
+        return served.once === 1
+          ? attachment("once body", "once.txt")
+          : new Response("gone", { status: 410 });
+      }
       if (path === "/files/post") {
         return request.method === "POST"
           ? attachment("posted body", "posted.txt")
@@ -209,7 +222,10 @@ beforeAll(async () => {
         "/fetch": `<button id="load" onclick="fetch('/api').then((r) => r.text()).then((t) => (out.textContent = t))">Load</button><span id="out"></span>`,
         "/api": "live",
         // The page revokes its blob URL later, as FileSaver does.
-        "/files": `<title>Files</title><a id="bytes" href="/files/bytes">Bytes</a><a id="moved" href="/files/moved">Moved</a><form method="post" action="/files/post"><button id="post">Post</button></form><button id="blob" onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['blob body'])); a.download = 'made.txt'; a.click(); setTimeout(() => window.URL.revokeObjectURL(a.href), 40000)">Blob</button>`,
+        // The blob button revokes its URL at once, the tab link and window.open open the file in a
+        // new tab, and the frame of another site offers its own link.
+        "/files": `<title>Files</title><a id="bytes" href="/files/bytes">Bytes</a><a id="moved" href="/files/moved">Moved</a><a id="once" href="/files/once">Once</a><form method="post" action="/files/post"><button id="post">Post</button></form><button id="blob" onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['blob body'])); a.download = 'made.txt'; a.click(); window.URL.revokeObjectURL(a.href)">Blob</button><a id="tab" href="/files/plain" target="_blank">Tab</a><button id="open" onclick="window.open('/files/once')">Open</button><iframe src="http://localhost:${fixture?.port}/files-frame"></iframe>`,
+        "/files-frame": `<a id="inner" href="/files/plain">Inner</a>`,
         // A different site (localhost vs 127.0.0.1) renders out of process.
         "/frame": `<iframe src="http://localhost:${fixture?.port}/inner"></iframe>`,
         "/inner": `<button id="inner" onclick="this.textContent = 'inside'">Inner</button>`,
@@ -278,16 +294,35 @@ beforeAll(async () => {
     "chrome-extension://lpnfnhkdjamhnoknoohhmjfhhjkeofio/",
   ]);
   writeFileSync(manifest, JSON.stringify({ ...registered, path: wrapper }));
+  // Downloads go to the profile's own folder under the names sites suggest, as in the owner's
+  // browser, never into the home of whoever runs the tests.
+  mkdirSync(join(profile, "Default"), { recursive: true });
+  mkdirSync(downloadsFolder, { recursive: true });
+  writeFileSync(
+    join(profile, "Default", "Preferences"),
+    JSON.stringify({
+      download: { default_directory: downloadsFolder, prompt_for_download: false },
+      savefile: { default_directory: downloadsFolder },
+    }),
+  );
   observer = await chromium.launchPersistentContext(profile, {
     executablePath: chrome,
     headless: true,
     env,
     args: [
+      "--remote-debugging-port=0",
       `--disable-extensions-except=${installed},${foreign}`,
       `--load-extension=${installed},${foreign}`,
       ...(process.env.NDS_E2E_DIAGNOSTICS === "1" ? ["--enable-logging=stderr"] : []),
     ],
   });
+  const port = readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0];
+  defaults = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  await (await defaults.newBrowserCDPSession()).send("Browser.setDownloadBehavior", {
+    behavior: "default",
+  });
+  // Only the setting is needed; the client itself would watch every tab beside the observer.
+  await defaults.close();
   // The observer stays passive: Playwright would otherwise dismiss every
   // dialog on pages it watches and race the agent's own handler.
   for (const page of observer.pages()) page.on("dialog", () => undefined);
@@ -305,6 +340,7 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  await defaults?.close().catch(() => undefined);
   await observer?.close().catch(() => undefined);
   fixture?.stop(true);
   // CI diagnostics: the host log carries event names and outcomes only, never page data.
@@ -1272,17 +1308,21 @@ async function plain(...args: string[]): Promise<{ code: number; stdout: string;
 }
 
 // A download of an agent tab reaches Playwright as its event, with the URL and the name the site
-// suggests, and the agent's copy of its file answers saveAs(), path(), createReadStream() and
-// failure(): with the page's cookies, across a redirect to another site, for a blob and after the
-// page closed, which waits for the copies still loading. A form's POST cannot be sent again, so
-// its file is refused, not replaced by a GET.
+// suggests, and its file is the browser's own, which the host keeps in the session: saveAs(),
+// path(), createReadStream() and failure() answer from it, also after the page closed. That covers
+// a file only the page's cookie opens, a redirect to another site, a blob the page revoked at once,
+// a form's POST, a link that works once, a frame of another site, and a file that opens in a new
+// tab, which is reported on the tab that opened it. The browser's own copies are gone afterwards.
 test("an agent tab's download is the agent's file", async () => {
-  const result = await run(
+  served.once = 0;
+  const get = `const get = async (selector, frame) => (await Promise.all([page.waitForEvent("download"), (frame ? page.frameLocator("iframe").locator(selector) : page.locator(selector)).click()]))[0];
+     const read = async (download) => require("node:fs").readFileSync(await download.path(), "utf8");`;
+  const first = await run(
     "acceptance",
     `const fs = require("node:fs");
      const page = await context.newPage(); await page.goto("${origin}/files");
      await page.evaluate(() => { document.cookie = "nds-e2e=1; path=/"; });
-     const get = async (selector) => (await Promise.all([page.waitForEvent("download"), page.click(selector)]))[0];
+     ${get}
      const bytes = await get("#bytes"), moved = await get("#moved"), made = await get("#blob");
      await Promise.all([bytes, moved, made].map((download) => download.path()));
      await page.close();
@@ -1295,13 +1335,13 @@ test("an agent tab's download is the agent's file", async () => {
        path: require("node:path").basename(await bytes.path()) === "bytes.bin" && fs.readFileSync(await bytes.path()).equals(saved),
        failure: await bytes.failure(),
        moved: Buffer.concat(chunks).toString(),
-       made: fs.readFileSync(await made.path(), "utf8"),
+       made: await read(made),
      })`,
     "--timeout",
     "20000",
   );
-  expect(result.body).toMatchObject({ failure: null });
-  expect(JSON.parse(String(result.body.value))).toEqual({
+  expect(first.body).toMatchObject({ failure: null });
+  expect(JSON.parse(String(first.body.value))).toEqual({
     name: "bytes.bin",
     bytes: true,
     path: true,
@@ -1309,24 +1349,51 @@ test("an agent tab's download is the agent's file", async () => {
     moved: "moved body",
     made: "blob body",
   });
-  const posted = await run(
+  const second = await run(
     "acceptance",
     `const page = await context.newPage(); await page.goto("${origin}/files");
-     const get = async (selector) => (await Promise.all([page.waitForEvent("download"), page.click(selector)]))[0];
-     const posted = await get("#post"), bytes = await get("#bytes");
-     await page.close();
-     await bytes.saveAs(\`\${artifacts}/closed.bin\`);
-     return JSON.stringify({
-       closed: require("node:fs").statSync(\`\${artifacts}/closed.bin\`).size,
-       posted: await posted.saveAs(\`\${artifacts}/posted.txt\`).then(() => "saved", (error) => error.message),
-     })`,
+     ${get}
+     const posted = await get("#post"), once = await get("#once"), inner = await get("#inner", true);
+     return JSON.stringify({ posted: await read(posted), once: await read(once), inner: await read(inner) })`,
     "--timeout",
     "20000",
   );
-  expect(posted.body).toMatchObject({ failure: null });
-  const after = JSON.parse(String(posted.body.value));
-  expect(after.closed).toBe(1024);
-  expect(after.posted).toContain("answered a form's POST");
+  expect(second.body).toMatchObject({ failure: null });
+  expect(JSON.parse(String(second.body.value))).toEqual({
+    posted: "posted body",
+    once: "once body",
+    inner: "moved body",
+  });
+  served.once = 0;
+  const third = await run(
+    "acceptance",
+    `const page = context.pages().find((each) => each.url().endsWith("/files"));
+     ${get}
+     const tab = await get("#tab"), opened = await get("#open");
+     const result = JSON.stringify({
+       tab: [tab.page() === page, tab.suggestedFilename(), await read(tab)],
+       opened: [opened.page() === page, await read(opened)],
+     });
+     await page.close();
+     return result`,
+    "--timeout",
+    "20000",
+  );
+  expect(third.body).toMatchObject({ failure: null });
+  expect(JSON.parse(String(third.body.value))).toEqual({
+    tab: [true, "moved.txt", "moved body"],
+    opened: [true, "once body"],
+  });
+  // The browser's list keeps none of these downloads and their files are gone.
+  const worker = observer.serviceWorkers().find((each) => each.url().includes(extensionId));
+  type Downloads = { search(query: object): Promise<{ url: string; exists: boolean }[]> };
+  const left = await worker?.evaluate(async (prefix) => {
+    const { downloads } = (globalThis as unknown as { chrome: { downloads: Downloads } }).chrome;
+    return (await downloads.search({})).filter((item) => item.url.startsWith(prefix) && item.exists)
+      .length;
+  }, origin);
+  expect(left).toBe(0);
+  expect(readdirSync(downloadsFolder)).toEqual([]);
 });
 
 // Another device's browser is driven through that device's own CLI: here a device whose transport
