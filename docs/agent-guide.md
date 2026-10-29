@@ -356,6 +356,9 @@ nds-browser-use -s <project> activity --type network --grep /api/ --full
 nds-browser-use -s <project> activity body <sha256>    # a request's stored body
 ```
 
+A record marked `"private": true` is of a site the owner keeps private: it says that something
+happened, never what. Do not try to recover that content another way.
+
 `--all` reads the week the journal keeps, `--exec <id>` one execution's records and `--last <n>`
 the newest n. The owner can switch observation to standard or off in the extension's popup; then
 the journal and the recorder collect nothing.

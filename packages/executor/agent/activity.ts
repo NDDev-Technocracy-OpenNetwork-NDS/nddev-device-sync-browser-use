@@ -78,9 +78,48 @@ export function pageId(page: Page): number {
   return pages.get(page) ?? 0;
 }
 
+type Zone = { owner?: object };
+type Wrap = (
+  this: object,
+  func: (zone: Zone) => Promise<unknown>,
+  options?: object,
+) => Promise<unknown>;
+
+// Playwright's instrumentation names no page for an action. The object whose outermost call
+// starts it does, a frame or a page, so each call's zone keeps that object; the journal then
+// knows which page, and so which site, an action is of. Without this, the journal treats an
+// action as of any private site open.
+function namePages(context: BrowserContext): void {
+  const owner = Object.getPrototypeOf(Object.getPrototypeOf(context)) as {
+    _wrapApiCall?: Wrap & { named?: true };
+  };
+  const wrap = owner._wrapApiCall;
+  if (typeof wrap !== "function" || wrap.named) return;
+  const named: Wrap & { named?: true } = function (this: object, func, options) {
+    return wrap.call(
+      this,
+      (zone) => {
+        zone.owner ??= this;
+        return func(zone);
+      },
+      options,
+    );
+  };
+  named.named = true;
+  owner._wrapApiCall = named;
+}
+
+function pageOf(owner: object | undefined): Page | undefined {
+  const target = owner as { page?: () => Page; mainFrame?: () => unknown } | undefined;
+  if (typeof target?.page === "function") return target.page();
+  if (typeof target?.mainFrame === "function") return target as unknown as Page;
+  return undefined;
+}
+
 /** Starts collecting; the host keeps the journal of this executor's session. */
 export function start(context: BrowserContext): void {
   started = true;
+  namePages(context);
   // Off and standard collect nothing: records not yet sent are dropped.
   onObservation((profile) => {
     if (profile !== "full") queue = [];
@@ -107,8 +146,10 @@ export const actions = {
     const value = ["value", "text"]
       .map((name) => params[name])
       .find((each) => typeof each === "string");
+    const page = pageOf((zone as Zone).owner);
     const record: Raw = {
       type: "action",
+      ...(page && pages.has(page) ? { page: pageId(page) } : {}),
       api: (zone as { apiName?: string }).apiName ?? channel.method,
       ...(typeof params.selector === "string" ? { locator: params.selector } : {}),
       ...(typeof params.url === "string" ? { url: params.url } : {}),

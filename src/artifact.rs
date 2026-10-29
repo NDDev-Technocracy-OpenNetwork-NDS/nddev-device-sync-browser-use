@@ -21,7 +21,7 @@ fn area(project: &str) -> Result<PathBuf, IoError> {
     if !valid_project(project) {
         return Err(IoError::InvalidConfiguration);
     }
-    Ok(runtime::directory()?.join("sessions").join(project))
+    Ok(runtime::sessions_directory()?.join(project))
 }
 
 /// Every regular file of the session area, with its path relative to the area.

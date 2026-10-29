@@ -3,6 +3,7 @@
 // for that profile only and drives the agent CLI against a local fixture.
 // A separate Playwright pipe connection observes the browser independently.
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   cpSync,
@@ -37,6 +38,16 @@ const cdpEndpoint = windows
       .replace(/^[A-Za-z]:/, "")
       .replaceAll("\\", "/")
   : `${runtime}/cdp.sock`;
+
+// A session's area: on disk under the state directory, in this host's own root, named by its
+// runtime directory (runtime::sessions_directory).
+function area(project: string): string {
+  const state = windows
+    ? join(process.env.LOCALAPPDATA ?? "", "nds-browser-use")
+    : join(root, "state", "nds-browser-use");
+  const key = createHash("sha256").update(runtime).digest("hex").slice(0, 16);
+  return join(state, "sessions", key, project);
+}
 
 const profile = join(root, "profile");
 // The same layout `just install` creates: the host finds its extension files
@@ -458,7 +469,7 @@ test("popups opened by an agent page join the agent session", async () => {
 });
 
 // A sign-in button opens its own popup window, which can hold no tab group; it joins the agent's
-// group as a tab of its opener's window, as Playwriter relocates such windows.
+// group as a tab of its opener's window.
 test("a popup window an agent page opens becomes an agent tab", async () => {
   const result = await run(
     "acceptance",
@@ -497,7 +508,7 @@ test("the agent answers JavaScript dialogs", async () => {
 });
 
 test("keyboard input and file uploads reach the page", async () => {
-  const upload = join(runtime, "sessions", "acceptance", "upload.txt");
+  const upload = join(area("acceptance"), "upload.txt");
   writeFileSync(upload, "nds");
   const result = await run(
     "acceptance",
@@ -698,7 +709,7 @@ async function helpers(): Promise<void> {
   expect(seen.changed).toContain("+ ");
   expect(seen.changed).toContain('"Saved"');
   expect(seen.logs).toContain("[log] loaded helpers");
-  // As in Playwriter: an array, empty when nothing is new.
+  // An array, empty when nothing is new.
   expect(JSON.stringify(seen.none)).toBe("[]");
   expect(seen.box).toMatch(/Scroll Y: size=\d+ client=50 overflowing=true/);
   expect(seen.input).toContain('Input: value="x"');
@@ -746,7 +757,7 @@ async function content(): Promise<void> {
   expect(seen.shot).toMatch(/^Screenshot: \S+\.jpg \([1-9]\d* labels\)/);
   expect(seen.shot).toContain('button "Go" [ref=');
   expect(seen.shot).not.toContain("[box=");
-  expect(seen.path?.startsWith(join(runtime, "sessions", "content"))).toBe(true);
+  expect(seen.path?.startsWith(area("content"))).toBe(true);
   expect(existsSync(seen.path ?? "")).toBe(true);
   if (resize) {
     expect(existsSync(seen.small ?? "")).toBe(true);
@@ -906,7 +917,7 @@ async function recorded(): Promise<void> {
   expect((streams[0]?.width ?? 1) % 2).toBe(0);
 }
 
-// Recording parity with Playwriter: a handle to keep, a manual clock that films only `wait(ms)`, a
+// Recordings: a handle to keep, a manual clock that films only `wait(ms)`, a
 // file that appears complete, other containers, another tab mid-recording, a viewport fitted to
 // an aspect ratio and restored, and the page's own sound. Skipped without ffmpeg.
 test.skipIf(Bun.which("ffmpeg") === null)(
@@ -1075,9 +1086,7 @@ test("the recorder turns a person's actions in an agent tab into events and fram
       `const page = await context.newPage(); await page.goto("${origin}/record"); return JSON.stringify(await recorder.start())`,
     );
     expect(started.body).toMatchObject({ failure: null });
-    expect(JSON.parse(String(started.body.value)).path).toStartWith(
-      join(runtime, "sessions", "recorder"),
-    );
+    expect(JSON.parse(String(started.body.value)).path).toStartWith(area("recorder"));
     // The CLI's recorder commands are the helper's calls.
     const status = await plain("-s", "recorder", "recorder", "status");
     expect(status.code).toBe(0);
@@ -1138,8 +1147,8 @@ test("the recorder turns a person's actions in an agent tab into events and fram
   }
 });
 
-// The owner starts and stops the recorder from the extension's popup, as from Playwriter's
-// toolbar, for the agent group of their tab; the agent then reads the steps.
+// The owner starts and stops the recorder from the extension's popup, for the agent group of
+// their tab; the agent then reads the steps.
 test("the owner records their actions for the agent from the popup", async () => {
   await opened("showme");
   try {
@@ -1221,13 +1230,14 @@ test("screenshots leave the ghost cursor out and a bare page says how to get one
   expect(String(bare.body.output)).toContain("There is no global `page`");
 });
 
-// As in Playwriter, the ghost cursor shows each agent mouse action without a show(); it is the
-// extension's, moved only by the agent's own input, and ghostCursor.hide turns it off.
+// The ghost cursor shows each agent mouse action without a show(); it is the extension's, moved only by the agent's own input, and ghostCursor.hide turns it off.
 test("the ghost cursor shows agent mouse actions until the agent hides it", async () => {
   const result = await run(
     "acceptance",
     `const page = await context.newPage(); await page.goto("${origin}/");
-     const cursor = () => page.evaluate(() => { const host = document.getElementById("nds-ghost-cursor"); return host === null ? "none" : typeof host.__ndsMove === "function" ? "extension" : "executor"; });
+     const cursor = () => page.evaluate(() => { const host = document.getElementById("nds-ghost-cursor"); return host === null ? "none" : typeof host.stop === "function" ? "executor" : "extension"; });
+     // The extension's scripts live in their own world: the page sees none of their names.
+     const hidden = await page.evaluate(() => ["__ndsContext", "__ndsContextTarget", "__ndsPins", "__ndsCursorOff"].filter((name) => name in globalThis));
      const before = await cursor();
      await page.click("#inc");
      await page.waitForTimeout(300);
@@ -1235,19 +1245,20 @@ test("the ghost cursor shows agent mouse actions until the agent hides it", asyn
      await ghostCursor.hide({ page });
      await page.click("#inc");
      await page.waitForTimeout(300);
-     const hidden = await cursor();
+     const off = await cursor();
      await ghostCursor.show({ page });
      await page.mouse.move(20, 20);
      const shown = await cursor();
      await page.close();
-     return JSON.stringify({ before, clicked, hidden, shown })`,
+     return JSON.stringify({ hidden, before, clicked, off, shown })`,
     "--timeout",
     "20000",
   );
   expect(JSON.parse(String(result.body.value))).toEqual({
+    hidden: [],
     before: "none",
     clicked: "extension",
-    hidden: "none",
+    off: "none",
     shown: "executor",
   });
 });
@@ -1291,7 +1302,7 @@ test("the guide's performance recipes measure an agent page", async () => {
 test("agent code loads modules and lists the elements the owner pinned", async () => {
   await opened("pins");
   try {
-    writeFileSync(join(runtime, "sessions", "pins", "helper.mjs"), "export const answer = 42;\n");
+    writeFileSync(join(area("pins"), "helper.mjs"), "export const answer = 42;\n");
     const page = await run(
       "pins",
       `state.page = await context.newPage(); await state.page.goto("${origin}/helpers?pins"); return require("node:path").basename("/a/b.txt")`,
@@ -1304,12 +1315,13 @@ test("agent code loads modules and lists the elements the owner pinned", async (
     await (await observed("/helpers?pins"))?.click("#save", { button: "right" });
     const result = await run(
       "pins",
-      `const remembered = await state.page.evaluate(() => globalThis.__ndsContextTarget?.id);
-       await state.page.evaluate(() => { const target = globalThis.__ndsContextTarget; globalThis.__ndsPins = [target]; globalThis.ndsPinnedElem1 = target; target.setAttribute("data-nds-pin", "1"); });
-       return JSON.stringify({ remembered, pinned: await pinnedElements({ page: state.page }) })`,
+      `// The extension remembers the right-click in its own world, which the page cannot see.
+       const visible = await state.page.evaluate(() => "__ndsContextTarget" in globalThis);
+       await state.page.evaluate(() => { const target = document.getElementById("save"); target.setAttribute("data-nds-pin", "1"); globalThis.ndsPinnedElem1 = target; });
+       return JSON.stringify({ visible, pinned: await pinnedElements({ page: state.page }) })`,
     );
-    const seen = JSON.parse(String(result.body.value)) as { remembered: string; pinned: string };
-    expect(seen.remembered).toBe("save");
+    const seen = JSON.parse(String(result.body.value)) as { visible: boolean; pinned: string };
+    expect(seen.visible).toBe(false);
     const inspected = await run(
       "pins",
       `state.page = undefined; const found = await inspectPinnedElement(${JSON.stringify(`${origin}/helpers?pins`)}, "globalThis.ndsPinnedElem1"); return JSON.stringify({ html: found.outerHTML, page: state.page?.url() })`,
@@ -1423,7 +1435,7 @@ test("screenshots are written inside the session area", async () => {
   );
   // Agent code joins with "/", which Windows accepts beside its own separator.
   const path = resolve(String(result.body.value));
-  expect(path).toBe(join(runtime, "sessions", "acceptance", "form.png"));
+  expect(path).toBe(join(area("acceptance"), "form.png"));
   expect([...readFileSync(path).subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
 });
 
@@ -1857,6 +1869,59 @@ test("the activity journal keeps what agents did and the popup's off stops it", 
   expect((await cli("status")).body.observation).toBe("full");
 });
 
+// The owner keeps a site private in the popup: agents still work there, the journal keeps that
+// they did, never what, and the popup shows the agent's newest steps.
+test("a private site keeps its content out of the journal, and the popup shows the steps", async () => {
+  const site = `http://localhost:${fixture.port}/journal`;
+  const opened = await run(
+    "acceptance",
+    `state.private = await context.newPage(); await state.private.goto("${site}"); return "ok"`,
+  );
+  expect(opened.body.value).toBe("ok");
+  const popup = await observer.newPage();
+  await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+  const tab = await popup.evaluate(async (url) => {
+    const tabs = (globalThis as unknown as { chrome: ChromeTabs }).chrome.tabs;
+    return (await tabs.query({})).find((each) => each.url === url)?.id;
+  }, site);
+  await popup.goto(`chrome-extension://${extensionId}/popup.html?tab=${tab}`);
+  await popup.locator("#private-add:not([disabled])").click();
+  await popup.waitForFunction(() =>
+    document.getElementById("private")?.textContent?.includes("localhost"),
+  );
+  const result = await run(
+    "acceptance",
+    `await state.private.fill("#email", "private-note@test");
+     await state.private.evaluate(() => fetch("/api/journal?id=8").then((r) => r.json()));
+     await state.private.waitForTimeout(1500); return "done"`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body.value).toBe("done");
+  await Bun.sleep(1500);
+  const listed = await plain("-s", "acceptance", "activity", "--last", "20", "--full");
+  expect(listed.stdout).not.toContain("private-note");
+  expect(listed.stdout).not.toContain("tok-should-not-stay");
+  const records = listed.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const fill = records.findLast((record) => record.type === "action" && record.api === "fill");
+  // The action names its page, so the journal knows its site without guessing.
+  expect(fill).toMatchObject({ private: true, page: expect.any(Number) });
+  expect(fill?.value).toBeUndefined();
+  expect(fill?.locator).toBeUndefined();
+  // The popup lists the group's newest steps, the private ones marked.
+  await popup.reload();
+  await popup.waitForFunction(() => Number(document.body.dataset.recent) > 0);
+  expect(await popup.locator("#recent").textContent()).toContain("action (private)  fill");
+  // The owner keeps the site's content again.
+  await popup.locator("#private li button").click();
+  await popup.waitForFunction(() => document.getElementById("private")?.children.length === 0);
+  await popup.close();
+  await run("acceptance", "await state.private.close(); delete state.private");
+});
+
 // Another device's browser is driven through that device's own CLI: here a device whose transport
 // runs this CLI again, so the whole path is exercised without a second machine.
 test("a device's CLI runs a session's code there and hands its artifacts back", async () => {
@@ -2109,7 +2174,7 @@ test.skipIf(windows)(
     ).toMatchObject({ result: "executed", failure: null, output: "[return value] Owned" });
     expect(await observed("/owned")).toBeDefined();
     // Close while an owned execution runs: the acknowledgement comes only after its executor ended.
-    const executor = join(runtime, "sessions", "owned");
+    const executor = area("owned");
     expect(processes(executor)).toHaveLength(1);
     const running = control({
       op: "execute_owned",
@@ -2178,7 +2243,7 @@ test("the owner's switch revokes sessions until control is enabled again", async
 test("a lost host is replaced and the agent group is reclaimed without owner tabs", async () => {
   const owner = await observed("/owner");
   expect(owner).toBeDefined();
-  const leftover = join(runtime, "sessions", "acceptance", "before-loss.png");
+  const leftover = join(area("acceptance"), "before-loss.png");
   const written = await run(
     "acceptance",
     `await context.pages()[0].screenshot({ path: artifacts + "/before-loss.png" }); return "written"`,
@@ -2224,7 +2289,7 @@ test("closing a session cleans only its own area", async () => {
   await Bun.sleep(500);
   expect(await observed("/")).toBeUndefined();
   expect(await observed("/owner")).toBeDefined();
-  expect(existsSync(join(runtime, "sessions", "acceptance"))).toBe(false);
+  expect(existsSync(area("acceptance"))).toBe(false);
   expect(await observed("/frame")).toBeUndefined();
   expect((await run("acceptance", "1")).body.error).toBe("session_not_found");
 });

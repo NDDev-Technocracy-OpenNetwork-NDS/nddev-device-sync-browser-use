@@ -146,7 +146,7 @@ const sandbox = vm.createContext({
   console: captured,
   process: agentProcess,
   snapshot,
-  // Playwriter's earlier name of `snapshot`.
+  // An earlier name of `snapshot`, kept for scripts written with it.
   accessibilitySnapshot: snapshot,
   ref,
   refToLocator,

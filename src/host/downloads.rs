@@ -189,8 +189,10 @@ impl Host {
     }
 }
 
-/// Copies a finished download into the session's area, never through a link, under the name the
-/// site suggested when it is a plain file name, else under the browser's.
+/// Takes a finished download into the session's area, never through a link, under the name the
+/// site suggested when it is a plain file name, else under the browser's. The browser's file is
+/// moved when both lie on one file system, so a large download is neither copied nor held twice;
+/// elsewhere it is copied, and the browser's copy goes once the host answers `forget`.
 fn keep(source: &Path, suggested: Option<&str>, artifacts: &Path) -> Result<PathBuf, &'static str> {
     let metadata = std::fs::symlink_metadata(source).map_err(|_| "missing")?;
     let plain = suggested
@@ -206,7 +208,9 @@ fn keep(source: &Path, suggested: Option<&str>, artifacts: &Path) -> Result<Path
         .join(super::token().map_err(|_| "copy_failed")?);
     std::fs::create_dir_all(&folder).map_err(|_| "copy_failed")?;
     let target = folder.join(name);
-    std::fs::copy(source, &target).map_err(|_| "copy_failed")?;
+    if std::fs::rename(source, &target).is_err() {
+        std::fs::copy(source, &target).map_err(|_| "copy_failed")?;
+    }
     Ok(target)
 }
 
@@ -275,19 +279,25 @@ mod tests {
     fn only_a_regular_file_is_kept_and_a_link_is_refused() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("report.pdf");
-        std::fs::write(&source, b"bytes").unwrap();
+        let downloaded = || std::fs::write(&source, b"bytes").unwrap();
+        downloaded();
         let area = directory.path().join("area");
         let kept = keep(&source, None, &area).unwrap();
         assert_eq!(kept.file_name().unwrap(), "report.pdf");
         assert!(kept.starts_with(area.join(".downloads")));
         assert_eq!(std::fs::read(&kept).unwrap(), b"bytes");
+        // On one file system the browser's file moved into the session.
+        assert!(!source.exists());
         // The site's name wins; one that names a path or a parent falls back to the browser's.
+        downloaded();
         let named = keep(&source, Some("Invoice 7.pdf"), &area).unwrap();
         assert_eq!(named.file_name().unwrap(), "Invoice 7.pdf");
         for unsafe_name in ["../escape.pdf", "nested/escape.pdf", "..", ""] {
+            downloaded();
             let kept = keep(&source, Some(unsafe_name), &area).unwrap();
             assert_eq!(kept.file_name().unwrap(), "report.pdf", "{unsafe_name}");
         }
+        downloaded();
         assert_eq!(
             keep(&directory.path().join("gone"), None, &area),
             Err("missing")

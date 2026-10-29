@@ -12,13 +12,20 @@ const OBSERVATION = "observation";
 type Observation = "full" | "standard" | "off";
 const OBSERVATIONS: readonly Observation[] = ["full", "standard", "off"];
 const GROUPS = "groups";
+// The owner's private sites: agents still work there, but the journal keeps no content of them.
+const PRIVATE = "private";
+const PRIVATE_LIMIT = 256;
 const RELOADED_FOR = "reloadedFor";
 const OWNER = "owner:";
 const PIN = "nds-pin";
 // Installed in every agent tab: remembers the element of the last right-click, for pinning.
 const CONTEXT = `if (!globalThis.__ndsContext) { globalThis.__ndsContext = true; addEventListener("contextmenu", (event) => { globalThis.__ndsContextTarget = event.target; }, true); }`;
-// Pins that element as ndsPinnedElemN and marks it, so agent code can reach it by locator.
-const PINNING = `(() => { const target = globalThis.__ndsContextTarget; if (!(target instanceof Element)) return 0; const pins = (globalThis.__ndsPins ??= []); if (!pins.includes(target)) pins.push(target); const number = pins.indexOf(target) + 1; globalThis["ndsPinnedElem" + number] = target; target.setAttribute("data-nds-pin", String(number)); return number; })()`;
+// Marks that element as the next pin, `[data-nds-pin="N"]`, or names the pin it already is.
+const PINNING = `(() => { const target = globalThis.__ndsContextTarget; if (!(target instanceof Element)) return 0; const known = Number(target.getAttribute("data-nds-pin")); if (known) return known; const number = Math.max(0, ...[...document.querySelectorAll("[data-nds-pin]")].map((pin) => Number(pin.getAttribute("data-nds-pin")) || 0)) + 1; target.setAttribute("data-nds-pin", String(number)); return number; })()`;
+// This worker's scripts in agent tabs (the right-click listener, the pin marker, the ghost cursor)
+// run in an isolated world of this name: the page sees none of their globals or properties, and
+// shares only the DOM with them.
+const WORLD = "nds";
 
 // Events no agent uses that flood native messaging on busy pages.
 const NOISY = new Set(["Network.dataReceived", "Network.resourceChangedPriority"]);
@@ -43,16 +50,15 @@ const SETUP = new Set([
 ]);
 const SETUP_TIMEOUT_MS = 10_000;
 // While Chrome captures a screenshot of an agent tab, this worker's ghost cursor, the page's
-// scrollbars and the text caret stay out of it, as in Playwriter; the accessibility labels a
-// labelled screenshot draws stay in.
+// scrollbars and the text caret stay out of it; the accessibility labels a labelled screenshot
+// draws stay in.
 const SHOT_STYLE = "nds-screenshot-style";
 const SHOT_HIDE = `(() => { if (document.getElementById("${SHOT_STYLE}")) return; const style = document.createElement("style"); style.id = "${SHOT_STYLE}"; style.textContent = "#nds-ghost-cursor { display: none !important } html { scrollbar-width: none !important } ::-webkit-scrollbar { display: none !important } * { caret-color: transparent !important }"; (document.head ?? document.documentElement).append(style); })()`;
 const SHOT_SHOW = `document.getElementById("${SHOT_STYLE}")?.remove()`;
-// The ghost cursor shows each agent mouse action in an agent tab and fades after 5 s, as in
-// Playwriter. It moves only after the agent's own Input.dispatchMouseEvent, never with the owner's
+// The ghost cursor shows each agent mouse action in an agent tab and fades after 5 s. It moves only after the agent's own Input.dispatchMouseEvent, never with the owner's
 // mouse. A cursor the executor installed (ghostCursor.show) follows the mouse itself and is left
 // alone, and ghostCursor.hide turns this one off until the next show.
-const CURSOR = `((x, y, press) => { if (globalThis.__ndsCursorOff || !document.documentElement) return; let host = document.getElementById("nds-ghost-cursor"); if (host && !host.__ndsMove) return; if (!host) { host = document.createElement("div"); host.id = "nds-ghost-cursor"; host.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647"; const root = host.attachShadow({ mode: "closed" }); const dot = document.createElement("div"); dot.style.cssText = "position:fixed;left:0;top:0;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:rgba(0,0,0,.55);border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);opacity:0;transition:opacity .3s,transform .1s"; root.append(dot); document.documentElement.append(host); let idle; host.__ndsMove = (x, y, press) => { dot.style.left = x + "px"; dot.style.top = y + "px"; dot.style.opacity = "1"; if (press) { dot.style.transform = "scale(.7)"; setTimeout(() => { dot.style.transform = ""; }, 150); } clearTimeout(idle); idle = setTimeout(() => { dot.style.opacity = "0"; }, 5000); }; } host.__ndsMove(x, y, press); })`;
+const CURSOR = `((x, y, press) => { if (!document.documentElement || document.documentElement.hasAttribute("data-nds-cursor-off")) return; let host = document.getElementById("nds-ghost-cursor"); if (host && !host.__ndsMove) return; if (!host) { host = document.createElement("div"); host.id = "nds-ghost-cursor"; host.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647"; const root = host.attachShadow({ mode: "closed" }); const dot = document.createElement("div"); dot.style.cssText = "position:fixed;left:0;top:0;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:rgba(0,0,0,.55);border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);opacity:0;transition:opacity .3s,transform .1s"; root.append(dot); document.documentElement.append(host); let idle; host.__ndsMove = (x, y, press) => { dot.style.left = x + "px"; dot.style.top = y + "px"; dot.style.opacity = "1"; if (press) { dot.style.transform = "scale(.7)"; setTimeout(() => { dot.style.transform = ""; }, 150); } clearTimeout(idle); idle = setTimeout(() => { dot.style.opacity = "0"; }, 5000); }; } host.__ndsMove(x, y, press); })`;
 
 type HostRequest =
   | {
@@ -71,10 +77,15 @@ type HostRequest =
   | { type: "tabs"; id: number; tabs: number[] }
   | { type: "forget"; id: number; download: number }
   | { type: "reload"; id?: undefined; version: string }
-  | ({ type: "recorded"; request: number } & OwnerRecording);
+  | ({ type: "recorded"; request: number } & OwnerRecording)
+  | { type: "incompatible"; id?: undefined; contract: number }
+  | { type: "journaled"; id?: undefined; request: number; lines: string[] };
 // Every request but `reload`, which the worker answers by reloading, not with a result, and the
 // host's answer to the owner's recorder button.
-type Answered = Exclude<HostRequest, { type: "reload" } | { type: "recorded" }>;
+type Answered = Exclude<
+  HostRequest,
+  { type: "reload" } | { type: "recorded" } | { type: "incompatible" } | { type: "journaled" }
+>;
 // The recorder of the agent group that holds the owner's tab, as the popup shows it.
 type OwnerRecording = {
   recording?: boolean;
@@ -89,6 +100,7 @@ class Refusal extends Error {}
 let port: chrome.runtime.Port | undefined;
 let enabled = true;
 let observation: Observation = "full";
+let privateSites: string[] = [];
 let retry = 1000;
 // Group key -> Chrome group id. Persisted for worker restarts in this browser session.
 let groups = new Map<string, number>();
@@ -109,6 +121,8 @@ type Attachment = {
   ending?: Promise<void> | undefined;
   // The tab's target, which a reattached session must still report.
   target?: string | undefined;
+  // The execution context of this worker's isolated world in the tab's current document.
+  world?: number | undefined;
 };
 
 // Group key -> its current life.
@@ -154,8 +168,11 @@ async function command(
 }
 
 async function load(): Promise<void> {
-  const local = await chrome.storage.local.get([ENABLED, OBSERVATION]);
+  const local = await chrome.storage.local.get([ENABLED, OBSERVATION, PRIVATE]);
   enabled = local[ENABLED] !== false;
+  privateSites = Array.isArray(local[PRIVATE])
+    ? (local[PRIVATE] as unknown[]).filter((site): site is string => typeof site === "string")
+    : [];
   observation = OBSERVATIONS.find((profile) => profile === local[OBSERVATION]) ?? "full";
   const session = await chrome.storage.session.get(GROUPS);
   groups = new Map(Object.entries((session[GROUPS] ?? {}) as Record<string, number>));
@@ -166,8 +183,13 @@ function saveGroups(): Promise<void> {
   return chrome.storage.session.set({ [GROUPS]: Object.fromEntries(groups) });
 }
 
+// The contract of a connected host that refused this worker's, which the popup explains.
+let hostContract: number | undefined;
+const CONTRACT = 2;
+
 async function badge(): Promise<void> {
-  await chrome.action.setBadgeText({ text: enabled ? (port ? "" : "…") : "OFF" });
+  const text = !enabled ? "OFF" : !port ? "…" : hostContract !== undefined ? "!" : "";
+  await chrome.action.setBadgeText({ text });
 }
 
 function send(message: object): void {
@@ -199,11 +221,17 @@ function connect(): void {
   next.onMessage.addListener((message: HostRequest) => {
     if (message.type === "reload") void reloadFor(message.version);
     else if (message.type === "recorded") recorded.get(message.request)?.(message);
-    else void handle(message);
+    else if (message.type === "journaled") journaled.get(message.request)?.(message.lines);
+    else if (message.type === "incompatible") {
+      // The host speaks another contract: nothing an agent asks can work until one is updated.
+      hostContract = message.contract;
+      void badge();
+    } else void handle(message);
   });
   next.onDisconnect.addListener(() => {
     // The host owned every session; without it no agent may keep control.
     port = undefined;
+    hostContract = undefined;
     void detachAll().then(badge);
     setTimeout(connect, retry);
     retry = Math.min(retry * 2, 60_000);
@@ -213,12 +241,13 @@ function connect(): void {
     protocol: PROTOCOL,
     version: chrome.runtime.getManifest().version,
     // The host admits only this contract: every cdp and close request names its group.
-    contract: 2,
+    contract: CONTRACT,
     userAgent: navigator.userAgent,
     enabled,
     // The host takes agent downloads' files from this worker (see `downloads` below).
     downloads: chrome.downloads !== undefined,
     observation,
+    private: privateSites,
   });
   void badge();
 }
@@ -966,13 +995,58 @@ function liveIn(groupId: number | undefined): Life | undefined {
 }
 
 // Moves the ghost cursor to an agent mouse event's point; it never delays or fails the event.
+// The cursor's moves of one tab, in the order the agent's mouse events came.
+const cursorSteps = new Map<number, Promise<unknown>>();
+
 function point(tab: number, params: object | undefined): void {
   const { type, x, y } = (params ?? {}) as { type?: unknown; x?: unknown; y?: unknown };
   if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x + y)) return;
   const expression = `${CURSOR}(${x}, ${y}, ${type === "mousePressed"})`;
-  void chrome.debugger
-    .sendCommand({ tabId: tab }, "Runtime.evaluate", { expression })
+  const next = (cursorSteps.get(tab) ?? Promise.resolve())
+    .then(() => inWorld(tab, expression))
     .catch(() => undefined);
+  cursorSteps.set(tab, next);
+  void next.then(() => {
+    if (cursorSteps.get(tab) === next) cursorSteps.delete(tab);
+  });
+}
+
+// Evaluates in this worker's isolated world of the tab's main frame. Chrome keeps one world of a
+// name per frame, the one `remember` installs into; its context changes with each document, so a
+// stale one is asked for again once.
+async function inWorld(
+  tab: number,
+  expression: string,
+  returnByValue = false,
+): Promise<{ result?: { value?: unknown } }> {
+  const attachment = attached.get(tab);
+  if (!attachment) throw new Refusal("target_closed");
+  for (let attempt = 0; ; attempt++) {
+    if (attachment.world === undefined) {
+      const { frameTree } = (await chrome.debugger.sendCommand(
+        { tabId: tab },
+        "Page.getFrameTree",
+      )) as {
+        frameTree: { frame: { id: string } };
+      };
+      const { executionContextId } = (await chrome.debugger.sendCommand(
+        { tabId: tab },
+        "Page.createIsolatedWorld",
+        { frameId: frameTree.frame.id, worldName: WORLD },
+      )) as { executionContextId: number };
+      attachment.world = executionContextId;
+    }
+    try {
+      return (await chrome.debugger.sendCommand({ tabId: tab }, "Runtime.evaluate", {
+        expression,
+        contextId: attachment.world,
+        returnByValue,
+      })) as { result?: { value?: unknown } };
+    } catch (error) {
+      attachment.world = undefined;
+      if (attempt > 0) throw error;
+    }
+  }
 }
 
 // A check in an agent tab that only a person passes, such as a CAPTCHA. One notification per tab
@@ -1022,12 +1096,13 @@ async function clearOwner(tab: number): Promise<object> {
 async function remember(tab: number, admitted: () => boolean): Promise<void> {
   if (!admitted()) return;
   await chrome.debugger
-    .sendCommand({ tabId: tab }, "Page.addScriptToEvaluateOnNewDocument", { source: CONTEXT })
+    .sendCommand({ tabId: tab }, "Page.addScriptToEvaluateOnNewDocument", {
+      source: CONTEXT,
+      worldName: WORLD,
+    })
     .catch(() => undefined);
   if (!admitted()) return;
-  await chrome.debugger
-    .sendCommand({ tabId: tab }, "Runtime.evaluate", { expression: CONTEXT })
-    .catch(() => undefined);
+  await inWorld(tab, CONTEXT).catch(() => undefined);
 }
 
 // The owner points an agent at an element: right-click, "Pin this element for the NDS agent".
@@ -1045,11 +1120,17 @@ async function pin(tab: number): Promise<void> {
     });
     return;
   }
-  const { result } = (await chrome.debugger.sendCommand({ tabId: tab }, "Runtime.evaluate", {
-    expression: PINNING,
-    returnByValue: true,
-  })) as { result?: { value?: number } };
-  const number = result?.value ?? 0;
+  const { result } = await inWorld(tab, PINNING, true);
+  const number = typeof result?.value === "number" ? result.value : 0;
+  // Agent code reaches the pin as `globalThis.ndsPinnedElemN` too: the page's own world gets that
+  // one name, only once the owner pinned.
+  if (number > 0) {
+    await chrome.debugger
+      .sendCommand({ tabId: tab }, "Runtime.evaluate", {
+        expression: `globalThis.ndsPinnedElem${number} = document.querySelector('[data-nds-pin="${number}"]')`,
+      })
+      .catch(() => undefined);
+  }
   await chrome.notifications.create(id, {
     type: "basic",
     iconUrl: "icons/icon-128.png",
@@ -1360,26 +1441,109 @@ async function record(action: string, tab: number | undefined): Promise<OwnerRec
   });
 }
 
+// The popup's view of the owner's tab: the agent group it belongs to, the newest steps the
+// journal holds of that group, and the site the owner may keep private.
+const journaled = new Map<number, (lines: string[]) => void>();
+let journals = 0;
+
+async function tabOf(tab: number | undefined): Promise<chrome.tabs.Tab | undefined> {
+  if (tab !== undefined) return chrome.tabs.get(tab).catch(() => undefined);
+  return (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+}
+
+function siteOf(url: string | undefined): string | undefined {
+  try {
+    const parsed = new URL(url ?? "");
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+      ? parsed.hostname.toLowerCase()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function recent(tab: number | undefined): Promise<{ lines?: string[]; error?: string }> {
+  const id = (await tabOf(tab))?.id ?? -1;
+  const held = usable(id);
+  if (!held) return { error: "no_agent_tab" };
+  if (!port) return { error: "extension_unavailable" };
+  const request = ++journals;
+  return new Promise((done) => {
+    const timer = setTimeout(() => finish(undefined), RECORD_REPLY_MS);
+    function finish(lines: string[] | undefined): void {
+      clearTimeout(timer);
+      journaled.delete(request);
+      done(lines ? { lines } : { error: "timeout" });
+    }
+    journaled.set(request, finish);
+    send({ type: "journal", request, group: held.life.group });
+  });
+}
+
+async function setPrivate(sites: string[]): Promise<void> {
+  privateSites = [...new Set(sites)].sort().slice(0, PRIVATE_LIMIT);
+  send({ type: "private", sites: privateSites });
+  await chrome.storage.local.set({ [PRIVATE]: privateSites });
+}
+
+async function status(tab: number | undefined): Promise<object> {
+  const site = siteOf((await tabOf(tab))?.url);
+  return {
+    enabled,
+    observation,
+    connected: port !== undefined,
+    hostContract,
+    tabs: [...attached.keys()].filter(usable).length,
+    privateSites,
+    ...(site ? { site } : {}),
+  };
+}
+
 chrome.runtime.onMessage.addListener(
   (
-    message: { type?: string; enabled?: boolean; profile?: string; action?: string; tab?: number },
+    message: {
+      type?: string;
+      enabled?: boolean;
+      profile?: string;
+      action?: string;
+      tab?: number;
+      site?: string;
+    },
     sender,
     reply,
   ) => {
     // Only this extension's own pages (the popup) may change the switch.
     if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("")))
       return false;
+    const tab = typeof message.tab === "number" ? message.tab : undefined;
     if (message.type === "set" && typeof message.enabled === "boolean") {
-      void setEnabled(message.enabled).then(() =>
-        reply({ enabled, observation, connected: port !== undefined }),
-      );
+      void setEnabled(message.enabled)
+        .then(() => status(tab))
+        .then(reply);
       return true;
     }
     const profile = OBSERVATIONS.find((each) => each === message.profile);
     if (message.type === "observe" && profile) {
-      void setObservation(profile).then(() =>
-        reply({ enabled, observation, connected: port !== undefined }),
-      );
+      void setObservation(profile)
+        .then(() => status(tab))
+        .then(reply);
+      return true;
+    }
+    if (message.type === "private" && (message.action === "add" || message.action === "remove")) {
+      const site = message.site?.toLowerCase();
+      const next =
+        message.action === "add"
+          ? site
+            ? [...privateSites, site]
+            : privateSites
+          : privateSites.filter((each) => each !== site);
+      void setPrivate(next)
+        .then(() => status(tab))
+        .then(reply);
+      return true;
+    }
+    if (message.type === "recent") {
+      void recent(tab).then(reply);
       return true;
     }
     if (
@@ -1391,13 +1555,10 @@ chrome.runtime.onMessage.addListener(
       );
       return true;
     }
-    if (message.type === "get")
-      reply({
-        enabled,
-        observation,
-        connected: port !== undefined,
-        tabs: [...attached.keys()].filter(usable).length,
-      });
+    if (message.type === "get") {
+      void status(tab).then(reply);
+      return true;
+    }
     return false;
   },
 );

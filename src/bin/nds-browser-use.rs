@@ -26,9 +26,9 @@ const USAGE: &str = "usage:
   nds-browser-use [--device <name>] -s <project> recorder frame <id> [--offset <ms>] [--recording <id>]
   nds-browser-use [--device <name>] -s <project> activity [--all] [--type <type>] [--errors] [--grep <text>] [--exec <id>] [--last <n, at most 10000>] [--full]
   nds-browser-use [--device <name>] -s <project> activity body <sha256>
-  nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)
+  nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-dev|chrome-canary|chrome-for-testing|chromium|edge|edge-beta|edge-dev|brave> | --host-dir <path>)
   nds-browser-use phones
-  nds-browser-use phone serve <serial> [--socket <name>] [--observation <full|standard|off>]
+  nds-browser-use phone serve <serial> [--socket <name>] [--observation <full|standard|off>] [--once]
   nds-browser-use --phone <serial> <any session command above>
 NDS_BROWSER_DEVICE names the default device; NDS_BROWSER_PHONE the default phone.";
 /// How agents use the tool, printed by `nds-browser-use skill`.
@@ -168,6 +168,7 @@ async fn phones() -> ExitCode {
 async fn phone_serve(serial: &str, words: &[&str]) -> ExitCode {
     let mut socket = None;
     let mut observation = "full";
+    let mut once = false;
     let mut rest = words;
     loop {
         match rest {
@@ -184,62 +185,115 @@ async fn phone_serve(serial: &str, words: &[&str]) -> ExitCode {
                 observation = profile;
                 rest = tail;
             }
+            ["--once", tail @ ..] => {
+                once = true;
+                rest = tail;
+            }
             _ => return usage(),
         }
     }
     let server = mobile::adb::Server::from_env();
-    let socket = match socket {
-        Some(socket) => socket,
-        None => {
-            let phones = mobile::phones(&server).await.unwrap_or_default();
-            let browsers = phones
-                .iter()
-                .find(|phone| phone.serial == serial)
-                .map(|phone| phone.browsers.as_slice())
-                .unwrap_or_default();
-            match mobile::default_socket(browsers) {
-                Some(socket) => socket.to_owned(),
-                None => {
-                    return refused(
-                        "unavailable",
-                        "no browser on this phone exposes DevTools; see `nds-browser-use phones`",
-                    );
+    // Ctrl-C ends the current link, and the host then closes its sessions as when Chrome ends; it
+    // also ends the wait for the phone's browser to come back.
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = stop.send(true);
+    });
+    let owner_stop = || {
+        let mut stopped = stopped.clone();
+        async move {
+            let _ = stopped.wait_for(|stop| *stop).await;
+        }
+    };
+    let mut waiting = false;
+    loop {
+        if *stopped.borrow() {
+            tracing::info!(event.name = "browser.phone.stopped", outcome = "stopped", error.type = "owner_stopped");
+            return ExitCode::SUCCESS;
+        }
+        // The browser's socket is found again each time: Chrome may come back under another name.
+        let chosen = match &socket {
+            Some(socket) => Some(socket.clone()),
+            None => phone_browser(&server, serial).await,
+        };
+        let Some(chosen) = chosen else {
+            if once {
+                return refused(
+                    "unavailable",
+                    "no browser on this phone exposes DevTools; see `nds-browser-use phones`",
+                );
+            }
+            if !waiting {
+                tracing::info!(event.name = "browser.phone.waiting", outcome = "pending");
+                waiting = true;
+            }
+            tokio::select! {
+                () = tokio::time::sleep(PHONE_RETRY) => continue,
+                () = owner_stop() => continue,
+            }
+        };
+        waiting = false;
+        let config = match install::load() {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::error!(event.name = "browser.host.failed", outcome = "error", error.type = error.code());
+                return ExitCode::from(2);
+            }
+        };
+        tracing::info!(event.name = "browser.phone.connecting", outcome = "pending");
+        let served = mobile::serve(
+            config,
+            server.clone(),
+            serial,
+            &chosen,
+            observation,
+            owner_stop(),
+        )
+        .await;
+        match served {
+            // The browser quit, Android stopped it, or the phone went away: its sessions ended
+            // with it, and the link waits for the browser to come back.
+            Ok(mobile::link::Ended::Browser) | Err(mobile::ServeError::Browser) if !once => {
+                tracing::info!(event.name = "browser.phone.stopped", outcome = "stopped", error.type = "browser_closed");
+                tokio::select! {
+                    () = tokio::time::sleep(PHONE_RETRY) => {}
+                    () = owner_stop() => {}
                 }
             }
-        }
-    };
-    let config = match install::load() {
-        Ok(config) => config,
-        Err(error) => {
-            tracing::error!(event.name = "browser.host.failed", outcome = "error", error.type = error.code());
-            return ExitCode::from(2);
-        }
-    };
-    tracing::info!(event.name = "browser.phone.connecting", outcome = "pending");
-    // Ctrl-C ends the link, and the host then closes its sessions as when Chrome ends.
-    let stop = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    match mobile::serve(config, server, serial, &socket, observation, stop).await {
-        Ok(ended) => {
-            let reason = match ended {
-                mobile::link::Ended::Browser => "browser_closed",
-                mobile::link::Ended::Host => "host_stopped",
-                mobile::link::Ended::Stopped => "owner_stopped",
-            };
-            tracing::info!(event.name = "browser.phone.stopped", outcome = "stopped", error.type = reason);
-            ExitCode::SUCCESS
-        }
-        Err(mobile::ServeError::Browser) => {
-            tracing::error!(event.name = "browser.phone.failed", outcome = "error", error.type = "browser_unreachable");
-            ExitCode::from(2)
-        }
-        Err(mobile::ServeError::Host(error)) => {
-            tracing::error!(event.name = "browser.host.failed", outcome = "error", error.type = host_error(&error));
-            ExitCode::from(2)
+            Ok(ended) => {
+                let reason = match ended {
+                    mobile::link::Ended::Browser => "browser_closed",
+                    mobile::link::Ended::Host => "host_stopped",
+                    mobile::link::Ended::Stopped => "owner_stopped",
+                };
+                tracing::info!(event.name = "browser.phone.stopped", outcome = "stopped", error.type = reason);
+                return ExitCode::SUCCESS;
+            }
+            Err(mobile::ServeError::Browser) => {
+                tracing::error!(event.name = "browser.phone.failed", outcome = "error", error.type = "browser_unreachable");
+                return ExitCode::from(2);
+            }
+            Err(mobile::ServeError::Host(error)) => {
+                tracing::error!(event.name = "browser.host.failed", outcome = "error", error.type = host_error(&error));
+                return ExitCode::from(2);
+            }
         }
     }
 }
+
+/// How often `phone serve` looks for the phone's browser while it is away.
+#[cfg(any(unix, windows))]
+const PHONE_RETRY: Duration = Duration::from_secs(2);
+
+/// The socket of the phone's browser to serve when the owner names none.
+#[cfg(any(unix, windows))]
+async fn phone_browser(server: &mobile::adb::Server, serial: &str) -> Option<String> {
+    let phones = mobile::phones(server).await.ok()?;
+    let browsers = &phones.iter().find(|phone| phone.serial == serial)?.browsers;
+    mobile::default_socket(browsers).map(str::to_owned)
+}
+
 /// How long `devices` waits for each device's status.
 #[cfg(any(unix, windows))]
 const DEVICE_STATUS_TIMEOUT: Duration = Duration::from_secs(20);

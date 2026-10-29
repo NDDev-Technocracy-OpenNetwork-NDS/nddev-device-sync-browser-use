@@ -65,9 +65,11 @@ Nothing listens on this computer, no `adb forward` is left behind and no port is
 
    A phone in the `unauthorized` state still waits for step 3.
 6. Run `nds-browser-use phone serve <serial>` and leave it running. It runs the host for that
-   phone, in its own runtime directory beside the desktop host's. It stops when the owner presses
-   Ctrl-C, the browser quits or the phone goes away. Sessions close with it, as they do when
-   Chrome ends on the desktop.
+   phone, in its own runtime directory beside the desktop host's.
+   - When the browser quits, Android stops it in the background, or the phone goes away, its
+     sessions close, as they do when Chrome ends on the desktop. `phone serve` then waits for the
+     browser and serves it again once it is back.
+   - Ctrl-C stops it. `--once` stops it instead when the browser goes away.
 
 Without `--socket`, the link uses Chrome's socket `chrome_devtools_remote`. Otherwise it uses the
 only browser the phone offers, and an app's WebView only when nothing else is there.

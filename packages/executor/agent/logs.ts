@@ -73,11 +73,11 @@ export type LogOptions = {
   sinceLastCall?: boolean | undefined;
 };
 
-/** Lines of context kept around each search match, as in Playwriter. */
+/** Lines of context kept around each search match. */
 const CONTEXT = 5;
 
 /**
- * The page's log lines, as Playwriter returns them: an array, empty when there is nothing, so
+ * The page's log lines: an array, empty when there is nothing, so
  * `logs.length` and `logs.filter()` mean what they say. A search keeps five lines around each
  * match and marks a gap with `---`.
  */

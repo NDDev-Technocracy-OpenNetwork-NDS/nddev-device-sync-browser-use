@@ -18,7 +18,7 @@ function fakePage(): { page: Page; log: (type: string, text: string, url?: strin
   return { page, log };
 }
 
-test("logs are an array, as in Playwriter, and empty when there is nothing new", () => {
+test("logs are an array, empty when there is nothing new", () => {
   const { page, log } = fakePage();
   expect(getLatestLogs({ page, sinceLastCall: true })).toEqual([]);
   log("log", "first");

@@ -681,6 +681,7 @@ mod tests {
                 downloads: None,
                 files: Default::default(),
                 journal: None,
+                recording: None,
             },
         );
         assert_eq!(tab_aliases(&state.sessions["nds"], 7), ["tab-7"]);

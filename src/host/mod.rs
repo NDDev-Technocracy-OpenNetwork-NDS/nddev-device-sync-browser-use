@@ -57,6 +57,8 @@ pub struct Config {
     pub executor: PathBuf,
     /// The activity journal's root: one directory per project (docs/observability.md).
     pub activity: PathBuf,
+    /// The root of the session areas (`runtime::sessions_directory`).
+    pub sessions: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -117,6 +119,8 @@ struct State {
     downloads: bool,
     /// The owner's observation profile (see [`observation`]).
     observation: observation::Observation,
+    /// The owner's private sites, of which the journal keeps no content (`observation::sites`).
+    private_sites: Vec<String>,
     /// Child CDP sessions (frames, workers) and the agent tab that owns them.
     children: HashMap<String, i64>,
 }
@@ -141,6 +145,9 @@ struct Session {
     files: downloads::Files,
     /// The session's activity journal, opened by its first record (docs/observability.md).
     journal: Option<Arc<Mutex<crate::activity::Writer>>>,
+    /// The recorder's current recording, as its journal records report it: its id and the
+    /// owner's actions so far. The popup reads it without running anything in the session.
+    recording: Option<(String, u64)>,
 }
 
 struct Tab {
@@ -284,13 +291,13 @@ where
     let cdp = bind(&cdp_socket)?;
     // Owning both sockets proves no other host is alive here, so session areas left by a
     // host that died without its shutdown belong to no session and are removed.
-    let sessions = config.runtime.join("sessions");
+    let sessions = config.sessions.clone();
     match std::fs::remove_dir_all(&sessions) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(IoError::Unavailable.into()),
     }
-    runtime::private_directory(&sessions)?;
+    runtime::private_tree(&sessions)?;
     let (outbound, mut queue) = mpsc::channel::<Vec<u8>>(256);
     let writer = tokio::spawn(async move {
         while let Some(frame) = queue.recv().await {
@@ -456,6 +463,23 @@ fn owner_recording(reply: &Reply) -> Value {
         Reply::Refused { refusal } => json!({ "error": refusal.code() }),
         _ => json!({ "error": "invalid_response" }),
     }
+}
+
+/// The browser and version a user agent names: `Edge/<version>` for Edge, which names Chrome too,
+/// else `Chrome/<version>` (also Brave's and Chromium's, which do not name themselves).
+fn browser_name(user_agent: &str) -> String {
+    let parts = || user_agent.split(' ');
+    if let Some(version) = parts().find_map(|part| part.strip_prefix("Edg/")) {
+        return format!("Edge/{version}");
+    }
+    parts()
+        .find_map(|part| {
+            part.strip_prefix("Headless")
+                .or(Some(part))
+                .filter(|part| part.starts_with("Chrome/"))
+        })
+        .unwrap_or("Chrome")
+        .to_owned()
 }
 
 fn tab_session(tab: i64) -> String {
@@ -676,19 +700,11 @@ impl Host {
                 state.enabled = message["enabled"].as_bool() == Some(true);
                 state.contract = message["contract"].as_u64();
                 state.downloads = message["downloads"].as_bool() == Some(true);
+                state.private_sites = observation::sites(&message["private"]);
                 let profile = observation::Observation::parse(&message["observation"]);
                 state.user_agent = bounded(message["userAgent"].as_str().unwrap_or_default(), 512);
                 state.extension = bounded(message["version"].as_str().unwrap_or_default(), 32);
-                state.browser = state
-                    .user_agent
-                    .split(' ')
-                    .find_map(|part| {
-                        part.strip_prefix("Headless")
-                            .or(Some(part))
-                            .filter(|part| part.starts_with("Chrome/"))
-                    })
-                    .unwrap_or("Chrome")
-                    .to_owned();
+                state.browser = browser_name(&state.user_agent);
                 if state.contract == Some(CONTRACT) {
                     tracing::info!(event.name = "browser.extension.connected", outcome = "ok");
                 } else {
@@ -696,10 +712,24 @@ impl Host {
                     // and the lives it met end here, so a later supported hello revives none.
                     Self::seal(&mut state);
                     tracing::warn!(event.name = "browser.extension.connected", outcome = "rejected", error.type = "contract");
+                    // The owner sees it in the popup instead of an extension that silently does
+                    // nothing.
+                    let body = serde_json::to_vec(
+                        &json!({ "type": "incompatible", "contract": CONTRACT }),
+                    )
+                    .unwrap_or_default();
+                    if let Some(framed) = frame(&body) {
+                        let _ = self.outbound.try_send(framed);
+                    }
                 }
                 drop(state);
                 self.observe(profile);
                 self.update();
+            }
+            Some("private") => self.state().private_sites = observation::sites(&message["sites"]),
+            Some("journal") => {
+                let host = self.clone();
+                tokio::spawn(async move { host.recent(&message).await });
             }
             Some("observation") => {
                 self.observe(observation::Observation::parse(&message["profile"]))
@@ -737,6 +767,31 @@ impl Host {
             return;
         };
         let project = message["group"].as_str().unwrap_or_default();
+        if action == "status" {
+            // Answered from what the session's journal records said, so opening the popup runs
+            // nothing in the agent's session and never waits for the agent.
+            let mut answer = match self.execution_life(project, None) {
+                Err(refusal) => json!({ "error": refusal.code() }),
+                Ok(_) => match self
+                    .state()
+                    .sessions
+                    .get(project)
+                    .and_then(|s| s.recording.clone())
+                {
+                    Some((id, events)) => json!({ "recording": true, "id": id, "events": events }),
+                    None => json!({ "recording": false }),
+                },
+            };
+            answer["type"] = "recorded".into();
+            answer["request"] = message["request"].clone();
+            if let Some(framed) = serde_json::to_vec(&answer)
+                .ok()
+                .and_then(|body| frame(&body))
+            {
+                let _ = self.outbound.try_send(framed);
+            }
+            return;
+        }
         let code = format!("return JSON.stringify(await recorder.{action}())");
         let reply = match self.execution_life(project, None) {
             Ok(life) => self.execute(project, &life, &code, RECORD_MS, None).await,
@@ -1091,7 +1146,7 @@ impl Host {
         }
         let _ = runtime::control_socket(&self.config.runtime).map(std::fs::remove_file);
         let _ = std::fs::remove_file(&self.cdp_socket);
-        let _ = std::fs::remove_dir_all(self.config.runtime.join("sessions"));
+        let _ = std::fs::remove_dir_all(&self.config.sessions);
         Ok(())
     }
 
@@ -1262,6 +1317,14 @@ impl Host {
                         .values()
                         .filter(|session| !session.closing)
                         .count(),
+                    host: Some(view::Build {
+                        version: env!("CARGO_PKG_VERSION").to_owned(),
+                        commit: option_env!("NDS_SOURCE_COMMIT")
+                            .unwrap_or("unknown")
+                            .to_owned(),
+                    }),
+                    compatible: (state.connected && state.contract != Some(CONTRACT))
+                        .then_some(false),
                 }))
             }
             Request::Update => {
@@ -1379,7 +1442,7 @@ impl Host {
             project.to_owned(),
             Session {
                 token: token()?,
-                artifacts: self.config.runtime.join("sessions").join(project),
+                artifacts: self.config.sessions.join(project),
                 client: None,
                 life: life.clone(),
                 owned,
@@ -1391,6 +1454,7 @@ impl Host {
                 downloads: None,
                 files: downloads::Files::default(),
                 journal: None,
+                recording: None,
             },
         );
         Ok(life)
@@ -2000,6 +2064,60 @@ mod owned_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_recording_is_followed_through_its_journal_records() {
+        let mut recording = None;
+        observation::follow_recording(
+            &mut recording,
+            &[
+                json!({ "type": "recording", "event": "started", "recording": "r1" }),
+                json!({ "type": "person-action", "action": "fill" }),
+                json!({ "type": "person-action", "action": "fill", "update": true }),
+                json!({ "type": "person-action", "action": "click" }),
+            ],
+        );
+        assert_eq!(recording, Some(("r1".to_owned(), 2)));
+        observation::follow_recording(
+            &mut recording,
+            &[json!({ "type": "recording", "event": "stopped", "recording": "r1" })],
+        );
+        assert_eq!(recording, None);
+    }
+
+    #[test]
+    fn private_sites_are_lowercase_host_names() {
+        let long = "a".repeat(300);
+        assert_eq!(
+            observation::sites(&json!([
+                "Mail.Example.com",
+                "example.com",
+                "example.com",
+                "bad host",
+                ".x",
+                "x.",
+                long,
+                7
+            ])),
+            ["example.com", "mail.example.com"]
+        );
+        assert!(observation::sites(&json!(null)).is_empty());
+    }
+
+    #[test]
+    fn browsers_are_named_from_their_user_agents() {
+        let chrome = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36";
+        assert_eq!(browser_name(chrome), "Chrome/157.0.0.0");
+        assert_eq!(
+            browser_name(&format!("{chrome} Edg/157.0.3400.1")),
+            "Edge/157.0.3400.1"
+        );
+        assert_eq!(
+            browser_name("Mozilla/5.0 HeadlessChrome/156.0.0.0 Safari/537.36"),
+            "Chrome/156.0.0.0"
+        );
+        assert_eq!(browser_name(""), "Chrome");
+    }
 
     #[test]
     fn the_owner_recorder_answer_names_the_recording_or_why_it_did_not_run() {

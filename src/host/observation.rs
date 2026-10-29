@@ -88,7 +88,88 @@ fn notify(state: &mut State) {
     }
 }
 
+/// The most private sites the owner can keep.
+const SITES_LIMIT: usize = 256;
+/// The newest journal records the popup shows of an agent group.
+const RECENT: usize = 12;
+
+/// Follows the session's recording through its journal records: started, the owner's actions,
+/// stopped.
+pub(super) fn follow_recording(recording: &mut Option<(String, u64)>, records: &[Value]) {
+    for record in records {
+        match (record["type"].as_str(), record["event"].as_str()) {
+            (Some("recording"), Some("started")) => {
+                *recording = record["recording"]
+                    .as_str()
+                    .filter(|id| id.len() <= 64)
+                    .map(|id| (id.to_owned(), 0));
+            }
+            (Some("recording"), Some("stopped")) => *recording = None,
+            (Some("person-action"), _) => {
+                if let Some((_, events)) = recording.as_mut()
+                    && record["update"].as_bool() != Some(true)
+                {
+                    *events += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The owner's private sites from the extension: lowercase host names, each with its subdomains.
+pub(super) fn sites(value: &Value) -> Vec<String> {
+    let mut sites: Vec<String> = value
+        .as_array()
+        .map(|sites| {
+            sites
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_ascii_lowercase)
+                .filter(|site| {
+                    (1..=253).contains(&site.len())
+                        && !site.starts_with('.')
+                        && !site.ends_with('.')
+                        && site
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte))
+                })
+                .take(SITES_LIMIT)
+                .collect()
+        })
+        .unwrap_or_default();
+    sites.sort();
+    sites.dedup();
+    sites
+}
+
 impl Host {
+    /// The popup's view of an agent group's newest journal records, for the owner of this device.
+    pub(super) async fn recent(&self, message: &Value) {
+        let project = message["group"].as_str().unwrap_or_default().to_owned();
+        let directory = self.config.activity.join(&project);
+        let lines = if crate::protocol::valid_project(&project) {
+            tokio::task::spawn_blocking(move || {
+                let query = crate::activity::Query {
+                    last: RECENT,
+                    ..Default::default()
+                };
+                crate::activity::read(&directory, &query).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let answer = json!({ "type": "journaled", "request": message["request"], "lines": lines });
+        if let Some(framed) = serde_json::to_vec(&answer)
+            .ok()
+            .and_then(|body| super::frame(&body))
+        {
+            let _ = self.outbound.try_send(framed);
+        }
+    }
+
     /// `NDS.activity { records, flush }`: the executor's raw records for the session's journal,
     /// kept only in the full profile. Writing happens off the async runtime.
     pub(super) async fn activity(&self, project: &str, params: &Value) -> Value {
@@ -102,13 +183,19 @@ impl Host {
             if state.observation != Observation::Full {
                 return json!({ "kept": false });
             }
+            let sites = state.private_sites.clone();
+            if let Some(session) = state.sessions.get_mut(project) {
+                follow_recording(&mut session.recording, &records);
+            }
             Self::open_journal(&mut state, &self.config.activity, project)
+                .map(|journal| (journal, sites))
         };
-        let Some(journal) = journal else {
+        let Some((journal, sites)) = journal else {
             return json!({ "kept": false });
         };
         let _ = tokio::task::spawn_blocking(move || {
             let mut writer = journal.lock().unwrap_or_else(|error| error.into_inner());
+            writer.set_private(&sites);
             let now = std::time::Instant::now();
             for record in &records {
                 writer.ingest(record, now);
@@ -183,8 +270,10 @@ impl Host {
         if state.observation != Observation::Full {
             return;
         }
+        let sites = state.private_sites.clone();
         if let Some(journal) = Self::open_journal(state, root, project) {
             let mut writer = journal.lock().unwrap_or_else(|error| error.into_inner());
+            writer.set_private(&sites);
             for record in records {
                 writer.ingest(record, std::time::Instant::now());
             }

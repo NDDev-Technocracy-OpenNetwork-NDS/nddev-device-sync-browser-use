@@ -2,9 +2,8 @@
 // unnamed wrappers flattened and repeated text dropped, and a Playwright locator on every
 // interactive line, preferring test ids and ids, then role and name.
 //
-// Adapted from Playwriter's playwriter/src/aria-snapshot.ts (MIT License, Copyright (c) 2026
-// Tommy D. Rossi, https://github.com/remorses/playwriter). Labels on screenshots stay this
-// module's own; frames resolve through CDP instead of Playwriter's Playwright fork.
+// Adapted from MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md). Labels on screenshots stay this
+// module's own; frames resolve through CDP.
 import crypto from "node:crypto";
 import type { CDPSession, Frame, Locator, Page } from "playwright-core";
 

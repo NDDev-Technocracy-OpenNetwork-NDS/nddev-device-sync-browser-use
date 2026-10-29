@@ -1,8 +1,20 @@
 // Owner-facing switches for agent control and for what agent activity is collected; the worker
 // applies and reports both.
 type Observation = "full" | "standard" | "off";
-type Status = { enabled: boolean; observation?: Observation; connected: boolean; tabs?: number };
+type Status = {
+  enabled: boolean;
+  observation?: Observation;
+  connected: boolean;
+  tabs?: number;
+  // The contract of a host that refused this extension's.
+  hostContract?: number;
+  // The owner's private sites, and the site of the owner's tab.
+  privateSites?: string[];
+  site?: string;
+};
 
+// A popup opened as a page of its own, as in tests, names the tab it acts for.
+const forTab = Number(new URLSearchParams(location.search).get("tab")) || undefined;
 const state = document.getElementById("state");
 const toggle = document.getElementById("toggle") as HTMLButtonElement | null;
 const profiles = [...document.querySelectorAll<HTMLButtonElement>("button[data-profile]")];
@@ -16,7 +28,11 @@ const DESCRIPTIONS: Record<Observation, string> = {
 function show(status: Status): void {
   if (!state || !toggle) return;
   const host = status.connected ? "host connected" : "host not connected";
-  state.textContent = `${status.enabled ? "Enabled" : "Disabled"} · ${host}`;
+  state.textContent =
+    status.hostContract !== undefined
+      ? `The NDS host and this extension do not match (host contract ${status.hostContract}): update the extension, or run \`nds-browser-use install\` for a newer host.`
+      : `${status.enabled ? "Enabled" : "Disabled"} · ${host}`;
+  document.body.dataset.compatible = String(status.hostContract === undefined);
   toggle.textContent = status.enabled ? "Disable agent control" : "Enable agent control";
   toggle.dataset.enabled = String(status.enabled);
   toggle.disabled = false;
@@ -27,7 +43,49 @@ function show(status: Status): void {
   }
   if (described) described.textContent = DESCRIPTIONS[current];
   document.body.dataset.observation = current;
+  showPrivate(status);
 }
+
+// Private sites: the owner adds the site of the tab and removes any listed one.
+const privateList = document.getElementById("private");
+const privateAdd = document.getElementById("private-add") as HTMLButtonElement | null;
+
+function showPrivate(status: Status): void {
+  if (!privateList || !privateAdd) return;
+  const sites = status.privateSites ?? [];
+  privateList.replaceChildren(
+    ...sites.map((site) => {
+      const item = document.createElement("li");
+      item.textContent = site;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.title = `Keep content of ${site} again`;
+      remove.addEventListener("click", () => void changePrivate("remove", site));
+      item.append(remove);
+      return item;
+    }),
+  );
+  const site = status.site;
+  privateAdd.disabled = !site || sites.includes(site);
+  privateAdd.dataset.site = site ?? "";
+  privateAdd.textContent = site
+    ? sites.includes(site)
+      ? `${site} is private`
+      : `Keep ${site} private`
+    : "Keep this site private";
+}
+
+async function changePrivate(action: "add" | "remove", site: string): Promise<void> {
+  show(
+    (await chrome.runtime.sendMessage({ type: "private", action, site, tab: forTab })) as Status,
+  );
+}
+
+privateAdd?.addEventListener("click", () => {
+  const site = privateAdd.dataset.site;
+  if (site) void changePrivate("add", site);
+});
 
 toggle?.addEventListener("click", async () => {
   toggle.disabled = true;
@@ -58,8 +116,6 @@ type Recording = {
 };
 const record = document.getElementById("record") as HTMLButtonElement | null;
 const recording = document.getElementById("recording");
-// A popup opened as a page of its own, as in tests, names the tab it acts for.
-const forTab = Number(new URLSearchParams(location.search).get("tab")) || undefined;
 const REFUSED: Record<string, string> = {
   no_agent_tab: "Open a tab of an agent group to record what you do there.",
   session_not_found: "This agent group has no open session.",
@@ -96,5 +152,52 @@ record?.addEventListener("click", () => {
   void ask(record.dataset.recording === "true" ? "stop" : "start");
 });
 
-void chrome.runtime.sendMessage({ type: "get" }).then((status) => show(status as Status));
+// The newest steps of the agent group of the owner's tab, as its activity journal holds them.
+const recentList = document.getElementById("recent");
+const recentNote = document.getElementById("recent-note");
+
+function step(line: string): string {
+  try {
+    const record = JSON.parse(line) as Record<string, unknown>;
+    const time = typeof record.at === "string" ? record.at.slice(11, 19) : "";
+    const what = [record.api, record.method, record.locator, record.url, record.text, record.name]
+      .filter((part) => typeof part === "string" && part !== "")
+      .join(" ");
+    return `${time}  ${String(record.type)}${record.private ? " (private)" : ""}  ${what}`;
+  } catch {
+    return line;
+  }
+}
+
+async function showRecent(): Promise<void> {
+  if (!recentList || !recentNote) return;
+  const answer = (await chrome.runtime.sendMessage({ type: "recent", tab: forTab })) as {
+    lines?: string[];
+    error?: string;
+  };
+  const lines = answer.lines ?? [];
+  recentList.replaceChildren(
+    ...lines
+      .slice()
+      .reverse()
+      .map((line) => {
+        const item = document.createElement("li");
+        item.textContent = step(line);
+        return item;
+      }),
+  );
+  recentNote.textContent = answer.error
+    ? answer.error === "no_agent_tab"
+      ? "Open a tab of an agent group to see what its agent did."
+      : "The NDS host did not answer."
+    : lines.length === 0
+      ? "Nothing yet; the journal keeps agents' steps in the full observation profile."
+      : "Newest first. Agents read all of it with `nds-browser-use -s <project> activity`.";
+  document.body.dataset.recent = String(lines.length);
+}
+
+void chrome.runtime
+  .sendMessage({ type: "get", tab: forTab })
+  .then((status) => show(status as Status));
+void showRecent();
 void ask("status");

@@ -13,6 +13,7 @@ fn fixture() -> (Arc<Host>, mpsc::Receiver<Vec<u8>>, tempfile::TempDir) {
             bun: std::env::current_exe().unwrap(),
             executor: root.path().join("inert.ts"),
             activity: root.path().join("activity"),
+            sessions: runtime.join("sessions"),
         },
         installed: None,
         cdp_socket: runtime.join("cdp.sock"),
@@ -914,6 +915,18 @@ async fn an_extension_of_another_contract_admits_nothing_and_confirms_no_close()
         "userAgent": "Chrome/157.0.0.0",
         "contract": 1,
     }));
+    // It learns why nothing works, and the owner's status says so.
+    assert_eq!(
+        message(&mut queue).await,
+        json!({ "type": "incompatible", "contract": 2 })
+    );
+    assert!(matches!(
+        host.handle(Request::Status).await,
+        Reply::Status(view::Status {
+            compatible: Some(false),
+            ..
+        })
+    ));
     assert!(matches!(
         host.reserve("other", false),
         Err(Refusal::ExtensionUnavailable)
@@ -945,6 +958,11 @@ async fn any_other_contract_seals_open_lives_and_a_later_supported_hello_revives
             hello["contract"] = contract.clone();
         }
         host.on_extension(hello);
+        assert_eq!(
+            message(&mut queue).await["type"],
+            "incompatible",
+            "contract {contract}"
+        );
         // The bound client's target creation is refused before anything reaches the extension.
         let opened = host
             .session_request(
@@ -1036,7 +1054,10 @@ async fn an_agent_download_is_kept_in_its_session_before_the_browser_copy_goes()
         .await
         .unwrap_or_else(|_| panic!("refused"));
     assert_eq!(failed, json!({ "error": "interrupted" }));
-    // Another session's download never reaches this one, and nothing is let go for it.
+    // The kept file moved out of the browser's folder; another session's download, a new file
+    // there, never reaches this one, and nothing is let go for it.
+    assert!(!source.exists());
+    std::fs::write(&source, b"%PDF other").unwrap();
     host.on_extension(json!({
         "type": "download", "group": "elsewhere", "id": 9, "urls": ["http://site/other"],
         "state": "complete", "path": source.to_str().unwrap(),

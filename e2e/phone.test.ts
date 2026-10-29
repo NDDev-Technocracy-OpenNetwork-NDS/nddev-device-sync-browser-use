@@ -45,6 +45,8 @@ let fixture: ReturnType<typeof Bun.serve>;
 let origin: string;
 // What the link ran in the phone's shell, as the owner's phone would run it.
 const shells: string[] = [];
+// The open DevTools streams, which the test cuts as Android does when it stops the browser.
+const streams = new Set<Socket>();
 
 function required(name: string): string {
   const value = process.env[name];
@@ -133,6 +135,8 @@ function fakeAdb(devtools: number): Server {
           upstream.pipe(client);
           client.on("error", () => upstream.destroy());
           upstream.on("error", () => client.destroy());
+          streams.add(client);
+          client.on("close", () => streams.delete(client));
           return;
         }
         fail("unknown service");
@@ -306,6 +310,22 @@ test("closing the session closes its tabs on the phone", async () => {
     10_000,
   );
   expect(observer.pages().some((page) => page.url() === `${origin}/owner`)).toBe(true);
+});
+
+// Android stops a browser in the background; `phone serve` waits for it and serves it again.
+test("the phone's host comes back when the browser does", async () => {
+  for (const stream of streams) stream.destroy();
+  await until(
+    async () => (await phone("status")).code !== 0,
+    "the host ending with the browser",
+    10_000,
+  );
+  await until(
+    async () => (await phone("status")).body.enabled === true,
+    "the host serving the browser again",
+    20_000,
+  );
+  expect(JSON.stringify((await phone("session", "list")).body)).toBe("[]");
 });
 
 test("the owner's stop ends the phone's host", async () => {
