@@ -30,6 +30,7 @@ form or why it is left out.
 | `stream` (live RTMP streaming) | Left out: it sends the owner's tab to an outside service. `recording` keeps video on the device. |
 | `chrome` (Ghost Browser APIs) | Left out: Ghost Browser only. |
 | `cloud` | Left out: a vendor service. |
+| Performance examples | Same kind, in the guide and checked in e2e: buffered web vitals, `Performance.getMetrics`, CPU and network throttling, measures of the agent's own steps. Chrome gives extensions no `Profiler` domain, so neither offers a CPU profile. |
 | Bot checks | Never solved or bypassed. `checks()` reports them and `notifyOwner()` hands them to the owner. |
 
 ## Results

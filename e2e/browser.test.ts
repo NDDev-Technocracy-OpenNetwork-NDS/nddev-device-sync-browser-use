@@ -1133,6 +1133,36 @@ test("screenshots leave the ghost cursor out and a bare page says how to get one
   expect(String(bare.body.output)).toContain("There is no global `page`");
 });
 
+// The guide's performance recipes work through the extension: buffered web vitals, CDP counters,
+// CPU throttling and measures of the agent's own steps.
+test("the guide's performance recipes measure an agent page", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/article");
+     const vitals = await page.evaluate(() => new Promise((done) => {
+       const seen = { paints: {}, cls: 0 };
+       new PerformanceObserver((list) => { for (const e of list.getEntries()) seen.paints[e.name] = e.startTime; }).observe({ type: "paint", buffered: true });
+       setTimeout(() => done(seen), 300);
+     }));
+     const cdp = await getCDPSession({ page });
+     await cdp.send("Performance.enable");
+     const metrics = Object.fromEntries((await cdp.send("Performance.getMetrics")).metrics.map((m) => [m.name, m.value]));
+     await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+     await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+     const measured = await page.evaluate(() => { performance.mark("a"); let x = 0; for (let i = 0; i < 1e6; i++) x += i; performance.mark("b"); return performance.measure("work", "a", "b").duration >= 0; });
+     await cdp.detach(); await page.close();
+     return JSON.stringify({ paint: "first-paint" in vitals.paints || "first-contentful-paint" in vitals.paints, nodes: metrics.Nodes > 0, measured })`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body).toMatchObject({ failure: null });
+  expect(JSON.parse(String(result.body.value))).toEqual({
+    paint: true,
+    nodes: true,
+    measured: true,
+  });
+});
+
 // Agent code loads modules, and reads the elements the owner pinned with right-click. The menu
 // itself is browser chrome, so the pin is applied the way the extension applies it.
 test("agent code loads modules and lists the elements the owner pinned", async () => {

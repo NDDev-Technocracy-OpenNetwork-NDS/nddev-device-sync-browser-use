@@ -293,6 +293,29 @@ one exists.
 - **Before a destructive action,** such as delete, send or pay, confirm the target with a snapshot
   or a labelled screenshot.
 
+## Performance
+
+- **Web vitals.** Paints and layout shifts come from the page's own buffered entries:
+  ```js
+  await state.page.evaluate(() => new Promise((done) => {
+    const vitals = { paints: {}, cls: 0 };
+    new PerformanceObserver((list) => { for (const e of list.getEntries()) vitals.paints[e.name] = e.startTime; })
+      .observe({ type: "paint", buffered: true });
+    new PerformanceObserver((list) => { for (const e of list.getEntries()) if (!e.hadRecentInput) vitals.cls += e.value; })
+      .observe({ type: "layout-shift", buffered: true });
+    setTimeout(() => done(vitals), 500);
+  }));
+  ```
+- **Counters.** `const cdp = await getCDPSession({ page: state.page }); await cdp.send("Performance.enable");`
+  then `(await cdp.send("Performance.getMetrics")).metrics` gives script, layout and task time, heap
+  size and node counts.
+- **Slow devices.** `Emulation.setCPUThrottlingRate({ rate: 4 })` and
+  `Network.emulateNetworkConditions` slow only the agent tab; reset both (`rate: 1`, `offline:
+  false, latency: 0, downloadThroughput: -1, uploadThroughput: -1`) before you finish.
+- **Timing your own steps.** Chrome gives extensions no `Profiler` domain, so there is no CPU
+  profile. Wrap the work in `performance.mark()` and `performance.measure()` in the page, and
+  compare `ScriptDuration` and `TaskDuration` of `Performance.getMetrics` before and after.
+
 ## Activity
 
 In the owner's full observation profile, everything agents do in agent tabs is kept in an activity
