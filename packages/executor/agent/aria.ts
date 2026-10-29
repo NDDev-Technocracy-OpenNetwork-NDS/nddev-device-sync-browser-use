@@ -30,6 +30,9 @@ type AXNode = {
   backendDOMNodeId?: BackendNodeId | undefined;
 };
 
+// The longest a snapshot waits for two animation frames before it reads the accessibility tree.
+const FRAME_WAIT_MS = 120;
+
 export interface AriaRef {
   role: string;
   name: string;
@@ -902,25 +905,30 @@ export async function getAriaSnapshot({
       session.send("DOM.enable"),
       session.send("Accessibility.enable"),
       // Blink updates its AX cache during rendering, after framework navigation changes the DOM.
-      (resolvedFrame || page).evaluate(() => {
+      // Layout is forced first; two animation frames then let a framework's update render. A
+      // window that is occluded or not focused gets about one animation frame a second, which
+      // made every snapshot in the owner's own browser wait about 1.7 s, so that wait is bounded.
+      (resolvedFrame || page).evaluate((bound: number) => {
         return new Promise<void>((resolve) => {
           const window = document.defaultView;
           if (!window) {
             resolve();
             return;
           }
+          document.documentElement.getBoundingClientRect();
           if (document.visibilityState !== "visible") {
-            document.documentElement.getBoundingClientRect();
             resolve();
             return;
           }
+          const timer = window.setTimeout(resolve, bound);
           window.requestAnimationFrame(() => {
             window.requestAnimationFrame(() => {
+              window.clearTimeout(timer);
               resolve();
             });
           });
         });
-      }),
+      }, FRAME_WAIT_MS),
     ]);
 
     if (scopeLocator) {

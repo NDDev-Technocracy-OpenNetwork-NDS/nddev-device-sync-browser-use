@@ -627,6 +627,32 @@ async function content(): Promise<void> {
   expect(seen.go).toBe('getByRole("button", { name: "Go", exact: true })');
 }
 
+// A window that is occluded or not focused gets animation frames about once a second or not at
+// all; a snapshot still reads the page at once instead of waiting for them.
+test("a snapshot does not wait on animation frames the window does not get", async () => {
+  await opened("frames");
+  try {
+    const result = await run(
+      "frames",
+      `const page = await context.newPage();
+       await page.setContent('<main><h1>Frames</h1><button>Go</button></main>');
+       await page.evaluate(() => { window.requestAnimationFrame = () => 0; });
+       const started = Date.now();
+       const view = await snapshot({ page });
+       const spent = Date.now() - started;
+       await page.close();
+       return JSON.stringify({ spent, button: view.includes('role=button[name="Go"i]') })`,
+      "--timeout",
+      "15000",
+    );
+    const seen = JSON.parse(String(result.body.value)) as { spent: number; button: boolean };
+    expect(seen.button).toBe(true);
+    expect(seen.spent).toBeLessThan(1000);
+  } finally {
+    await cli("session", "close", "frames", "--close-tabs");
+  }
+});
+
 // A locator that matches several elements fails with Playwright's strict mode error, which lists
 // every match with a locator of its own; the result keeps that list.
 test("a strict mode violation lists every match so the agent can pick one", async () => {
