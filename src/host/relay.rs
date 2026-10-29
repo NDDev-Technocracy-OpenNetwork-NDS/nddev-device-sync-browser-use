@@ -447,6 +447,7 @@ impl Host {
                 }))
             }
             "Browser.setDownloadBehavior" => self.set_downloads(project, &params),
+            "NDS.takeDownload" => self.take_download(project, &params).await,
             "Target.setDiscoverTargets" => Ok(json!({})),
             "Target.setAutoAttach" => {
                 let mut state = self.state();
@@ -665,6 +666,7 @@ mod tests {
                 used: Instant::now(),
                 aliases,
                 downloads: None,
+                files: Default::default(),
             },
         );
         assert_eq!(tab_aliases(&state.sessions["nds"], 7), ["tab-7"]);
