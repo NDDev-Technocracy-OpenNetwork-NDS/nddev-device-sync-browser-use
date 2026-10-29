@@ -200,10 +200,17 @@ one exists.
 
 ### Recording and DevTools
 
-- **`recording.start({ page, outputPath })`** records a tab as video, with a ghost cursor that
-  follows your mouse actions. **`recording.stop({ page })`** returns the file and the execution
-  times. **`ghostCursor.show({ page, style })`** and **`ghostCursor.hide({ page })`** control the
-  cursor outside recordings.
+- **`state.video = await recording.start({ page, outputPath })`** records a tab as video, with a
+  ghost cursor that follows your mouse actions; keep the handle in `state`.
+  - **`await state.video.stop()`** returns the file and the execution times;
+    `recording.stop({ page })` does the same by page. **`cancel()`** keeps no file.
+  - **`setPage(otherPage)`** films another tab from now on.
+  - `clock: "manual"` films only **`await state.video.wait(ms)`**, so your thinking stays out.
+  - `audio: true` adds the page's sound.
+  - `aspectRatio: { width: 16, height: 9 }` fits the viewport while recording and restores it.
+  - `.mp4`, `.mov`, `.mkv` or `.webm`. The file appears only when it is complete.
+- **`ghostCursor.show({ page, style })`** and **`ghostCursor.hide({ page })`** control the cursor
+  outside recordings.
 - **`createDemoVideo({ recordingPath, durationMs, executionTimestamps })`** speeds up the waits
   between executions. Keep its promise in `state` and await it in a later execution.
   Recording needs ffmpeg.

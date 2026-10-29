@@ -245,6 +245,8 @@ beforeAll(async () => {
         // new tab, and the frame of another site offers its own link.
         "/files": `<title>Files</title><a id="bytes" href="/files/bytes">Bytes</a><a id="moved" href="/files/moved">Moved</a><a id="once" href="/files/once">Once</a><form method="post" action="/files/post"><button id="post">Post</button></form><button id="blob" onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['blob body'])); a.download = 'made.txt'; a.click(); window.URL.revokeObjectURL(a.href)">Blob</button><a id="tab" href="/files/plain" target="_blank">Tab</a><button id="open" onclick="window.open('/files/once')">Open</button><iframe src="http://localhost:${fixture?.port}/files-frame"></iframe>`,
         "/files-frame": `<a id="inner" href="/files/plain">Inner</a>`,
+        // A tone the page plays through Web Audio once a button is pressed.
+        "/tone": `<title>Tone</title><button id="tone" onclick="const audio = new AudioContext(); const tone = audio.createOscillator(); tone.frequency.value = 440; tone.connect(audio.destination); tone.start()">Tone</button>`,
         // A form for the recorder: a password field whose label names no secret, and a status
         // region that announces the save.
         "/record": `<title>Record</title><input id="name" aria-label="Name"><input id="word" type="password" aria-label="Kennwort"><button id="save" onclick="document.getElementById('status').textContent = 'Saved ' + document.getElementById('name').value">Save</button><div role="status" id="status"></div>`,
@@ -333,6 +335,8 @@ beforeAll(async () => {
     executablePath: chrome,
     headless: true,
     env,
+    // Tabs keep their window's own size, as in the owner's browser: the observer emulates none.
+    viewport: null,
     args: [
       "--remote-debugging-port=0",
       `--disable-extensions-except=${installed},${foreign}`,
@@ -864,6 +868,115 @@ async function recorded(): Promise<void> {
   expect(streams[0]?.sample_aspect_ratio ?? "1:1").toBe("1:1");
   expect((streams[0]?.width ?? 1) % 2).toBe(0);
 }
+
+// Recording parity with Playwriter: a handle to keep, a manual clock that films only `wait(ms)`, a
+// file that appears complete, other containers, another tab mid-recording, a viewport fitted to
+// an aspect ratio and restored, and the page's own sound. Skipped without ffmpeg.
+test.skipIf(Bun.which("ffmpeg") === null)(
+  "recordings film the manual clock, move between tabs and keep the page's sound",
+  async () => {
+    await opened("filming");
+    const probe = (path: string, entries: string) =>
+      JSON.parse(
+        Bun.spawnSync([
+          "ffprobe",
+          "-v",
+          "error",
+          "-show_entries",
+          entries,
+          "-of",
+          "json",
+          path,
+        ]).stdout.toString(),
+      ) as { format?: { duration?: string }; streams?: Record<string, unknown>[] };
+    try {
+      const manual = await run(
+        "filming",
+        `const fs = require("node:fs");
+         const page = await context.newPage(); await page.goto("${origin}/?manual");
+         const path = artifacts + "/manual.webm";
+         const handle = await recording.start({ page, outputPath: path, clock: "manual" });
+         const before = fs.existsSync(path);
+         await page.waitForTimeout(1500);
+         await handle.wait(1000);
+         await page.waitForTimeout(800);
+         const done = await handle.stop(); await page.close();
+         return JSON.stringify({ before, path: done.path, clock: handle.clock, recording: handle.isRecording })`,
+        "--timeout",
+        "20000",
+      );
+      expect(manual.body).toMatchObject({ failure: null });
+      const filmed = JSON.parse(String(manual.body.value));
+      expect(filmed).toMatchObject({ before: false, clock: "manual", recording: false });
+      const webm = probe(filmed.path, "format=duration:stream=codec_name");
+      expect(Number(webm.format?.duration)).toBeGreaterThan(0.8);
+      expect(Number(webm.format?.duration)).toBeLessThan(1.5);
+      expect(webm.streams?.[0]?.codec_name).toBe("vp8");
+
+      const moved = await run(
+        "filming",
+        `const first = await context.newPage(); await first.goto("${origin}/?first");
+         const second = await context.newPage(); await second.goto("${origin}/linked");
+         const inner = (page) => page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+         const size = await inner(first);
+         const handle = await recording.start({ page: first, outputPath: artifacts + "/moved.mp4", aspectRatio: { width: 1, height: 1 } });
+         const fitted = await inner(first);
+         await first.waitForTimeout(600);
+         await handle.setPage(second);
+         const back = await inner(first);
+         const square = await inner(second);
+         await second.waitForTimeout(600);
+         const done = await handle.stop();
+         const after = await inner(second);
+         await first.close(); await second.close();
+         return JSON.stringify({ size, fitted, back, square, after, page: handle.page === second, path: done.path })`,
+        "--timeout",
+        "20000",
+      );
+      expect(moved.body).toMatchObject({ failure: null });
+      const switched = JSON.parse(String(moved.body.value));
+      expect(switched.fitted.width).toBe(switched.fitted.height);
+      expect(switched.back).toEqual(switched.size);
+      expect(switched.square.width).toBe(switched.square.height);
+      expect(switched.after).toEqual(switched.size);
+      expect(switched.page).toBe(true);
+      const mp4 = probe(switched.path, "format=duration:stream=width,height");
+      expect(Number(mp4.format?.duration)).toBeGreaterThan(1);
+      expect(mp4.streams?.[0]?.width).toBe(mp4.streams?.[0]?.height);
+
+      const sound = await run(
+        "filming",
+        `const page = await context.newPage(); await page.goto("${origin}/tone");
+         const handle = await recording.start({ page, outputPath: artifacts + "/tone.mp4", audio: true });
+         await page.click("#tone");
+         await page.waitForTimeout(2000);
+         const done = await handle.stop(); await page.close();
+         return done.path`,
+        "--timeout",
+        "20000",
+      );
+      expect(sound.body).toMatchObject({ failure: null });
+      const audio = probe(String(sound.body.value), "stream=codec_type,codec_name");
+      expect(audio.streams?.map((stream) => stream.codec_type).sort()).toEqual(["audio", "video"]);
+      const volume = Bun.spawnSync([
+        "ffmpeg",
+        "-hide_banner",
+        "-i",
+        String(sound.body.value),
+        "-af",
+        "volumedetect",
+        "-f",
+        "null",
+        "-",
+      ]).stderr.toString();
+      const peak = Number(/max_volume: (-?[\d.]+) dB/.exec(volume)?.[1] ?? "-91");
+      expect(peak).toBeGreaterThan(-30);
+    } finally {
+      await cli("session", "close", "filming", "--close-tabs");
+    }
+  },
+  90_000,
+);
 
 // DevTools helpers over raw CDP: matched CSS rules, a live script edit, and a breakpoint with its
 // local variables and an expression evaluated in the paused frame.

@@ -23,7 +23,7 @@ form or why it is left out.
 | `screenshotWithAccessibilityLabels`, `resizeImage`, `resizeImageForAgent` | Same; images stay in `artifacts`. |
 | `getLocatorStringForElement` | Same. |
 | `inspectPinnedElement`, right-click pinning | Same, with "Pin this element for the NDS agent" and `pinnedElements({ page })`. |
-| `recording`, `ghostCursor`, `createDemoVideo` | Same. |
+| `recording`, `ghostCursor`, `createDemoVideo` | Same engine, ported: a handle with `stop`, `cancel`, `setPage` and the manual clock's `wait(ms)`, a constant frame rate, page audio, a hardware H.264 encoder where one works, `.mp4`/`.mov`/`.mkv`/`.webm` written atomically. Better on the owner's tabs: `aspectRatio` also fits a tab without an emulated viewport and clears the override after; Playwriter leaves such a tab as it is. |
 | `getCDPSession`, `createDebugger`, `createEditor`, `getStylesForLocator`, `formatStylesAsText`, `getReactComponentInfo`, `getReactSource` | Same. |
 | Human-action recorder | Same engine: Playwright's codegen recorder gives each action its locator, code and aria snapshot, with live-region messages and frames. Better on secrets: Playwriter hides every typed value; here a value stays unless its field is a password, one-time-code or card field by what it is, and a snapshot shows field values only when they were typed into such plain fields. The timeline lives in the activity journal beside the pages' requests, and needs the full observation profile. |
 | `resetPlaywright` | Left out: a stuck script is aborted at its deadline, and an executor that cannot answer is replaced on fresh debugger sessions. |
