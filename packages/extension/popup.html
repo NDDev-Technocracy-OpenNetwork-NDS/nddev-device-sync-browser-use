@@ -6,12 +6,27 @@
     <style>
       body { font: 13px system-ui, sans-serif; margin: 12px; min-width: 220px; }
       button { margin-top: 8px; width: 100%; padding: 6px; }
+      fieldset { border: 0; margin: 12px 0 0; padding: 0; }
+      legend { font-weight: 600; padding: 0; }
+      .profiles { display: flex; gap: 4px; }
+      .profiles button { margin-top: 6px; }
+      .profiles button[aria-pressed="true"] { font-weight: 600; outline: 2px solid currentColor; }
+      #observation { color: GrayText; margin: 6px 0 0; }
     </style>
   </head>
   <body>
     <strong>NDS agent control</strong>
     <p id="state">…</p>
     <button id="toggle" type="button" disabled>…</button>
+    <fieldset>
+      <legend>Observation</legend>
+      <div class="profiles">
+        <button type="button" data-profile="full" aria-pressed="false" disabled>Full</button>
+        <button type="button" data-profile="standard" aria-pressed="false" disabled>Standard</button>
+        <button type="button" data-profile="off" aria-pressed="false" disabled>Off</button>
+      </div>
+      <p id="observation"></p>
+    </fieldset>
     <p><a href="https://nddev.ai" target="_blank" rel="noreferrer">NDDev OpenNetwork</a></p>
     <script type="module" src="popup.js"></script>
   </body>

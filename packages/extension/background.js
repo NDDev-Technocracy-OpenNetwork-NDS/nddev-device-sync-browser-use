@@ -5,6 +5,9 @@ import { Restore, restricted } from "./restore.js";
 const HOST = "ai.nddev.nds.browser_use";
 const PROTOCOL = "1.3";
 const ENABLED = "enabled";
+// The owner's observation profile (docs/observability.md): what agent activity is collected.
+const OBSERVATION = "observation";
+const OBSERVATIONS = ["full", "standard", "off"];
 const GROUPS = "groups";
 const RELOADED_FOR = "reloadedFor";
 const OWNER = "owner:";
@@ -39,6 +42,7 @@ class Refusal extends Error {
 }
 let port;
 let enabled = true;
+let observation = "full";
 let retry = 1000;
 // Group key -> Chrome group id. Persisted for worker restarts in this browser session.
 let groups = new Map();
@@ -78,8 +82,9 @@ async function command(target, method, params) {
     }
 }
 async function load() {
-    const local = await chrome.storage.local.get(ENABLED);
+    const local = await chrome.storage.local.get([ENABLED, OBSERVATION]);
     enabled = local[ENABLED] !== false;
+    observation = OBSERVATIONS.find((profile) => profile === local[OBSERVATION]) ?? "full";
     const session = await chrome.storage.session.get(GROUPS);
     groups = new Map(Object.entries((session[GROUPS] ?? {})));
     await badge();
@@ -129,6 +134,7 @@ function connect() {
         enabled,
         // The host takes agent downloads' files from this worker (see `downloads` below).
         downloads: chrome.downloads !== undefined,
+        observation,
     });
     void badge();
 }
@@ -1166,6 +1172,11 @@ chrome.tabGroups.onRemoved.addListener((group) => {
 // The owner's switch in the action popup: disabling detaches every agent tab
 // and the host refuses new work until it is enabled again.
 // The intent reaches the host at once; ending the attachments may take longer or partly fail.
+async function setObservation(profile) {
+    observation = profile;
+    send({ type: "observation", profile });
+    await chrome.storage.local.set({ [OBSERVATION]: profile });
+}
 async function setEnabled(value) {
     enabled = value;
     if (!enabled)
@@ -1183,12 +1194,18 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("")))
         return false;
     if (message.type === "set" && typeof message.enabled === "boolean") {
-        void setEnabled(message.enabled).then(() => reply({ enabled, connected: port !== undefined }));
+        void setEnabled(message.enabled).then(() => reply({ enabled, observation, connected: port !== undefined }));
+        return true;
+    }
+    const profile = OBSERVATIONS.find((each) => each === message.profile);
+    if (message.type === "observe" && profile) {
+        void setObservation(profile).then(() => reply({ enabled, observation, connected: port !== undefined }));
         return true;
     }
     if (message.type === "get")
         reply({
             enabled,
+            observation,
             connected: port !== undefined,
             tabs: [...attached.keys()].filter(usable).length,
         });

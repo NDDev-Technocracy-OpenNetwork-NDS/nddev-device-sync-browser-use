@@ -15,7 +15,8 @@ import { createReadStream } from "node:fs";
 import { copyFile, mkdir, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import type { CDPSession, Download, Page } from "playwright-core";
+import type { Download, Page } from "playwright-core";
+import { hostCommand } from "./host";
 
 // Bytes per `IO.read`, so a large file never crosses CDP as one reply.
 const CHUNK = 1 << 20;
@@ -102,8 +103,6 @@ async function obtain(
   return local;
 }
 
-let browserSession: Promise<CDPSession | undefined> | undefined;
-
 type Kept = {
   file?: string;
   error?: string;
@@ -117,12 +116,6 @@ async function fromHost(
   path: () => Promise<string>,
   signal: AbortSignal,
 ): Promise<string | undefined> {
-  browserSession ??= Promise.resolve(download.page().context().browser()?.newBrowserCDPSession())
-    .then((session) => session ?? undefined)
-    .catch(() => undefined);
-  const cdp = await browserSession;
-  if (!cdp) return undefined;
-  const ask = cdp.send.bind(cdp) as unknown as (method: string, params: object) => Promise<Kept>;
   // The browser's own end of the download: once it is long past and the host still knows nothing,
   // the host never will.
   let ended: number | undefined;
@@ -139,9 +132,10 @@ async function fromHost(
   const started = Date.now();
   for (;;) {
     signal.throwIfAborted();
-    const answer = await ask("NDS.takeDownload", { url: download.url(), waitMs: ASK_MS }).catch(
-      () => ({ unsupported: true }) as Kept,
-    );
+    const answer: Kept = (await hostCommand<Kept>("NDS.takeDownload", {
+      url: download.url(),
+      waitMs: ASK_MS,
+    })) ?? { unsupported: true };
     if (answer.file) return answer.file;
     if (answer.error) {
       throw new Error(

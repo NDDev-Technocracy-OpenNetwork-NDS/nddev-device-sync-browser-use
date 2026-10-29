@@ -5,6 +5,7 @@
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserContext, CDPSession, Page } from "playwright-core";
+import { observation } from "./host";
 
 const FRAME_INTERVAL_MS = 500;
 const MAX_BYTES = 500 * 1024 * 1024;
@@ -278,6 +279,11 @@ async function start(
   artifacts: string,
 ): Promise<{ id: string; path: string }> {
   if (current) throw new Error(`recording ${current.id} is already active`);
+  if (observation() === "off") {
+    throw new Error(
+      "Observation is off in the extension's popup; the recorder collects nothing while it is off",
+    );
+  }
   const id = String(finished.size + 1);
   const dir = outputDir ?? join(artifacts, "recordings", id);
   await mkdir(join(dir, "frames"), { recursive: true });

@@ -768,6 +768,8 @@ dependencies = [
  "nddev-device-sync-telemetry",
  "opentelemetry",
  "opentelemetry_sdk",
+ "percent-encoding",
+ "regex",
  "rustix",
  "serde",
  "serde_json",

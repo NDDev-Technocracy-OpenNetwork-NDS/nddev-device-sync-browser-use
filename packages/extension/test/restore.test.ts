@@ -184,7 +184,7 @@ test("setup commands in flight hold their room, so only one of two fits the last
   restore.record(1, script, { source: "a" }, { identifier: "ca" });
   if (first) first();
   const sent: string[] = [];
-  restore.replay(1, async (method) => {
+  void restore.replay(1, async (method) => {
     sent.push(method);
     return { identifier: "x" };
   });

@@ -11,6 +11,8 @@ pub mod view;
 pub use protocol::OwnedSession;
 
 #[cfg(any(unix, windows))]
+pub mod activity;
+#[cfg(any(unix, windows))]
 mod adapter;
 #[cfg(any(unix, windows))]
 pub mod artifact;
