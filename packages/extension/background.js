@@ -488,6 +488,8 @@ function ended(tab, attachment) {
         return;
     attached.delete(tab);
     restore.endSession(tab);
+    // No agent holds the tab any more, so nobody would clear its check or act on it.
+    void chrome.notifications.clear(`${OWNER}${tab}`).catch(() => undefined);
 }
 // Removes other extensions' frames from an agent tab before a debugger session starts on it:
 // Chrome refuses to attach to a tab that holds one, and detaches from a tab when one navigates.
@@ -638,7 +640,8 @@ function liveIn(groupId) {
 }
 // A check in an agent tab that only a person passes, such as a CAPTCHA. One notification per tab
 // names the agent and the site and stays until the owner opens the tab from it, the agent clears
-// it, or the tab closes. The agent keeps working meanwhile.
+// it, or the agent's hold on the tab ends: its session closed, the tab left the agent group, or
+// it closed. A notification never outlives the check it asks for. The agent keeps working.
 async function notifyOwner(tab, params) {
     const reason = params?.reason;
     const page = await chrome.tabs.get(tab);
@@ -651,9 +654,24 @@ async function notifyOwner(tab, params) {
             ? reason.trim().slice(0, 200)
             : "A check in its tab needs a person.",
         contextMessage: page.url ? new URL(page.url).host : "",
+        buttons: [{ title: "Open the tab" }],
         requireInteraction: true,
     });
     return { notification: id };
+}
+// The owner opens the tab a notification asks for: its group is expanded, the tab made active and
+// its window brought forward or, where the desktop refuses focus, marked for attention.
+async function openForOwner(tab) {
+    const page = await chrome.tabs.get(tab).catch(() => undefined);
+    if (!page)
+        return;
+    if (page.groupId >= 0) {
+        await chrome.tabGroups.update(page.groupId, { collapsed: false }).catch(() => undefined);
+    }
+    await chrome.tabs.update(tab, { active: true }).catch(() => undefined);
+    await chrome.windows
+        .update(page.windowId, { focused: true, drawAttention: true })
+        .catch(() => undefined);
 }
 async function clearOwner(tab) {
     await chrome.notifications.clear(`${OWNER}${tab}`);
@@ -714,15 +732,22 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     if (info.menuItemId === PIN && tab?.id !== undefined)
         void pin(tab.id).catch(() => undefined);
 });
-chrome.notifications.onClicked.addListener((id) => {
+function ownerOpened(id) {
     if (!id.startsWith(OWNER))
         return;
-    void chrome.notifications.clear(id);
-    void chrome.tabs
-        .update(Number(id.slice(OWNER.length)), { active: true })
-        .then((tab) => tab && chrome.windows.update(tab.windowId, { focused: true }))
-        .catch(() => undefined);
-});
+    void chrome.notifications.clear(id).catch(() => undefined);
+    void openForOwner(Number(id.slice(OWNER.length)));
+}
+chrome.notifications.onClicked.addListener(ownerOpened);
+chrome.notifications.onButtonClicked?.addListener((id) => ownerOpened(id));
+// Owner notifications of an earlier worker point at checks and holds this worker does not know;
+// they are cleared rather than left to open a tab no agent watches.
+void chrome.notifications
+    .getAll?.()
+    .then((all) => Promise.all(Object.keys(all ?? {})
+    .filter((id) => id.startsWith(OWNER))
+    .map((id) => chrome.notifications.clear(id))))
+    .catch(() => undefined);
 // A removed tab ends its debugger session; Chrome may report the removal before the detach.
 chrome.tabs.onRemoved.addListener((tab) => {
     void chrome.notifications.clear(`${OWNER}${tab}`);
