@@ -309,7 +309,8 @@ one exists.
   `createReadStream()` and `failure()` work too, also after the page closed. The file is the one the
   browser saved, kept in the session, so a form's POST, a link that works once and a `blob:` all
   work, and the owner's download folder keeps no copy. A file that opens in a new tab is reported on
-  the tab that opened it.
+  the tab that opened it; its `suggestedFilename()` is the name the browser saved it under, so it
+  reads `report (1).pdf` when the owner's folder already holds a `report.pdf`.
 - **Before a destructive action,** such as delete, send or pay, confirm the target with a snapshot
   or a labelled screenshot.
 

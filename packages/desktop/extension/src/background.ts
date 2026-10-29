@@ -275,7 +275,9 @@ type AgentDownload = {
 // matched to either, and the agent's downloads.
 const announced: Candidate[] = [];
 const openedUrls: Candidate[] = [];
-const unmatched = new Map<number, { urls: string[]; at: number }>();
+// A download not yet matched remembers that it ended: a small file can be complete before its
+// agent tab's CDP event reaches this worker on a loaded machine.
+const unmatched = new Map<number, { urls: string[]; at: number; ended?: boolean }>();
 const agentDownloads = new Map<number, AgentDownload>();
 // Tabs agent tabs opened, and the CDP guids of their own download events, which are not relayed.
 const openedTabs = new Map<number, number>();
@@ -311,15 +313,19 @@ function announce(tab: number, method: string, fields: Record<string, unknown>):
   if (!group || !url) return true;
   const waiting = [...unmatched].find(([, item]) => item.urls.includes(url));
   if (waiting) {
-    unmatched.delete(waiting[0]);
-    agentDownloads.set(waiting[0], {
+    const [id, item] = waiting;
+    unmatched.delete(id);
+    const download: AgentDownload = {
       group,
       tab,
-      urls: waiting[1].urls,
+      urls: item.urls,
       ...(name ? { name } : {}),
       begun: true,
       steps: Promise.resolve(),
-    });
+    };
+    agentDownloads.set(id, download);
+    // Its end was reported while it was nobody's yet.
+    if (item.ended) step(download, () => finish(id, download));
   } else {
     note(announced, { group, tab, url, at: Date.now(), ...(name ? { name } : {}) });
   }
@@ -446,10 +452,14 @@ function step(download: AgentDownload, next: () => Promise<void>): void {
 }
 
 chrome.downloads?.onChanged.addListener((delta) => {
-  const download = agentDownloads.get(delta.id);
-  if (!download) return;
   const state = delta.state?.current;
   const ended = state === "complete" || state === "interrupted";
+  const download = agentDownloads.get(delta.id);
+  if (!download) {
+    const waiting = unmatched.get(delta.id);
+    if (waiting && ended) waiting.ended = true;
+    return;
+  }
   if (delta.filename?.current || ended) {
     step(download, async () => {
       const [item] = await chrome.downloads.search({ id: delta.id }).catch(() => []);
