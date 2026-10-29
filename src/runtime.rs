@@ -9,6 +9,21 @@ use std::path::{Path, PathBuf};
 /// terminator.
 const SOCKET_PATH_LIMIT: usize = 100;
 
+/// The phone this process works with, once chosen (`--phone`): its host has its own runtime
+/// directory beside the desktop host's.
+static PHONE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Chooses the phone whose host this process serves or talks to; once, before any directory is
+/// used.
+pub fn choose_phone(serial: &str) -> Result<(), IoError> {
+    if !crate::mobile::adb::valid_serial(serial) {
+        return Err(IoError::InvalidConfiguration);
+    }
+    PHONE
+        .set(serial.to_owned())
+        .map_err(|_| IoError::InvalidConfiguration)
+}
+
 pub(crate) fn directory() -> Result<PathBuf, IoError> {
     let path = match std::env::var_os("NDS_BROWSER_USE_RUNTIME_DIR") {
         Some(path) => PathBuf::from(path),
@@ -17,7 +32,14 @@ pub(crate) fn directory() -> Result<PathBuf, IoError> {
     if !path.is_absolute() {
         return Err(IoError::InvalidConfiguration);
     }
-    Ok(path)
+    match PHONE.get() {
+        Some(serial) => {
+            // The phone's directory lies inside the desktop host's, which must exist first.
+            private_directory(&path)?;
+            Ok(path.join(format!("phone-{}", serial.replace(':', "_"))))
+        }
+        None => Ok(path),
+    }
 }
 
 /// The session's runtime directory on Linux.

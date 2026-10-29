@@ -4,7 +4,7 @@
 #[cfg(any(unix, windows))]
 use nddev_device_sync_browser_use::{
     BrowserUse, BrowserUseClient, CancellationToken, Error, NativeIo, activity, artifact, device,
-    host, install,
+    host, install, mobile,
     protocol::{self, Document},
 };
 use std::process::ExitCode;
@@ -27,7 +27,10 @@ const USAGE: &str = "usage:
   nds-browser-use [--device <name>] -s <project> activity [--all] [--type <type>] [--errors] [--grep <text>] [--exec <id>] [--last <n, at most 10000>] [--full]
   nds-browser-use [--device <name>] -s <project> activity body <sha256>
   nds-browser-use install --bun <path> --executor <path> (--browser <chrome|chrome-beta|chrome-for-testing|chromium> | --host-dir <path>)
-NDS_BROWSER_DEVICE names the default device.";
+  nds-browser-use phones
+  nds-browser-use phone serve <serial> [--socket <name>] [--observation <full|standard|off>]
+  nds-browser-use --phone <serial> <any session command above>
+NDS_BROWSER_DEVICE names the default device; NDS_BROWSER_PHONE the default phone.";
 /// How agents use the tool, printed by `nds-browser-use skill`.
 const AGENT_GUIDE: &str = include_str!("../../docs/agent-guide.md");
 const ARGUMENT_LIMIT: usize = 16;
@@ -46,9 +49,11 @@ async fn main() -> ExitCode {
     if arguments.len() > ARGUMENT_LIMIT {
         return usage();
     }
-    let host_mode = arguments
+    let native = arguments
         .first()
         .is_some_and(|first| first.starts_with("chrome-extension://"));
+    // A phone's host runs in the owner's terminal and reports like the one Chrome starts.
+    let host_mode = native || arguments.get(..2) == Some(&["phone".into(), "serve".into()]);
     // stdout carries native messaging in host mode; local telemetry uses stderr. The host emits
     // browser.* for every client request, so a client writes its own stream only inside an
     // explicit SDK debug window (NDS_LOG_MODE=debug); agents read a client's stderr.
@@ -65,7 +70,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if host_mode {
+    if native {
         // A foreign caller is refused before any local configuration is read.
         if !host::admitted(&arguments[0]) {
             tracing::error!(event.name = "browser.host.failed", outcome = "error", error.type = host_error(&host::HostError::Origin));
@@ -95,8 +100,27 @@ async fn main() -> ExitCode {
         ["--device", name, rest @ ..] => (Some((*name).to_owned()), rest.to_vec()),
         _ => (chosen, words),
     };
+    // A phone's host and its clients use the phone's own runtime directory.
+    let chosen_phone = std::env::var(PHONE_VARIABLE)
+        .ok()
+        .filter(|serial| !serial.is_empty());
+    let (phone, words) = match words.as_slice() {
+        _ if device.is_some() => (None, words),
+        ["--phone", serial, rest @ ..] => (Some((*serial).to_owned()), rest.to_vec()),
+        ["phone", "serve", serial, ..] => (Some((*serial).to_owned()), words),
+        _ => (chosen_phone, words),
+    };
+    if let Some(serial) = &phone
+        && nddev_device_sync_browser_use::choose_phone(serial).is_err()
+    {
+        return refused("invalid_request", "the phone serial is invalid");
+    }
     match words.as_slice() {
-        ["install", ..] if device.is_some() => usage(),
+        ["install", ..] if device.is_some() || phone.is_some() => usage(),
+        ["phones"] if device.is_none() => phones().await,
+        ["phone", "serve", serial, rest @ ..] if device.is_none() => {
+            phone_serve(serial, rest).await
+        }
         ["install", rest @ ..] => install_host(rest),
         ["skill"] => {
             print!("{AGENT_GUIDE}");
@@ -120,6 +144,102 @@ async fn main() -> ExitCode {
 
 #[cfg(any(unix, windows))]
 const DEVICE_VARIABLE: &str = "NDS_BROWSER_DEVICE";
+#[cfg(any(unix, windows))]
+const PHONE_VARIABLE: &str = "NDS_BROWSER_PHONE";
+
+/// The phones the ADB server knows and the browsers each exposes DevTools for.
+#[cfg(any(unix, windows))]
+async fn phones() -> ExitCode {
+    match mobile::phones(&mobile::adb::Server::from_env()).await {
+        Ok(phones) => {
+            print(&serde_json::json!({ "phones": phones }));
+            ExitCode::SUCCESS
+        }
+        Err(_) => refused(
+            "unavailable",
+            "no ADB server answers; start one with `adb start-server`",
+        ),
+    }
+}
+
+/// Runs the host for a phone's browser in the foreground, until the browser or the phone goes
+/// away or the owner stops it.
+#[cfg(any(unix, windows))]
+async fn phone_serve(serial: &str, words: &[&str]) -> ExitCode {
+    let mut socket = None;
+    let mut observation = "full";
+    let mut rest = words;
+    loop {
+        match rest {
+            [] => break,
+            ["--socket", name, tail @ ..] => {
+                socket = Some((*name).to_owned());
+                rest = tail;
+            }
+            [
+                "--observation",
+                profile @ ("full" | "standard" | "off"),
+                tail @ ..,
+            ] => {
+                observation = profile;
+                rest = tail;
+            }
+            _ => return usage(),
+        }
+    }
+    let server = mobile::adb::Server::from_env();
+    let socket = match socket {
+        Some(socket) => socket,
+        None => {
+            let phones = mobile::phones(&server).await.unwrap_or_default();
+            let browsers = phones
+                .iter()
+                .find(|phone| phone.serial == serial)
+                .map(|phone| phone.browsers.as_slice())
+                .unwrap_or_default();
+            match mobile::default_socket(browsers) {
+                Some(socket) => socket.to_owned(),
+                None => {
+                    return refused(
+                        "unavailable",
+                        "no browser on this phone exposes DevTools; see `nds-browser-use phones`",
+                    );
+                }
+            }
+        }
+    };
+    let config = match install::load() {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!(event.name = "browser.host.failed", outcome = "error", error.type = error.code());
+            return ExitCode::from(2);
+        }
+    };
+    tracing::info!(event.name = "browser.phone.connecting", outcome = "pending");
+    // Ctrl-C ends the link, and the host then closes its sessions as when Chrome ends.
+    let stop = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    match mobile::serve(config, server, serial, &socket, observation, stop).await {
+        Ok(ended) => {
+            let reason = match ended {
+                mobile::link::Ended::Browser => "browser_closed",
+                mobile::link::Ended::Host => "host_stopped",
+                mobile::link::Ended::Stopped => "owner_stopped",
+            };
+            tracing::info!(event.name = "browser.phone.stopped", outcome = "stopped", error.type = reason);
+            ExitCode::SUCCESS
+        }
+        Err(mobile::ServeError::Browser) => {
+            tracing::error!(event.name = "browser.phone.failed", outcome = "error", error.type = "browser_unreachable");
+            ExitCode::from(2)
+        }
+        Err(mobile::ServeError::Host(error)) => {
+            tracing::error!(event.name = "browser.host.failed", outcome = "error", error.type = host_error(&error));
+            ExitCode::from(2)
+        }
+    }
+}
 /// How long `devices` waits for each device's status.
 #[cfg(any(unix, windows))]
 const DEVICE_STATUS_TIMEOUT: Duration = Duration::from_secs(20);

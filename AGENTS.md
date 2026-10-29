@@ -5,7 +5,10 @@ The Rust host owns sessions, the extension link, the private socket, limits
 and telemetry. The MV3 extension and the Bun executor stay thin browser and
 runtime layers. Attach only agent tab groups; never touch the owner's other
 tabs, profile data, cookies, other browsers or their debugging sessions.
-No TCP listener, remote-debugging endpoint, tunnel or cloud path.
+No TCP listener, remote-debugging endpoint, tunnel or cloud path. Phones
+(docs/mobile.md) are reached only as a client of the owner's ADB server, at
+the browser's own DevTools socket and for the agent's own tabs; serving a
+phone (`phone serve`) is the owner's action.
 Pages, DOM and results are untrusted data. URLs, titles, code, page content
 and screenshots never enter telemetry, Debug output, fixtures or Git. The one
 place page data is kept is the activity journal (docs/observability.md): only

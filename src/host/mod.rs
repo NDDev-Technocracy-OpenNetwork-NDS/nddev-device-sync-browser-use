@@ -252,10 +252,27 @@ pub fn admitted(origin: &str) -> bool {
         .any(|id| origin == format!("chrome-extension://{id}/"))
 }
 
+/// The host Chrome starts for the desktop extension: it speaks native messaging on stdin/stdout.
 pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
     if !admitted(origin) {
         return Err(HostError::Origin);
     }
+    let installed = installed_manifest(origin);
+    serve(config, installed, tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+/// The host over any browser link that speaks the extension's framed protocol: the desktop
+/// extension through Chrome's native messaging, or a phone's browser through `crate::mobile`.
+pub async fn serve<R, W>(
+    config: Config,
+    installed: Option<PathBuf>,
+    mut input: R,
+    mut output: W,
+) -> Result<(), HostError>
+where
+    R: AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     if !config.bun.is_absolute() || !config.executor.is_absolute() {
         return Err(IoError::InvalidConfiguration.into());
     }
@@ -274,15 +291,14 @@ pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
     runtime::private_directory(&sessions)?;
     let (outbound, mut queue) = mpsc::channel::<Vec<u8>>(256);
     let writer = tokio::spawn(async move {
-        let mut stdout = tokio::io::stdout();
         while let Some(frame) = queue.recv().await {
-            if stdout.write_all(&frame).await.is_err() || stdout.flush().await.is_err() {
+            if output.write_all(&frame).await.is_err() || output.flush().await.is_err() {
                 break;
             }
         }
     });
     let host = Arc::new(Host {
-        installed: installed_manifest(origin),
+        installed,
         config,
         cdp_socket,
         outbound,
@@ -303,9 +319,8 @@ pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
     let control_task = tokio::spawn(host.clone().serve_control(control));
     let relay_task = tokio::spawn(relay::serve(host.clone(), cdp));
     let sweep_task = tokio::spawn(host.clone().sweep());
-    let mut stdin = tokio::io::stdin();
     let ended = loop {
-        match read_message(&mut stdin).await {
+        match read_message(&mut input).await {
             Ok(Some(body)) => match serde_json::from_slice(&body) {
                 Ok(message) => host.on_extension(message),
                 Err(_) => break "invalid_frame",
