@@ -57,6 +57,8 @@ pub struct Config {
     pub executor: PathBuf,
     /// The activity journal's root: one directory per project (docs/observability.md).
     pub activity: PathBuf,
+    /// The root of the session areas (`runtime::sessions_directory`).
+    pub sessions: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -284,13 +286,13 @@ where
     let cdp = bind(&cdp_socket)?;
     // Owning both sockets proves no other host is alive here, so session areas left by a
     // host that died without its shutdown belong to no session and are removed.
-    let sessions = config.runtime.join("sessions");
+    let sessions = config.sessions.clone();
     match std::fs::remove_dir_all(&sessions) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(IoError::Unavailable.into()),
     }
-    runtime::private_directory(&sessions)?;
+    runtime::private_tree(&sessions)?;
     let (outbound, mut queue) = mpsc::channel::<Vec<u8>>(256);
     let writer = tokio::spawn(async move {
         while let Some(frame) = queue.recv().await {
@@ -1091,7 +1093,7 @@ impl Host {
         }
         let _ = runtime::control_socket(&self.config.runtime).map(std::fs::remove_file);
         let _ = std::fs::remove_file(&self.cdp_socket);
-        let _ = std::fs::remove_dir_all(self.config.runtime.join("sessions"));
+        let _ = std::fs::remove_dir_all(&self.config.sessions);
         Ok(())
     }
 
@@ -1379,7 +1381,7 @@ impl Host {
             project.to_owned(),
             Session {
                 token: token()?,
-                artifacts: self.config.runtime.join("sessions").join(project),
+                artifacts: self.config.sessions.join(project),
                 client: None,
                 life: life.clone(),
                 owned,

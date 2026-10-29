@@ -13,6 +13,7 @@ fn fixture() -> (Arc<Host>, mpsc::Receiver<Vec<u8>>, tempfile::TempDir) {
             bun: std::env::current_exe().unwrap(),
             executor: root.path().join("inert.ts"),
             activity: root.path().join("activity"),
+            sessions: runtime.join("sessions"),
         },
         installed: None,
         cdp_socket: runtime.join("cdp.sock"),
@@ -1036,7 +1037,10 @@ async fn an_agent_download_is_kept_in_its_session_before_the_browser_copy_goes()
         .await
         .unwrap_or_else(|_| panic!("refused"));
     assert_eq!(failed, json!({ "error": "interrupted" }));
-    // Another session's download never reaches this one, and nothing is let go for it.
+    // The kept file moved out of the browser's folder; another session's download, a new file
+    // there, never reaches this one, and nothing is let go for it.
+    assert!(!source.exists());
+    std::fs::write(&source, b"%PDF other").unwrap();
     host.on_extension(json!({
         "type": "download", "group": "elsewhere", "id": 9, "urls": ["http://site/other"],
         "state": "complete", "path": source.to_str().unwrap(),

@@ -37,7 +37,8 @@ Agent code runs as an async function body. It gets:
 - `context` and `browser`;
 - a persistent `state` object;
 - `signal`, its own abort signal;
-- `artifacts`, the session's private directory for screenshots and files, removed with the session;
+- `artifacts`, the session's private directory for screenshots, recordings and downloads, on disk under the
+  user's state directory (`~/.local/state/nds-browser-use/sessions`), removed with the session;
 - the helpers below;
 - `fetch` and timers.
 

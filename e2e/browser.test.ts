@@ -3,6 +3,7 @@
 // for that profile only and drives the agent CLI against a local fixture.
 // A separate Playwright pipe connection observes the browser independently.
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   cpSync,
@@ -37,6 +38,16 @@ const cdpEndpoint = windows
       .replace(/^[A-Za-z]:/, "")
       .replaceAll("\\", "/")
   : `${runtime}/cdp.sock`;
+
+// A session's area: on disk under the state directory, in this host's own root, named by its
+// runtime directory (runtime::sessions_directory).
+function area(project: string): string {
+  const state = windows
+    ? join(process.env.LOCALAPPDATA ?? "", "nds-browser-use")
+    : join(root, "state", "nds-browser-use");
+  const key = createHash("sha256").update(runtime).digest("hex").slice(0, 16);
+  return join(state, "sessions", key, project);
+}
 
 const profile = join(root, "profile");
 // The same layout `just install` creates: the host finds its extension files
@@ -497,7 +508,7 @@ test("the agent answers JavaScript dialogs", async () => {
 });
 
 test("keyboard input and file uploads reach the page", async () => {
-  const upload = join(runtime, "sessions", "acceptance", "upload.txt");
+  const upload = join(area("acceptance"), "upload.txt");
   writeFileSync(upload, "nds");
   const result = await run(
     "acceptance",
@@ -746,7 +757,7 @@ async function content(): Promise<void> {
   expect(seen.shot).toMatch(/^Screenshot: \S+\.jpg \([1-9]\d* labels\)/);
   expect(seen.shot).toContain('button "Go" [ref=');
   expect(seen.shot).not.toContain("[box=");
-  expect(seen.path?.startsWith(join(runtime, "sessions", "content"))).toBe(true);
+  expect(seen.path?.startsWith(area("content"))).toBe(true);
   expect(existsSync(seen.path ?? "")).toBe(true);
   if (resize) {
     expect(existsSync(seen.small ?? "")).toBe(true);
@@ -1075,9 +1086,7 @@ test("the recorder turns a person's actions in an agent tab into events and fram
       `const page = await context.newPage(); await page.goto("${origin}/record"); return JSON.stringify(await recorder.start())`,
     );
     expect(started.body).toMatchObject({ failure: null });
-    expect(JSON.parse(String(started.body.value)).path).toStartWith(
-      join(runtime, "sessions", "recorder"),
-    );
+    expect(JSON.parse(String(started.body.value)).path).toStartWith(area("recorder"));
     // The CLI's recorder commands are the helper's calls.
     const status = await plain("-s", "recorder", "recorder", "status");
     expect(status.code).toBe(0);
@@ -1290,7 +1299,7 @@ test("the guide's performance recipes measure an agent page", async () => {
 test("agent code loads modules and lists the elements the owner pinned", async () => {
   await opened("pins");
   try {
-    writeFileSync(join(runtime, "sessions", "pins", "helper.mjs"), "export const answer = 42;\n");
+    writeFileSync(join(area("pins"), "helper.mjs"), "export const answer = 42;\n");
     const page = await run(
       "pins",
       `state.page = await context.newPage(); await state.page.goto("${origin}/helpers?pins"); return require("node:path").basename("/a/b.txt")`,
@@ -1422,7 +1431,7 @@ test("screenshots are written inside the session area", async () => {
   );
   // Agent code joins with "/", which Windows accepts beside its own separator.
   const path = resolve(String(result.body.value));
-  expect(path).toBe(join(runtime, "sessions", "acceptance", "form.png"));
+  expect(path).toBe(join(area("acceptance"), "form.png"));
   expect([...readFileSync(path).subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
 });
 
@@ -2108,7 +2117,7 @@ test.skipIf(windows)(
     ).toMatchObject({ result: "executed", failure: null, output: "[return value] Owned" });
     expect(await observed("/owned")).toBeDefined();
     // Close while an owned execution runs: the acknowledgement comes only after its executor ended.
-    const executor = join(runtime, "sessions", "owned");
+    const executor = area("owned");
     expect(processes(executor)).toHaveLength(1);
     const running = control({
       op: "execute_owned",
@@ -2177,7 +2186,7 @@ test("the owner's switch revokes sessions until control is enabled again", async
 test("a lost host is replaced and the agent group is reclaimed without owner tabs", async () => {
   const owner = await observed("/owner");
   expect(owner).toBeDefined();
-  const leftover = join(runtime, "sessions", "acceptance", "before-loss.png");
+  const leftover = join(area("acceptance"), "before-loss.png");
   const written = await run(
     "acceptance",
     `await context.pages()[0].screenshot({ path: artifacts + "/before-loss.png" }); return "written"`,
@@ -2223,7 +2232,7 @@ test("closing a session cleans only its own area", async () => {
   await Bun.sleep(500);
   expect(await observed("/")).toBeUndefined();
   expect(await observed("/owner")).toBeDefined();
-  expect(existsSync(join(runtime, "sessions", "acceptance"))).toBe(false);
+  expect(existsSync(area("acceptance"))).toBe(false);
   expect(await observed("/frame")).toBeUndefined();
   expect((await run("acceptance", "1")).body.error).toBe("session_not_found");
 });

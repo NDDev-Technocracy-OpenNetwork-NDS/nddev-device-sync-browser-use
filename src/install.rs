@@ -182,6 +182,7 @@ pub fn load() -> Result<Config, IoError> {
         bun: config.bun,
         executor: config.executor,
         activity: state_dir()?.join("activity"),
+        sessions: runtime::sessions_directory()?,
     })
 }
 
