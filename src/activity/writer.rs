@@ -541,6 +541,7 @@ fn private_directory(path: &Path) -> std::io::Result<()> {
 }
 
 fn private_options() -> std::fs::OpenOptions {
+    #[cfg_attr(not(unix), expect(unused_mut, reason = "only Unix sets a file mode"))]
     let mut options = File::options();
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);

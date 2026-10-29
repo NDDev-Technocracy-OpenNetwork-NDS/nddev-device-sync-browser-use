@@ -85,6 +85,18 @@ or to spare this one's resources.
 - Each device has its own sessions, tabs and owner. A device that is off or unreachable answers
   `Error (device_unreachable)`; ask the owner rather than retrying in a loop.
 
+## Phones
+
+When the owner serves the browser of an Android phone, tabs can run there too.
+
+- `nds-browser-use --phone <serial>` before a command, or `NDS_BROWSER_PHONE=<serial>`, uses that
+  phone's browser: `nds-browser-use --phone R58M12345AB session new shop`.
+- `nds-browser-use phones` lists the phones and their browsers.
+- You see only the tabs you open there, with the phone's viewport, user agent and touch input.
+- `Error (unavailable)` means the owner is not serving that phone. Ask the owner, and never
+  start `phone serve` or change the phone's settings yourself.
+- In a WebView app, `context.newPage()` fails: such apps cannot open tabs.
+
 ## The code
 
 Code runs as an async function body. A single expression is returned; otherwise use `return`.
@@ -295,10 +307,14 @@ one exists.
 
 ## Performance
 
-- **Web vitals.** Paints and layout shifts come from the page's own buffered entries:
+- **Web vitals.** Load timing, paints and layout shifts come from the page's own buffered entries.
+  Agent tabs open in the background, and Chrome records paints only for a page that was shown, so
+  `paints` stays empty while `document.visibilityState` is `hidden`; the navigation entry is
+  always there:
   ```js
   await state.page.evaluate(() => new Promise((done) => {
-    const vitals = { paints: {}, cls: 0 };
+    const [navigation] = performance.getEntriesByType("navigation");
+    const vitals = { load: navigation.loadEventEnd, visible: document.visibilityState, paints: {}, cls: 0 };
     new PerformanceObserver((list) => { for (const e of list.getEntries()) vitals.paints[e.name] = e.startTime; })
       .observe({ type: "paint", buffered: true });
     new PerformanceObserver((list) => { for (const e of list.getEntries()) if (!e.hadRecentInput) vitals.cls += e.value; })

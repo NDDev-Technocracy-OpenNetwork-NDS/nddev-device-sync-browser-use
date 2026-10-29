@@ -2,5 +2,5 @@
 
 .nds/generated.json linguist-generated
 CLAUDE.md linguist-generated
-packages/extension/background.js linguist-generated
-packages/extension/popup.js linguist-generated
+packages/desktop/extension/background.js linguist-generated
+packages/desktop/extension/popup.js linguist-generated

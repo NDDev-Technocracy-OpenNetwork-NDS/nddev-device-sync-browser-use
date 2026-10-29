@@ -291,7 +291,7 @@ beforeAll(async () => {
   const wrapper = join(root, windows ? "host.cmd" : "host.sh");
   mkdirSync(join(prefix, "bin"), { recursive: true });
   cpSync(binary, hostBinary);
-  cpSync(join(repository, "packages/extension"), installed, { recursive: true });
+  cpSync(join(repository, "packages/desktop/extension"), installed, { recursive: true });
   if (windows) {
     writeFileSync(wrapper, `@"${hostBinary}" %* 2>>"${hostLog}"\r\n`);
   } else {
@@ -1140,7 +1140,8 @@ test("the guide's performance recipes measure an agent page", async () => {
     "acceptance",
     `const page = await context.newPage(); await page.goto("${origin}/article");
      const vitals = await page.evaluate(() => new Promise((done) => {
-       const seen = { paints: {}, cls: 0 };
+       const [navigation] = performance.getEntriesByType("navigation");
+       const seen = { load: navigation.loadEventEnd, visible: document.visibilityState, paints: {}, cls: 0 };
        new PerformanceObserver((list) => { for (const e of list.getEntries()) seen.paints[e.name] = e.startTime; }).observe({ type: "paint", buffered: true });
        setTimeout(() => done(seen), 300);
      }));
@@ -1151,12 +1152,15 @@ test("the guide's performance recipes measure an agent page", async () => {
      await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
      const measured = await page.evaluate(() => { performance.mark("a"); let x = 0; for (let i = 0; i < 1e6; i++) x += i; performance.mark("b"); return performance.measure("work", "a", "b").duration >= 0; });
      await cdp.detach(); await page.close();
-     return JSON.stringify({ paint: "first-paint" in vitals.paints || "first-contentful-paint" in vitals.paints, nodes: metrics.Nodes > 0, measured })`,
+     // A tab loaded in the background records no paint; whether one was shown depends on the platform.
+     const painted = "first-paint" in vitals.paints || "first-contentful-paint" in vitals.paints;
+     return JSON.stringify({ load: vitals.load > 0, paint: painted || vitals.visible === "hidden", nodes: metrics.Nodes > 0, measured })`,
     "--timeout",
     "20000",
   );
   expect(result.body).toMatchObject({ failure: null });
   expect(JSON.parse(String(result.body.value))).toEqual({
+    load: true,
     paint: true,
     nodes: true,
     measured: true,

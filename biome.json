@@ -2,8 +2,8 @@
   "$schema": "https://biomejs.dev/schemas/2.6.3/schema.json",
   "files": {
     "includes": [
-      "packages/extension/src/**/*.ts",
-      "packages/extension/test/**/*.ts",
+      "packages/desktop/extension/src/**/*.ts",
+      "packages/desktop/extension/test/**/*.ts",
       "packages/executor/**/*.ts",
       "e2e/**/*.ts"
     ]

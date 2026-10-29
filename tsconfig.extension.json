@@ -8,12 +8,12 @@
     "types": [
       "chrome"
     ],
-    "outDir": "packages/extension",
-    "rootDir": "packages/extension/src"
+    "outDir": "packages/desktop/extension",
+    "rootDir": "packages/desktop/extension/src"
   },
   "files": [
-    "packages/extension/src/background.ts",
-    "packages/extension/src/popup.ts",
-    "packages/extension/src/restore.ts"
+    "packages/desktop/extension/src/background.ts",
+    "packages/desktop/extension/src/popup.ts",
+    "packages/desktop/extension/src/restore.ts"
   ]
 }
