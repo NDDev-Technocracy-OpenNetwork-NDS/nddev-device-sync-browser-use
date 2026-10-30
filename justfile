@@ -34,7 +34,7 @@ install browser="chrome" prefix=(env_var("HOME") / ".local/share/nds-browser-use
     install -m 0755 "$target/release/nds-browser-use" "$stage/bin/"; \
     cp -r packages/desktop/extension/manifest.json packages/desktop/extension/background.js packages/desktop/extension/restore.js packages/desktop/extension/popup.html packages/desktop/extension/popup.js packages/desktop/extension/icons packages/desktop/extension/_locales THIRD_PARTY_NOTICES.md "$stage/extension/"; \
     cp -r packages/executor/. "$stage/executor/"; rm -rf "$stage/executor/test"; cp package.json bun.lock THIRD_PARTY_NOTICES.md "$stage/"; \
-    (cd "$stage" && bun install --frozen-lockfile --production --ignore-scripts); \
+    (cd "$stage" && bun install --frozen-lockfile --production --ignore-scripts --linker hoisted); \
     rm -rf "{{prefix}}.previous"; if [ -e "{{prefix}}" ]; then mv "{{prefix}}" "{{prefix}}.previous"; fi; mv "$stage" "{{prefix}}"; rm -rf "{{prefix}}.previous"; \
     "{{prefix}}/bin/nds-browser-use" install --bun "${bun:-$(command -v bun)}" --executor "{{prefix}}/executor/executor.ts" --browser {{browser}}; \
     "{{prefix}}/bin/nds-browser-use" update || echo "extension not connected; it loads the new files when Chrome starts it"
