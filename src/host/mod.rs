@@ -791,6 +791,15 @@ impl Host {
         match message["type"].as_str() {
             Some("result") => self.on_result(&message),
             Some("event") => self.on_event(message),
+            // Events the worker sent together, in their order.
+            Some("events") => {
+                let mut message = message;
+                if let Value::Array(events) = message["events"].take() {
+                    for event in events {
+                        self.on_event(event);
+                    }
+                }
+            }
             Some("attached") => self.on_attached(&message),
             Some("detached") => self.on_detached(&message),
             Some("download") => self.on_download(&message),
@@ -819,6 +828,13 @@ impl Host {
                 state.browser = browser_name(&state.user_agent);
                 if state.contract == Some(CONTRACT) {
                     tracing::info!(event.name = "browser.extension.connected", outcome = "ok");
+                    // A worker that knows this sends a burst of CDP events as one message, which
+                    // keeps a page's event flood from queueing ahead of command answers.
+                    let body = serde_json::to_vec(&json!({ "type": "features", "batches": true }))
+                        .unwrap_or_default();
+                    if let Some(framed) = frame(&body) {
+                        let _ = self.outbound.try_send(framed);
+                    }
                 } else {
                     // An extension of another contract may still answer cleanup, but admits nothing,
                     // and the lives it met end here, so a later supported hello revives none.
