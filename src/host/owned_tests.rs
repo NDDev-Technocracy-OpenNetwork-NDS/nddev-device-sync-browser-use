@@ -980,6 +980,11 @@ async fn any_other_contract_seals_open_lives_and_a_later_supported_hello_revives
         host.on_extension(
             json!({ "type": "hello", "enabled": true, "version": "0.0.5", "contract": 2 }),
         );
+        // A supported worker learns that it may send its events in batches.
+        assert_eq!(
+            message(&mut queue).await,
+            json!({ "type": "features", "batches": true })
+        );
         assert!(host.state().sessions["project"].closing);
         assert!(
             host.session_request(
