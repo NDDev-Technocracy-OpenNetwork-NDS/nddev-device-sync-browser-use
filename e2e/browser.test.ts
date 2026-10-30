@@ -1938,6 +1938,19 @@ test("a private site keeps its content out of the journal, and the popup shows t
   await popup.waitForFunction(() => Number(document.body.dataset.recent) > 0);
   const step = popup.locator('#recent li[data-type="action"][data-private="true"]').first();
   expect(await step.textContent()).toContain("fill");
+  // With an agent tab, its steps and a private site, the popup still fits Chrome's 600-pixel
+  // popup height in both languages, so nothing hides below a scrollbar.
+  for (const language of ["ru", "en"]) {
+    await popup.evaluate((value) => {
+      const api = globalThis as unknown as {
+        chrome: { storage: { local: { set(items: object): Promise<void> } } };
+      };
+      return api.chrome.storage.local.set({ popupLanguage: value });
+    }, language);
+    await popup.reload();
+    await popup.waitForFunction(() => Number(document.body.dataset.recent) > 0);
+    expect(await popup.evaluate(() => document.body.scrollHeight)).toBeLessThanOrEqual(600);
+  }
   await popup.screenshot({ path: join(root, "popup-agent-tab.png") });
   if (process.env.NDS_E2E_SHOTS)
     cpSync(
@@ -2326,6 +2339,39 @@ test("closing a session cleans only its own area", async () => {
 // The extension reloads itself when its installed files are newer, which ends
 // this host. Chrome for Testing disables command-line extensions on reload, so
 // the reloaded build itself is verified in a Load-unpacked browser.
+// A store install on a device without the host: the popup says the host is missing and links to
+// its setup, and the footer links to the privacy policy. On Windows the registry registration of
+// this run reaches every Chrome for Testing profile, so a fresh profile still finds the host.
+test.skipIf(windows)("without the host the popup links to its setup", async () => {
+  const fresh = await chromium.launchPersistentContext(mkdtempSync(join(root, "no-host-")), {
+    executablePath: chrome,
+    headless: true,
+    env,
+    args: [`--disable-extensions-except=${installed}`, `--load-extension=${installed}`],
+  });
+  try {
+    const popup = await fresh.newPage();
+    await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+    await popup.waitForFunction(() => document.getElementById("setup")?.hidden === false);
+    expect(await popup.evaluate(() => document.body.dataset.link)).toBe("down");
+    expect(await popup.locator("#setup a").getAttribute("href")).toEndWith(
+      "/docs/desktop.md#install",
+    );
+    expect(
+      await popup.locator('footer a[data-i18n="privacyPolicy"]').getAttribute("href"),
+    ).toEndWith("/PRIVACY.md");
+  } finally {
+    await fresh.close();
+  }
+  // With the host the notice stays hidden.
+  const connected = await observer.newPage();
+  await connected.goto(`chrome-extension://${extensionId}/popup.html`);
+  // Rendered once the worker answers: "ok" or, with agent control off, "off".
+  await connected.waitForFunction(() => ["ok", "off"].includes(document.body.dataset.link ?? ""));
+  expect(await connected.locator("#setup").isHidden()).toBe(true);
+  await connected.close();
+});
+
 test("an updated install asks the unpacked extension to reload", async () => {
   const manifestPath = join(installed, "manifest.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));

@@ -243,6 +243,7 @@ content, URLs, screenshots and agent code stay on that device: results go to
 the local agent that asked for them, and artifacts are deleted with the
 session. Nothing is sent to NDDev or third parties; local telemetry carries
 event names, outcomes and durations, never page data.
+The [privacy policy](PRIVACY.md), in English and Russian, covers the extension and the host.
 
 Run `just check`, then `just browser-check` with `NDS_TEST_CHROME` set to the
 Chrome for Testing build pinned in `provider.lock.json`. `just install
