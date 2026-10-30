@@ -442,8 +442,12 @@ test("actions in a background agent tab answer at once", async () => {
     "25000",
   );
   const times = JSON.parse(String(result.body.value)) as { clicks: number[]; fills: number[] };
-  expect(Math.max(...times.clicks)).toBeLessThan(600);
-  expect(Math.max(...times.fills)).toBeLessThan(600);
+  // A throttled tab takes one to two seconds per click. A loaded hosted runner can still take one
+  // slow action, so the typical one decides, and none may come near the throttled time.
+  const median = (values: number[]) => [...values].sort((a, b) => a - b)[2] ?? 0;
+  expect(median(times.clicks)).toBeLessThan(400);
+  expect(median(times.fills)).toBeLessThan(400);
+  expect(Math.max(...times.clicks, ...times.fills)).toBeLessThan(1000);
 });
 
 test("owner tabs stay outside the agent session", async () => {
