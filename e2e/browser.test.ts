@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -2421,13 +2422,38 @@ test.skipIf(windows)("without the host the popup links to its setup", async () =
   await connected.close();
 });
 
+// An install that changes only the host replaces its binary under the same path. Once no session
+// needs the running host, `update` ends it, and the extension starts the new binary when it
+// reconnects. Windows cannot rename a file over a running executable.
+test.skipIf(windows)("a replaced host binary takes over once no session is open", async () => {
+  const fresh = `${hostBinary}.new`;
+  cpSync(binary, fresh);
+  chmodSync(fresh, 0o755);
+  renameSync(fresh, hostBinary);
+  await opened("restart");
+  expect((await cli("update")).body).toEqual({ reload: false, restart: false });
+  const listed = (await cli("session", "list")).body as unknown as { project: string }[];
+  for (const { project } of listed) await cli("session", "close", project);
+  expect((await cli("update")).body).toEqual({ reload: false, restart: true });
+  // The host ends; the extension reconnects about a second later and starts the installed binary.
+  let enabled: unknown;
+  for (let attempt = 0; attempt < 100 && enabled !== true; attempt++) {
+    await Bun.sleep(100);
+    enabled = (await cli("status")).body.enabled;
+  }
+  expect(enabled).toBe(true);
+  expect(readFileSync(hostLog, "utf8")).toContain('"error.type":"restarting"');
+  // The new host runs the installed binary: nothing is newer, so it stays.
+  expect((await cli("update")).body).toEqual({ reload: false, restart: false });
+});
+
 test("an updated install asks the unpacked extension to reload", async () => {
   const manifestPath = join(installed, "manifest.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   expect((await cli("status")).body.extension).toBe(manifest.version);
-  expect((await cli("update")).body).toEqual({ reload: false });
+  expect((await cli("update")).body).toEqual({ reload: false, restart: false });
   writeFileSync(manifestPath, JSON.stringify({ ...manifest, version: "9.9.9" }));
-  expect((await cli("update")).body).toEqual({ reload: true });
+  expect((await cli("update")).body).toEqual({ reload: true, restart: false });
   let status: unknown;
   for (let attempt = 0; attempt < 50 && status !== "unavailable"; attempt++) {
     await Bun.sleep(100);

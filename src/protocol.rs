@@ -105,11 +105,20 @@ pub enum Reply {
     Status(view::Status),
     Session(view::Session),
     OwnedSession(OwnedSession),
-    Sessions { sessions: Vec<view::Session> },
+    Sessions {
+        sessions: Vec<view::Session>,
+    },
     Closed,
     Executed(view::Outcome),
-    Updated { reload: bool },
-    Refused { refusal: Refusal },
+    Updated {
+        reload: bool,
+        /// The host ends so the extension starts its replaced binary: no session was open.
+        #[serde(default)]
+        restart: bool,
+    },
+    Refused {
+        refusal: Refusal,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
