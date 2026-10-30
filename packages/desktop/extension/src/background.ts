@@ -806,18 +806,38 @@ async function owned(group: string): Promise<chrome.tabs.Tab[]> {
   return chrome.tabs.query({ groupId: id });
 }
 
+// The group each agent area is forming now. Tabs that open at once for an area without a group
+// wait for the one that forms it and join that group, rather than forming one each.
+const forming = new Map<string, Promise<unknown>>();
+
 async function join(tab: number, group: string): Promise<void> {
-  const current = groups.get(group);
-  const valid =
-    current !== undefined && (await chrome.tabGroups.get(current).catch(() => undefined));
-  if (valid) {
-    await chrome.tabs.group({ tabIds: [tab], groupId: current });
-    return;
+  for (;;) {
+    const current = groups.get(group);
+    const valid =
+      current !== undefined && (await chrome.tabGroups.get(current).catch(() => undefined));
+    if (valid) {
+      await chrome.tabs.group({ tabIds: [tab], groupId: current });
+      return;
+    }
+    const pending = forming.get(group);
+    if (pending) {
+      await pending.catch(() => undefined);
+      continue;
+    }
+    const formed = (async () => {
+      const created = await chrome.tabs.group({ tabIds: [tab] });
+      await chrome.tabGroups.update(created, { title: group, color: "cyan", collapsed: false });
+      groups.set(group, created);
+      await saveGroups();
+    })();
+    forming.set(group, formed);
+    try {
+      await formed;
+      return;
+    } finally {
+      if (forming.get(group) === formed) forming.delete(group);
+    }
   }
-  const created = await chrome.tabs.group({ tabIds: [tab] });
-  await chrome.tabGroups.update(created, { title: group, color: "cyan", collapsed: false });
-  groups.set(group, created);
-  await saveGroups();
 }
 
 async function own<T>(tab: number, work: () => Promise<T>): Promise<T> {
