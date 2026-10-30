@@ -279,6 +279,10 @@ beforeAll(async () => {
         "/disclosure": `<title>Disclosure</title><main><div><div><details><summary>Where should I start?</summary><p>Here.</p></details><div><details><summary aria-label="Language: EN">EN</summary><p>English</p></details></div></div></div></main>`,
         // Equal buttons in two parts, and a frame of the same site, which shares the process.
         "/refs": `<title>Refs</title><section id="first"><button onclick="out.textContent = 'first'">Save</button></section><section id="second"><button onclick="out.textContent = 'second'">Save</button></section><span id="out"></span><iframe id="same" src="/inner"></iframe>`,
+        // An app's screen has no article: Readability finds none, and its visible text stands in.
+        "/app": `<title>Fixture app</title><nav><a href="/">Board</a></nav><div role="toolbar">${Array.from({ length: 30 }, (_, n) => `<button>Action ${n + 1}</button>`).join("")}</div><main><h2>To do</h2><ul><li><a href="/card/1">Card 1</a> due 1 Nov</li><li><a href="/card/2">Card 2</a> due 2 Nov</li></ul></main>`,
+        // A table keeps a row per line.
+        "/listing": `<title>Fixture listing</title><table>${Array.from({ length: 30 }, (_, n) => `<tr><td>Row ${n + 1}</td><td><a href="/item/${n + 1}">Item ${n + 1}</a></td><td>${n + 1} points</td></tr>`).join("")}</table>`,
         "/article": `<title>Fixture article</title><style>p { color: black }</style><script>window.unused = 1</script><nav><a href="/">Home</a></nav><article><h1>Fixture heading</h1><p>First. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><p>Second. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><ul><li>One point</li><li>Two points</li></ul><button id="go">Go</button></article>`,
         "/devtools": [
           "<title>Devtools</title><style>.card { color: rgb(1, 2, 3); padding: 4px }</style>",
@@ -438,8 +442,17 @@ test("actions in a background agent tab answer at once", async () => {
     "25000",
   );
   const times = JSON.parse(String(result.body.value)) as { clicks: number[]; fills: number[] };
-  expect(Math.max(...times.clicks)).toBeLessThan(600);
-  expect(Math.max(...times.fills)).toBeLessThan(600);
+  // A throttled tab takes one to two seconds for every click and fill, so the typical action of
+  // five decides; a loaded hosted runner can stall any single one past a second.
+  const median = (values: number[]) => [...values].sort((a, b) => a - b)[2] ?? 0;
+  expect({
+    ...times,
+    click: median(times.clicks) < 400,
+    fill: median(times.fills) < 400,
+  }).toMatchObject({
+    click: true,
+    fill: true,
+  });
 });
 
 test("owner tabs stay outside the agent session", async () => {
@@ -712,7 +725,8 @@ async function helpers(): Promise<void> {
      const none = getLatestLogs({ page, sinceLastCall: true });
      const box = await inspect({ locator: page.locator("#box") });
      const input = await inspect({ locator: page.locator("#name") });
-     await page.click("#fail"); await page.click("#pop"); await page.waitForTimeout(500);
+     // The new tab is reported once its popup event arrives, later than 500 ms on a loaded runner.
+     await page.click("#fail"); await Promise.all([page.waitForEvent("popup"), page.click("#pop")]); await page.waitForTimeout(500);
      return JSON.stringify({ loaded: loaded.success, first, again, found, changed, logs, none, box, input, save, ref })`,
     "--timeout",
     "20000",
@@ -762,7 +776,13 @@ async function content(): Promise<void> {
      const path = shot.match(/^Screenshot: (\\S+)/)[1];
      const small = ${resize} ? await resizeImageForAgent({ input: path, maxDimension: 320 }) : "";
      const go = await getLocatorStringForElement(page.locator("#go"));
-     return JSON.stringify({ html, text, shot, path, small, go })`,
+     const listing = await context.newPage(); await listing.goto("${origin}/listing");
+     const list = await getPageMarkdown({ page: listing });
+     const table = await getCleanHTML({ locator: listing.locator("table") });
+     await listing.goto("${origin}/app");
+     const app = await getPageMarkdown({ page: listing });
+     await listing.close();
+     return JSON.stringify({ html, text, shot, path, small, go, list, table, app })`,
     "--timeout",
     "20000",
   );
@@ -774,6 +794,15 @@ async function content(): Promise<void> {
   expect(seen.text).toContain("First. This paragraph");
   expect(seen.text).toContain("- One point");
   expect(seen.text).not.toContain("Home");
+  // A sentence keeps its inline elements on its line, a table gives a line per row, and an app's
+  // screen without an article gives its visible text.
+  expect(seen.html).toContain("<p>First. This paragraph");
+  expect(seen.html).toContain("<li>One point");
+  expect(seen.list).toContain("| Row 16 | Item 16 | 16 points |\n| Row 17 | Item 17 | 17 points |");
+  expect(seen.app).toContain("(no main article: the page's visible text)");
+  expect(seen.app).toContain("Card 2 due 2 Nov");
+  expect(seen.app).toContain("Action 17");
+  expect(seen.table).toContain('<td><a href="/item/17">Item 17</a>');
   expect(seen.shot).toMatch(/^Screenshot: \S+\.jpg \([1-9]\d* labels\)/);
   expect(seen.shot).toContain('button "Go" [ref=');
   expect(seen.shot).not.toContain("[box=");
@@ -2088,9 +2117,29 @@ test("agents read plain text, and a stuck action fails with its reason before th
     expect(stuck.code).toBe(1);
     expect(stuck.stderr).toContain("no element matched the locator");
     expect((await plain("-s", "plain", "-e", "state.kept")).stdout).toBe("[return value] 1\n");
+    // The agent closing its own page needs no warning; using it afterwards says what to do.
     const closed = await plain("-s", "plain", "-e", "await state.page.close()");
-    expect(closed.stdout).toStartWith("[WARNING] Page closed");
-    expect(closed.stdout).toContain("for state.page");
+    expect(closed.stdout).not.toContain("[WARNING] Page closed");
+    const reused = await plain("-s", "plain", "-e", "await state.page.title()");
+    expect(reused.stderr).toContain("the page is closed: assign an open one");
+    // A page someone else closes, here the owner, is news: the next result says so.
+    await plain(
+      "-s",
+      "plain",
+      "-e",
+      `state.page = await context.newPage(); await state.page.goto("${origin}/?owner-closes")`,
+    );
+    const owners = await observed("/?owner-closes");
+    expect(owners).toBeDefined();
+    await owners?.close();
+    // The agent's session learns of the close through its own connection, a moment later.
+    let told = await plain("-s", "plain", "-e", "1");
+    for (let attempt = 0; attempt < 20 && !told.stdout.includes("Page closed"); attempt++) {
+      await Bun.sleep(100);
+      told = await plain("-s", "plain", "-e", "1");
+    }
+    expect(told.stdout).toStartWith("[WARNING] Page closed");
+    expect(told.stdout).toContain("for state.page");
     // A deadline beyond the bound is refused here with the usage that names the bound.
     const long = await plain("-s", "plain", "-e", "1", "--timeout", "30000");
     expect(long.code).toBe(2);
