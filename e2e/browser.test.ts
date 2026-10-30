@@ -2460,7 +2460,16 @@ test.skipIf(windows)("without the host the popup links to its setup", async () =
   try {
     const popup = await fresh.newPage();
     await popup.goto(`chrome-extension://${extensionId}/popup.html`);
-    await popup.waitForFunction(() => document.getElementById("setup")?.hidden === false);
+    // A fresh profile starts the extension's worker first; on a loaded runner that takes a while.
+    // A timeout names the state the popup shows instead.
+    await popup
+      .waitForFunction(() => document.getElementById("setup")?.hidden === false, undefined, {
+        timeout: 60_000,
+      })
+      .catch(async (error: Error) => {
+        const shown = await popup.evaluate(() => ({ ...document.body.dataset }));
+        throw new Error(`${error.message}; the popup shows ${JSON.stringify(shown)}`);
+      });
     expect(await popup.evaluate(() => document.body.dataset.link)).toBe("down");
     expect(await popup.locator("#setup a").getAttribute("href")).toEndWith(
       "/docs/desktop.md#install",
