@@ -1,13 +1,22 @@
 import { expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import type { BrowserContext, Page } from "playwright-core";
-import { attach, clearAllLogs, getLatestLogs } from "../agent/logs";
+import { attach, clearAllLogs, getLatestLogs, notified } from "../agent/logs";
 
 // A page that emits console messages the way Playwright reports them.
-function fakePage(): { page: Page; log: (type: string, text: string, url?: string) => void } {
+function fakePage(held: string[] = []): {
+  page: Page;
+  log: (type: string, text: string, url?: string) => void;
+  events: EventEmitter;
+} {
   const events = new EventEmitter();
-  const page = Object.assign(events, { url: () => "https://example.com/" }) as unknown as Page;
-  attach(page, { pages: () => [page] } as unknown as BrowserContext, () => []);
+  const page = Object.assign(events, {
+    url: () => "https://example.com/",
+    close: async () => {
+      events.emit("close");
+    },
+  }) as unknown as Page;
+  attach(page, { pages: () => [page] } as unknown as BrowserContext, () => held);
   const log = (type: string, text: string, url = "") =>
     events.emit("console", {
       type: () => type,
@@ -15,7 +24,7 @@ function fakePage(): { page: Page; log: (type: string, text: string, url?: strin
       args: () => [],
       location: () => ({ url, lineNumber: 7, columnNumber: 0 }),
     });
-  return { page, log };
+  return { page, log, events };
 }
 
 test("logs are an array, empty when there is nothing new", () => {
@@ -49,4 +58,16 @@ test("a log search keeps five lines around each match and marks gaps", () => {
   expect(found.indexOf("---")).toBe(8);
   expect(found.at(-1)).toBe("[log] line 19");
   expect(getLatestLogs({ page, search: "nothing" })).toEqual([]);
+});
+
+test("a page the agent closes itself is no news; one closed by someone else is", async () => {
+  notified();
+  const own = fakePage(["page"]);
+  await own.page.close();
+  expect(notified()).toEqual([]);
+  const other = fakePage(["page"]);
+  other.events.emit("close");
+  expect(notified()).toEqual([
+    "[WARNING] Page closed (url: https://example.com/) for state.page. Assign an open page to state.page before using it again, for example with await context.newPage().",
+  ]);
 });

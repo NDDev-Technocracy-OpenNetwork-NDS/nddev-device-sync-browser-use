@@ -362,11 +362,15 @@ export function waitBudget(budget: number): number {
   return Math.max(1, budget - Math.min(1_000, Math.floor(budget / 2)));
 }
 
-/** Cuts text at the output limit and says so. */
+/** Cuts text at the output limit, at a line end when one is near, and says how much is left. */
 export function bounded(text: string): { output: string; truncated: boolean } {
   if (text.length <= OUTPUT_LIMIT) return { output: text, truncated: false };
+  const newline = text.lastIndexOf("\n", OUTPUT_LIMIT);
+  const cut = newline >= OUTPUT_LIMIT * 0.8 ? newline : OUTPUT_LIMIT;
+  const shown = text.slice(0, cut);
+  const lines = (part: string) => part.split("\n").length;
   return {
-    output: `${text.slice(0, OUTPUT_LIMIT)}\n\n[Truncated to ${OUTPUT_LIMIT} characters. Use search options or narrower locators to read specific content]`,
+    output: `${shown}\n\n[Truncated: ${cut} of ${text.length} characters, ${lines(shown)} of ${lines(text)} lines. Read a part instead: snapshot({ search }) or a locator such as "main", interactiveOnly: true, getPageMarkdown, or return only the values you need]`,
     truncated: true,
   };
 }
@@ -395,9 +399,17 @@ export function describeError(error: unknown): string {
     .filter((line) => line.startsWith("- "))
     .map((line) => line.slice(2));
   if (parts.name !== "TimeoutError" || log.length === 0) {
+    // A closed page says what to do next; the close itself printed no warning when the agent
+    // closed it.
+    const shown = /Target page, context or browser has been closed/.test(head)
+      ? message.replace(
+          head,
+          `${head} (the page is closed: assign an open one, such as state.page = await context.newPage())`,
+        )
+      : message;
     return parts.name === "Error" || parts.name === "TimeoutError"
-      ? message
-      : `${parts.name}: ${message}`;
+      ? shown
+      : `${parts.name}: ${shown}`;
   }
   const reason = [...log].reverse().find((line) => REASONS.some((pattern) => pattern.test(line)));
   const waited = log.some((line) => /locator resolved to/.test(line));

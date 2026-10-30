@@ -85,8 +85,17 @@ test("long output is cut at the limit with a hint", () => {
   const { output, truncated } = bounded("a".repeat(OUTPUT_LIMIT + 50));
   expect(truncated).toBe(true);
   expect(output.startsWith("a".repeat(OUTPUT_LIMIT))).toBe(true);
-  expect(output).toContain(`[Truncated to ${OUTPUT_LIMIT} characters`);
+  expect(output).toContain(
+    `[Truncated: ${OUTPUT_LIMIT} of ${OUTPUT_LIMIT + 50} characters, 1 of 1 lines.`,
+  );
   expect(bounded("short")).toEqual({ output: "short", truncated: false });
+  // Lines end where they end: a cut near the limit falls on the last whole line.
+  const lines = Array.from({ length: 2000 }, (_, index) => `- line ${index}`).join("\n");
+  const cut = bounded(lines).output;
+  const shown = cut.slice(0, cut.indexOf("\n\n[Truncated"));
+  expect(shown.length).toBeLessThanOrEqual(OUTPUT_LIMIT);
+  expect(lines.startsWith(`${shown}\n`)).toBe(true);
+  expect(cut).toContain(`of ${lines.length} characters`);
 });
 
 test("a timeout names why the action could not proceed and keeps its last call log lines", () => {
@@ -353,4 +362,11 @@ test("Playwright waits always end inside the execution's remaining budget", () =
     expect(waitBudget(budget)).toBeGreaterThan(0);
     expect(waitBudget(budget) <= budget).toBe(true);
   }
+});
+
+test("a closed page's error says how to go on", () => {
+  const error = new Error("page.title: Target page, context or browser has been closed");
+  expect(describeError(error)).toBe(
+    "page.title: Target page, context or browser has been closed (the page is closed: assign an open one, such as state.page = await context.newPage())",
+  );
 });

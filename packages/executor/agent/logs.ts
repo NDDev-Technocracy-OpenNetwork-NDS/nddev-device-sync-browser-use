@@ -54,9 +54,17 @@ export function attach(page: Page, context: BrowserContext, keys: (page: Page) =
       `[WARNING] New page opened from ${shortUrl(page.url())} (index ${index}, initial url: ${shortUrl(popup.url())}); it is context.pages()[${index}]`,
     );
   });
+  // A page the agent's own code closed needs no warning: the agent knows, and every cleanup
+  // would print one. Only a page the owner, the site or the browser closed is news.
+  let closing = false;
+  const close = page.close.bind(page);
+  page.close = (options) => {
+    closing = true;
+    return close(options);
+  };
   page.on("close", () => {
     const held = keys(page);
-    if (held.length === 0) return;
+    if (held.length === 0 || closing) return;
     const names = held.map((key) => `state.${key}`).join(", ");
     notices.push(
       `[WARNING] Page closed (url: ${shortUrl(page.url())}) for ${names}. Assign an open page to ${names.split(", ")[0]} before using it again, for example with await context.newPage().`,

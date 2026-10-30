@@ -183,12 +183,13 @@ console.log(getLatestLogs({ page: state.page, sinceLastCall: true }));
   done, ignoring analytics, ads and streams.
 - **`inspect({ locator, properties? })`** gives box, scroll, styles, visibility, input and aria
   state. Use it instead of `page.evaluate` for layout questions.
-- **`getCleanHTML({ locator, search? })`** returns HTML without scripts and styles, one line per
-  element.
-- **`getPageMarkdown({ page, search? })`** returns the main article as text.
+- **`getCleanHTML({ locator, search? })`** returns HTML without scripts and styles: one line per
+  block element, with links, code and emphasis kept inside their sentence.
+- **`getPageMarkdown({ page, search? })`** returns the main article as text, tables as rows. A page
+  without an article, such as a listing or an app, gives its visible text instead.
 - **`screenshotWithAccessibilityLabels({ page, locator?, interactiveOnly? })`** writes a
-  screenshot with a ref label on every interactive element. Use it for grids, maps and other
-  visual layouts. `locator` labels only that part of the page; `interactiveOnly: false` also
+  screenshot with a ref label on every interactive element and lists those elements, one line each:
+  `- button "Save" [ref=e8]`. Use it for grids, maps and other visual layouts. `locator` labels only that part of the page; `interactiveOnly: false` also
   labels headings, images and other elements with a ref.
 - **`resizeImageForAgent({ input, maxDimension? })`** makes a smaller copy before you read an
   image. It needs ffmpeg.

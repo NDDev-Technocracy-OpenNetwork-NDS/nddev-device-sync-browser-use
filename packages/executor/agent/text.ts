@@ -22,8 +22,12 @@ export function searched(text: string, search: Search, around = 0): string {
   const lines = text.split("\n");
   const matching = matches(search);
   const ranges: [number, number][] = [];
-  for (let index = 0; index < lines.length && ranges.length < MATCHES; index++) {
+  // The limit counts matching lines: dense matches merge their ranges, and counting ranges would
+  // let one merged range run through the whole view.
+  let found = 0;
+  for (let index = 0; index < lines.length && found < MATCHES; index++) {
     if (!matching(lines[index] ?? "")) continue;
+    found++;
     const start = Math.max(0, index - around);
     const end = Math.min(lines.length - 1, index + around);
     const last = ranges.at(-1);
