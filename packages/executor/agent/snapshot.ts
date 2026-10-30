@@ -12,6 +12,9 @@ export type SnapshotOptions = ViewOptions & {
   frame?: Frame | undefined;
   /** Only interactive elements and the labels and landmarks around them. */
   interactiveOnly?: boolean | undefined;
+  /** The page's map instead of its tree: landmarks with a locator each, their headings, and
+   * how many links, buttons and fields each part holds. */
+  outline?: boolean | undefined;
 };
 
 const views = new Views<Page>(5);
@@ -67,7 +70,8 @@ export async function snapshot(options: SnapshotOptions | Page | Locator): Promi
     : given.frame
       ? `frame ${given.frame.name()} ${given.frame.url()}`
       : "page";
-  const detail = given.interactiveOnly ? " interactive" : "";
+  if (given.outline) view = outline(view);
+  const detail = `${given.interactiveOnly ? " interactive" : ""}${given.outline ? " outline" : ""}`;
   // A part's locators are relative to it; say so once rather than on every line.
   const relative = given.locator
     ? "\nLocators are inside the locator: use locator.locator(...), or ref() for [ref=...]."
@@ -75,6 +79,118 @@ export async function snapshot(options: SnapshotOptions | Page | Locator): Promi
       ? "\nLocators are inside the frame: use frame.locator(...), or ref() for [ref=...]."
       : "";
   return views.show(page, scope + detail, `URL: ${shortUrl(page.url())}${relative}`, view, given);
+}
+
+// Parts a page is made of, which an agent reads one at a time.
+const LANDMARKS = new Set(["banner", "navigation", "main", "complementary", "contentinfo"]);
+for (const role of ["region", "form", "search", "dialog", "alertdialog"]) LANDMARKS.add(role);
+// What an interactive line is, by its role, for the counts.
+const KINDS: Record<string, string> = {
+  link: "links",
+  button: "buttons",
+  textbox: "fields",
+  searchbox: "fields",
+  combobox: "fields",
+  spinbutton: "fields",
+  checkbox: "checks",
+  radio: "checks",
+  switch: "checks",
+  tab: "tabs",
+  menuitem: "menu items",
+  option: "options",
+  slider: "sliders",
+};
+
+const SINGULAR: Record<string, string> = {
+  links: "link",
+  buttons: "button",
+  fields: "field",
+  checks: "check",
+  tabs: "tab",
+  "menu items": "menu item",
+  options: "option",
+  sliders: "slider",
+};
+
+/**
+ * A snapshot's map: each landmark with a locator to read it, its headings, and how many links,
+ * buttons, fields and other controls it and each heading's section hold. Big pages shrink to a
+ * few lines; the agent then reads the part it needs with `snapshot({ locator })` or a search.
+ */
+export function outline(view: string): string {
+  type Count = Record<string, number>;
+  type Part = {
+    line: string;
+    indent: number;
+    count: Count;
+    headings: { line: string; count: Count }[];
+  };
+  const parts: Part[] = [];
+  const open: Part[] = [];
+  const seen = new Map<string, number>();
+  const total: Count = {};
+  const add = (count: Count, kind: string) => {
+    count[kind] = (count[kind] ?? 0) + 1;
+  };
+  const counts = (count: Count) =>
+    Object.entries(count)
+      .sort((a, b) => b[1] - a[1])
+      .map(([kind, number]) => `${number} ${number === 1 ? (SINGULAR[kind] ?? kind) : kind}`)
+      .join(", ");
+  for (const raw of view.split("\n")) {
+    const indent = raw.length - raw.trimStart().length;
+    const body = raw.trimStart();
+    if (!body.startsWith("- ")) continue;
+    while (open.length > 0 && (open.at(-1)?.indent ?? 0) >= indent) open.pop();
+    const role = body.startsWith("- role=")
+      ? (/^- role=(\w+)/.exec(body)?.[1] ?? "")
+      : (/^- (\w+)/.exec(body)?.[1] ?? "");
+    const name = body.startsWith("- role=")
+      ? /\[name="((?:[^"\\]|\\.)*)"i?\]/.exec(body)?.[1]
+      : /^- \w+ "((?:[^"\\]|\\.)*)"/.exec(body)?.[1];
+    if (LANDMARKS.has(role)) {
+      // A locator that reaches this landmark: its role and name, numbered among equal ones.
+      const key = `role=${role}${name ? `[name="${name}"i]` : ""}`;
+      const index = seen.get(key) ?? 0;
+      seen.set(key, index + 1);
+      const locator = `${key}${index > 0 ? ` >> nth=${index}` : ""}`;
+      const part: Part = {
+        line: `${"  ".repeat(open.length)}- ${role}${name ? ` "${name}"` : ""} [${locator}]`,
+        indent,
+        count: {},
+        headings: [],
+      };
+      parts.push(part);
+      open.push(part);
+      continue;
+    }
+    const current = open.at(-1);
+    if (role === "heading") {
+      current?.headings.push({ line: `- heading "${name ?? ""}"`, count: {} });
+      continue;
+    }
+    const kind = KINDS[role];
+    if (!kind) continue;
+    add(total, kind);
+    for (const part of open) add(part.count, kind);
+    const heading = current?.headings.at(-1);
+    if (heading) add(heading.count, kind);
+  }
+  const lines = [`Page: ${counts(total) || "no controls"}`];
+  for (const part of parts) {
+    lines.push(`${part.line}${Object.keys(part.count).length ? `: ${counts(part.count)}` : ""}`);
+    const pad = part.line.length - part.line.trimStart().length + 2;
+    for (const heading of part.headings.slice(0, 40)) {
+      const count = counts(heading.count);
+      lines.push(`${" ".repeat(pad)}${heading.line}${count ? `: ${count}` : ""}`);
+    }
+    if (part.headings.length > 40)
+      lines.push(`${" ".repeat(pad)}… ${part.headings.length - 40} more headings`);
+  }
+  if (parts.length === 0) {
+    lines.push("No landmarks: read it with snapshot({ search }), a locator or interactiveOnly.");
+  }
+  return lines.join("\n");
 }
 
 /** Playwright's AI snapshot without what agents never need: pointer and focus marks, link
