@@ -73,6 +73,15 @@ class Browser {
   // The action badge as the worker last set it, and messages from the extension's own pages.
   badge = "";
   readonly popup = new Event();
+  // The owner's stored settings, an answer of local storage that waits, and the browser start
+  // and install events the worker listens to.
+  stored: Record<string, unknown> = {};
+  storageHeld: ReturnType<typeof deferred> | undefined;
+  readonly startup = new Event();
+  readonly installed = new Event();
+  // The window of each tab group, and every tab the worker created with the window it named.
+  readonly groupWindows = new Map<number, number>();
+  readonly created: { url: string; windowId: number | undefined }[] = [];
   readonly events = {
     tabsCreated: new Event(),
     tabsUpdated: new Event(),
@@ -135,7 +144,13 @@ class Browser {
     const event = () => new Event();
     return {
       storage: {
-        local: { get: async () => ({}), set: async () => {} },
+        local: {
+          get: async () => {
+            await this.storageHeld?.promise;
+            return { ...this.stored };
+          },
+          set: async () => {},
+        },
         session: { get: async () => ({ groups: this.groups }), set: async () => {} },
       },
       action: {
@@ -155,15 +170,16 @@ class Browser {
           onDisconnect: this.port.onDisconnect,
         }),
         onMessage: this.popup,
-        onStartup: event(),
-        onInstalled: event(),
+        onStartup: this.startup,
+        onInstalled: this.installed,
       },
       tabs: {
         get: async (id: number) => this.tab(id),
         query: async ({ groupId }: { groupId: number }) =>
           [...this.tabs.values()].filter((tab) => tab.groupId === groupId),
-        create: async ({ url }: { url: string }) => {
-          const tab = { id: this.next++, groupId: -1, windowId: 1, url };
+        create: async ({ url, windowId }: { url: string; windowId?: number }) => {
+          const tab = { id: this.next++, groupId: -1, windowId: windowId ?? 1, url };
+          this.created.push({ url, windowId });
           this.tabs.set(tab.id, tab);
           return tab;
         },
@@ -187,7 +203,7 @@ class Browser {
         onRemoved: this.events.tabsRemoved,
       },
       tabGroups: {
-        get: async (id: number) => ({ id }),
+        get: async (id: number) => ({ id, windowId: this.groupWindows.get(id) ?? 1 }),
         update: async (id: number, change?: { collapsed?: boolean }) => {
           if (change?.collapsed === false) this.focus.push(`group ${id}`);
           return { id };
@@ -273,6 +289,7 @@ class Browser {
         onClicked: this.notificationClicked,
         onButtonClicked: this.notificationButton,
       },
+      i18n: { getMessage: (key: string) => key },
       contextMenus: {
         create: () => {},
         removeAll: (done: () => void) => done(),
@@ -492,6 +509,55 @@ test("a new worker clears the owner notifications an earlier one left", async ()
   await import(`${source}?worker=${loads++}`);
   await until(() => !browser.shown.has("owner:1"));
   expect(browser.shown).toEqual(new Set(["pin:1"]));
+});
+
+test("the host and the popup learn the owner's stored settings, even when the browser start comes first", async () => {
+  // A browser start or an extension update fires its event before local storage answers. The
+  // first hello must still carry the switch, the observation profile and the private sites the
+  // owner chose, or the host would record what the owner turned off.
+  const browser = new Browser({}, []);
+  browser.stored = { enabled: false, observation: "off", private: ["bank.example"] };
+  browser.storageHeld = deferred();
+  (globalThis as unknown as { chrome: unknown }).chrome = browser.api();
+  const source = "../src/background.ts";
+  await import(`${source}?worker=${loads++}`);
+  browser.startup.fire();
+  browser.installed.fire();
+  const replies: Message[] = [];
+  browser.popup.fire(
+    { type: "get" },
+    { id: "worker", url: "chrome-extension://worker/popup.html" },
+    (reply: Message) => replies.push(reply),
+  );
+  await Bun.sleep(20);
+  expect(browser.posted.filter((message) => message.type === "hello")).toEqual([]);
+  expect(replies).toEqual([]);
+  browser.storageHeld.resolve();
+  await until(() => replies.length > 0);
+  const hellos = browser.posted.filter((message) => message.type === "hello");
+  expect(hellos).toHaveLength(1);
+  expect(hellos[0]).toMatchObject({
+    enabled: false,
+    observation: "off",
+    private: ["bank.example"],
+  });
+  expect(replies[0]).toMatchObject({
+    enabled: false,
+    observation: "off",
+    privateSites: ["bank.example"],
+  });
+});
+
+test("a new agent tab opens in its area's window, not in the window the owner works in", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  browser.groupWindows.set(P, 2);
+  await send({ type: "claim", group: "p" })();
+  await send({ type: "open", group: "p", url: "about:blank" })();
+  expect(browser.created).toEqual([{ url: "about:blank", windowId: 2 }]);
+  // The first tab of an area that does not exist yet opens where Chrome puts new tabs.
+  await send({ type: "claim", group: "q" })();
+  await send({ type: "open", group: "q", url: "about:blank" })();
+  expect(browser.created[1]).toEqual({ url: "about:blank", windowId: undefined });
 });
 
 test("Runtime.enable makes Chrome report the page's execution contexts again", async () => {

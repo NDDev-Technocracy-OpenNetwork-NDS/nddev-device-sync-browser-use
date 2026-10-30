@@ -125,6 +125,8 @@ type HostRequest =
   | { type: "incompatible"; id?: undefined; contract: number }
   | { type: "journaled"; id?: undefined; request: number; lines: string[] }
   | { type: "about"; id?: undefined; version: string; commit: string };
+// One part of a host message larger than Chrome passes from a host (see `connect`).
+type Part = { type: "part"; index: number; count: number; data: string };
 // Every request but `reload`, which the worker answers by reloading, not with a result, and the
 // host's answer to the owner's recorder button.
 type Answered = Exclude<
@@ -273,11 +275,40 @@ function report(event: Reported, error?: ReportedError): void {
   );
 }
 
+// The parts of one larger message arrive back to back; together they are at most this long.
+const PARTS_LIMIT = 32 * 1_048_576;
+
 function connect(): void {
   if (port) return;
   const next = chrome.runtime.connectNative(HOST);
   port = next;
-  next.onMessage.addListener((message: HostRequest) => {
+  // The message being joined on this connection: its parts so far and their length.
+  let joining: { count: number; data: string[]; length: number } | undefined;
+  const join = (part: Part): HostRequest | undefined => {
+    if (part.index === 0) joining = { count: part.count, data: [], length: 0 };
+    const whole = joining;
+    if (!whole || part.count !== whole.count || part.index !== whole.data.length) {
+      // A part out of order belongs to no message this worker can read.
+      joining = undefined;
+      return undefined;
+    }
+    whole.data.push(part.data);
+    whole.length += part.data.length;
+    if (whole.length > PARTS_LIMIT) {
+      joining = undefined;
+      return undefined;
+    }
+    if (whole.data.length < whole.count) return undefined;
+    joining = undefined;
+    try {
+      return JSON.parse(whole.data.join("")) as HostRequest;
+    } catch {
+      return undefined;
+    }
+  };
+  next.onMessage.addListener((received: HostRequest | Part) => {
+    const message = received.type === "part" ? join(received) : received;
+    if (!message) return;
     if (message.type === "reload") void reloadFor(message.version);
     else if (message.type === "recorded") recorded.get(message.request)?.(message);
     else if (message.type === "journaled") journaled.get(message.request)?.(message.lines);
@@ -309,6 +340,8 @@ function connect(): void {
     enabled,
     // The host takes agent downloads' files from this worker (see `downloads` below).
     downloads: chrome.downloads !== undefined,
+    // The host may send a message larger than Chrome passes in parts this worker joins.
+    parts: true,
     observation,
     private: privateSites,
   });
@@ -799,7 +832,16 @@ async function own<T>(tab: number, work: () => Promise<T>): Promise<T> {
 // An agent tab the host asked for. A tab created for a life that ended meanwhile is closed again
 // when that life's release closes its tabs.
 async function opened(life: Life, url: string): Promise<unknown> {
-  const tab = await chrome.tabs.create({ url, active: false });
+  // A tab of an agent area that exists opens in that area's window, so it never shows up in the
+  // window the owner works in on its way there.
+  const area = groups.get(life.group);
+  const windowId =
+    area === undefined
+      ? undefined
+      : (await chrome.tabGroups.get(area).catch(() => undefined))?.windowId;
+  const tab = await chrome.tabs.create(
+    windowId === undefined ? { url, active: false } : { url, active: false, windowId },
+  );
   if (tab.id === undefined) throw new Refusal("target_closed");
   const id = tab.id;
   try {
@@ -1236,7 +1278,7 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: PIN,
-      title: "Pin this element for the NDS agent",
+      title: chrome.i18n.getMessage("pinElement"),
       contexts: ["all"],
     });
   });
@@ -1637,54 +1679,56 @@ chrome.runtime.onMessage.addListener(
     if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("")))
       return false;
     const tab = typeof message.tab === "number" ? message.tab : undefined;
-    if (message.type === "set" && typeof message.enabled === "boolean") {
-      void setEnabled(message.enabled)
-        .then(() => status(tab))
-        .then(reply);
+    // Every answer reflects, and every change starts from, the owner's stored settings.
+    const answer = (work: () => Promise<unknown>): true => {
+      void loaded.then(work).then(reply);
       return true;
+    };
+    if (message.type === "set" && typeof message.enabled === "boolean") {
+      const value = message.enabled;
+      return answer(() => setEnabled(value).then(() => status(tab)));
     }
     const profile = OBSERVATIONS.find((each) => each === message.profile);
     if (message.type === "observe" && profile) {
-      void setObservation(profile)
-        .then(() => status(tab))
-        .then(reply);
-      return true;
+      return answer(() => setObservation(profile).then(() => status(tab)));
     }
     if (message.type === "private" && (message.action === "add" || message.action === "remove")) {
       const site = message.site?.toLowerCase();
-      const next =
-        message.action === "add"
-          ? site
-            ? [...privateSites, site]
-            : privateSites
-          : privateSites.filter((each) => each !== site);
-      void setPrivate(next)
-        .then(() => status(tab))
-        .then(reply);
-      return true;
+      const add = message.action === "add";
+      return answer(() =>
+        setPrivate(
+          add
+            ? site
+              ? [...privateSites, site]
+              : privateSites
+            : privateSites.filter((each) => each !== site),
+        ).then(() => status(tab)),
+      );
     }
-    if (message.type === "recent") {
-      void recent(tab).then(reply);
-      return true;
-    }
+    if (message.type === "recent") return answer(() => recent(tab));
     if (
       message.type === "record" &&
       (message.action === "start" || message.action === "stop" || message.action === "status")
     ) {
-      void record(message.action, typeof message.tab === "number" ? message.tab : undefined).then(
-        reply,
-      );
-      return true;
+      const action = message.action;
+      return answer(() => record(action, tab));
     }
-    if (message.type === "get") {
-      void status(tab).then(reply);
-      return true;
-    }
+    if (message.type === "get") return answer(() => status(tab));
     return false;
   },
 );
 
-// Browser start and install/update/reload each start the worker; both connect.
-chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(connect);
-void load().then(connect);
+// The owner's stored settings, read once per worker. Nothing reaches the host before them: a
+// browser start or an update fires its event before storage answers, and a hello with the
+// defaults would let the host record what the owner turned off. Unreadable storage leaves the
+// defaults.
+const loaded = load().catch(() => undefined);
+
+// Browser start and install/update/reload each start the worker; all of them connect once the
+// settings are known.
+function start(): void {
+  void loaded.then(connect);
+}
+chrome.runtime.onStartup.addListener(start);
+chrome.runtime.onInstalled.addListener(start);
+start();

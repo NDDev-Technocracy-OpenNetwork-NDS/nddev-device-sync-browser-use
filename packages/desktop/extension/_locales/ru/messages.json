@@ -196,5 +196,8 @@
   },
   "versionsNoHost": {
     "message": "Расширение $1"
+  },
+  "pinElement": {
+    "message": "Закрепить элемент для агента NDS"
   }
 }
