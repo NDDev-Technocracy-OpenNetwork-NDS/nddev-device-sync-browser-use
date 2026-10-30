@@ -279,6 +279,8 @@ beforeAll(async () => {
         "/disclosure": `<title>Disclosure</title><main><div><div><details><summary>Where should I start?</summary><p>Here.</p></details><div><details><summary aria-label="Language: EN">EN</summary><p>English</p></details></div></div></div></main>`,
         // Equal buttons in two parts, and a frame of the same site, which shares the process.
         "/refs": `<title>Refs</title><section id="first"><button onclick="out.textContent = 'first'">Save</button></section><section id="second"><button onclick="out.textContent = 'second'">Save</button></section><span id="out"></span><iframe id="same" src="/inner"></iframe>`,
+        // A listing has no article: Readability finds none, and its visible text stands in.
+        "/listing": `<title>Fixture listing</title><table>${Array.from({ length: 30 }, (_, n) => `<tr><td>Row ${n + 1}</td><td><a href="/item/${n + 1}">Item ${n + 1}</a></td><td>${n + 1} points</td></tr>`).join("")}</table>`,
         "/article": `<title>Fixture article</title><style>p { color: black }</style><script>window.unused = 1</script><nav><a href="/">Home</a></nav><article><h1>Fixture heading</h1><p>First. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><p>Second. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><ul><li>One point</li><li>Two points</li></ul><button id="go">Go</button></article>`,
         "/devtools": [
           "<title>Devtools</title><style>.card { color: rgb(1, 2, 3); padding: 4px }</style>",
@@ -762,7 +764,11 @@ async function content(): Promise<void> {
      const path = shot.match(/^Screenshot: (\\S+)/)[1];
      const small = ${resize} ? await resizeImageForAgent({ input: path, maxDimension: 320 }) : "";
      const go = await getLocatorStringForElement(page.locator("#go"));
-     return JSON.stringify({ html, text, shot, path, small, go })`,
+     const listing = await context.newPage(); await listing.goto("${origin}/listing");
+     const list = await getPageMarkdown({ page: listing });
+     const table = await getCleanHTML({ locator: listing.locator("table") });
+     await listing.close();
+     return JSON.stringify({ html, text, shot, path, small, go, list, table })`,
     "--timeout",
     "20000",
   );
@@ -774,6 +780,13 @@ async function content(): Promise<void> {
   expect(seen.text).toContain("First. This paragraph");
   expect(seen.text).toContain("- One point");
   expect(seen.text).not.toContain("Home");
+  // A sentence keeps its inline elements on its line; a listing without an article gives its
+  // visible text, and a table row its cells.
+  expect(seen.html).toContain("<p>First. This paragraph");
+  expect(seen.html).toContain("<li>One point");
+  expect(seen.list).toContain("(no main article: the page's visible text)");
+  expect(seen.list).toContain("Row 17 Item 17 17 points");
+  expect(seen.table).toContain('<td><a href="/item/17">Item 17</a>');
   expect(seen.shot).toMatch(/^Screenshot: \S+\.jpg \([1-9]\d* labels\)/);
   expect(seen.shot).toContain('button "Go" [ref=');
   expect(seen.shot).not.toContain("[box=");

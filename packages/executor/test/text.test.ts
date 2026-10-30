@@ -21,6 +21,14 @@ test("a search shows the matching lines, with context ranges merged", () => {
   expect(searched(page, /button/g)).toContain("Cancel");
 });
 
+test("a search stops after ten matching lines, however close together they are", () => {
+  const dense = Array.from({ length: 40 }, (_, index) => `- link "Item ${index}"`).join("\n");
+  const found = searched(dense, /Item/, 5).split("\n");
+  // Ten matches and the five lines after the last; merged context never runs through the rest.
+  expect(found.length).toBe(15);
+  expect(found.at(-1)).toBe('- link "Item 14"');
+});
+
 test("a diff shows what changed, or nothing when printing the view again is shorter", () => {
   expect(diffed(page, page)).toBe("No changes since last call");
   const changed = page.replace('"Cancel" [ref=e3]', '"Close" [ref=e4]');

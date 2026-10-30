@@ -85,8 +85,17 @@ test("long output is cut at the limit with a hint", () => {
   const { output, truncated } = bounded("a".repeat(OUTPUT_LIMIT + 50));
   expect(truncated).toBe(true);
   expect(output.startsWith("a".repeat(OUTPUT_LIMIT))).toBe(true);
-  expect(output).toContain(`[Truncated to ${OUTPUT_LIMIT} characters`);
+  expect(output).toContain(
+    `[Truncated: ${OUTPUT_LIMIT} of ${OUTPUT_LIMIT + 50} characters, 1 of 1 lines.`,
+  );
   expect(bounded("short")).toEqual({ output: "short", truncated: false });
+  // Lines end where they end: a cut near the limit falls on the last whole line.
+  const lines = Array.from({ length: 2000 }, (_, index) => `- line ${index}`).join("\n");
+  const cut = bounded(lines).output;
+  const shown = cut.slice(0, cut.indexOf("\n\n[Truncated"));
+  expect(shown.length).toBeLessThanOrEqual(OUTPUT_LIMIT);
+  expect(lines.startsWith(`${shown}\n`)).toBe(true);
+  expect(cut).toContain(`of ${lines.length} characters`);
 });
 
 test("a timeout names why the action could not proceed and keeps its last call log lines", () => {

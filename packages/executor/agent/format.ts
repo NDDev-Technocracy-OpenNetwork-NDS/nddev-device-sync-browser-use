@@ -362,11 +362,15 @@ export function waitBudget(budget: number): number {
   return Math.max(1, budget - Math.min(1_000, Math.floor(budget / 2)));
 }
 
-/** Cuts text at the output limit and says so. */
+/** Cuts text at the output limit, at a line end when one is near, and says how much is left. */
 export function bounded(text: string): { output: string; truncated: boolean } {
   if (text.length <= OUTPUT_LIMIT) return { output: text, truncated: false };
+  const newline = text.lastIndexOf("\n", OUTPUT_LIMIT);
+  const cut = newline >= OUTPUT_LIMIT * 0.8 ? newline : OUTPUT_LIMIT;
+  const shown = text.slice(0, cut);
+  const lines = (part: string) => part.split("\n").length;
   return {
-    output: `${text.slice(0, OUTPUT_LIMIT)}\n\n[Truncated to ${OUTPUT_LIMIT} characters. Use search options or narrower locators to read specific content]`,
+    output: `${shown}\n\n[Truncated: ${cut} of ${text.length} characters, ${lines(shown)} of ${lines(text)} lines. Read a part instead: snapshot({ search }) or a locator such as "main", interactiveOnly: true, getPageMarkdown, or return only the values you need]`,
     truncated: true,
   };
 }

@@ -29,10 +29,18 @@ const COLORS: Record<string, string> = {
 /** The label color of an element that is not interactive, shown with `interactiveOnly: false`. */
 const OTHER = "#d9d9d9";
 
-type Label = { ref: string; color: string; x: number; y: number };
+type Label = { ref: string; color: string; x: number; y: number; line: string };
 
 const ELEMENT =
   /^\s*- (\w+)\b.*?\[ref=([^\]]+)\].*?\[box=(-?[\d.]+),(-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\]/;
+
+// A labelled element as one line: its role, name and ref, as in a snapshot, without the
+// snapshot's boxes, pointer hints and other attributes.
+function entry(line: string): string {
+  const named = /^\s*- (\w+)(?: ("(?:[^"\\]|\\.)*"))?/.exec(line);
+  const ref = /\[ref=([^\]]+)\]/.exec(line)?.[1] ?? "";
+  return `- ${named?.[1] ?? "element"}${named?.[2] ? ` ${named[2]}` : ""} [ref=${ref}]`;
+}
 
 /** The elements of an AI-mode snapshot with boxes that lie in the viewport: the interactive ones,
  * or every element with a ref when `interactiveOnly` is false. */
@@ -49,15 +57,21 @@ export function labels(
     if (!match || !color) continue;
     const [x, y, w, h] = match.slice(3, 7).map(Number) as [number, number, number, number];
     if (w <= 0 || h <= 0 || x + w < 0 || y + h < 0 || x > width || y > height) continue;
-    found.push({ ref: match[2] ?? "", color, x: Math.max(0, x), y: Math.max(0, y) });
+    found.push({
+      ref: match[2] ?? "",
+      color,
+      x: Math.max(0, x),
+      y: Math.max(0, y),
+      line: entry(line),
+    });
   }
   return found;
 }
 
 /**
- * A screenshot with a label on every visible interactive element, named by the ref that the
- * returned snapshot gives it, for pages whose layout matters. The labels exist only while the
- * screenshot is taken.
+ * A screenshot with a label on every visible interactive element, for pages whose layout matters,
+ * and the list of those elements by ref, role and name: the image shows where each one is. The
+ * labels exist only while the screenshot is taken.
  */
 export async function screenshotWithAccessibilityLabels(
   options: {
@@ -105,8 +119,8 @@ export async function screenshotWithAccessibilityLabels(
   } finally {
     await page.evaluate((id) => document.getElementById(id)?.remove(), id).catch(() => {});
   }
-  const snapshot = view.replace(/ \[box=[^\]]+\]/g, "");
-  return `Screenshot: ${path} (${found.length} labels)\n\nURL: ${page.url()}\n\n${snapshot}`;
+  const list = found.map((label) => label.line).join("\n");
+  return `Screenshot: ${path} (${found.length} labels)\n\nURL: ${page.url()}\n\n${list}`;
 }
 
 export type ResizeOptions = {
