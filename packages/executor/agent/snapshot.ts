@@ -166,7 +166,8 @@ export function outline(view: string): string {
     }
     const current = open.at(-1);
     if (role === "heading") {
-      current?.headings.push({ line: `- heading "${name ?? ""}"`, count: {} });
+      // An unnamed heading names no section an agent could ask for.
+      if (name) current?.headings.push({ line: `- heading "${name}"`, count: {} });
       continue;
     }
     const kind = KINDS[role];
