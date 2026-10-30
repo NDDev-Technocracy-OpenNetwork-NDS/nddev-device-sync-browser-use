@@ -789,8 +789,11 @@ async function content(): Promise<void> {
      const docs = await getPageMarkdown({ page: listing, showDiffSinceLastCall: false });
      const linked = await getPageMarkdown({ page: listing, links: true, showDiffSinceLastCall: false });
      const part = await getPageMarkdown({ page: listing, locator: listing.locator("#part") });
+     const map = await snapshot({ page: listing, outline: true });
+     const mapped = String(map.match(/\\[(role=main[^\\]]*)\\]/)?.[1]);
+     const region = await snapshot({ page: listing, locator: listing.locator(mapped), showDiffSinceLastCall: false });
      await listing.close();
-     return JSON.stringify({ html, text, shot, path, small, go, list, table, docs, linked, part })`,
+     return JSON.stringify({ html, text, shot, path, small, go, list, table, docs, linked, part, map, region })`,
     "--timeout",
     "20000",
   );
@@ -834,6 +837,12 @@ async function content(): Promise<void> {
   expect(String(seen.part)).toContain("## Part");
   expect(String(seen.part)).toContain("Only this part.");
   expect(String(seen.part)).not.toContain("Install");
+  // An outline maps the landmarks with a locator each; that locator reads the part.
+  expect(String(seen.map)).toContain("- navigation [role=navigation]: 1 link");
+  expect(String(seen.map)).toContain("- main [role=main]");
+  expect(String(seen.map)).toContain('heading "Install"');
+  expect(String(seen.region)).toContain('heading "Part"');
+  expect(String(seen.region)).not.toContain("Board");
   expect(seen.table).toContain('<td><a href="/item/17">Item 17</a>');
   expect(seen.shot).toMatch(/^Screenshot: \S+\.jpg \([1-9]\d* labels\)/);
   expect(seen.shot).toContain('button "Go" [ref=');
@@ -2451,7 +2460,16 @@ test.skipIf(windows)("without the host the popup links to its setup", async () =
   try {
     const popup = await fresh.newPage();
     await popup.goto(`chrome-extension://${extensionId}/popup.html`);
-    await popup.waitForFunction(() => document.getElementById("setup")?.hidden === false);
+    // A fresh profile starts the extension's worker first; on a loaded runner that takes a while.
+    // A timeout names the state the popup shows instead.
+    await popup
+      .waitForFunction(() => document.getElementById("setup")?.hidden === false, undefined, {
+        timeout: 60_000,
+      })
+      .catch(async (error: Error) => {
+        const shown = await popup.evaluate(() => ({ ...document.body.dataset }));
+        throw new Error(`${error.message}; the popup shows ${JSON.stringify(shown)}`);
+      });
     expect(await popup.evaluate(() => document.body.dataset.link)).toBe("down");
     expect(await popup.locator("#setup a").getAttribute("href")).toEndWith(
       "/docs/desktop.md#install",
