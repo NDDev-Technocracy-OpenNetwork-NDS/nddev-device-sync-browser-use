@@ -56,9 +56,6 @@
   "tabNone": {
     "message": "No tab"
   },
-  "tabAgentNote": {
-    "message": "An agent works here. What you do here, you can record for it."
-  },
   "tabOwnerNote": {
     "message": "Agents cannot use it. Move it into an agent's group to share it."
   },
@@ -95,23 +92,17 @@
   "refusedTimeout": {
     "message": "The NDS host did not answer."
   },
-  "privateAdd": {
-    "message": "Keep $1 private"
-  },
   "privateIs": {
-    "message": "$1 is private"
+    "message": "Private"
   },
   "privateAddAny": {
-    "message": "Keep this site private"
+    "message": "Make private"
   },
   "privateTitle": {
     "message": "Private sites"
   },
   "privateNote": {
     "message": "Agents still work there, but their activity journal keeps no content of them."
-  },
-  "privateEmpty": {
-    "message": "None yet."
   },
   "privateRemove": {
     "message": "Keep the content of $1 again"
@@ -186,10 +177,10 @@
     "message": "Off"
   },
   "observationFull": {
-    "message": "Agents' actions, pages' network and console, kept on this device for agents to read; secrets removed."
+    "message": "A full journal on this device, secrets removed."
   },
   "observationStandard": {
-    "message": "Only names, timings and outcomes of agent actions; no page content."
+    "message": "Only names, timings and outcomes, no page content."
   },
   "observationOff": {
     "message": "Nothing is collected, and the recorder is off."

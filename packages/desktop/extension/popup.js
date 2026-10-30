@@ -97,7 +97,9 @@ function renderStatus(status) {
     const versions = element("versions");
     if (versions) {
         const own = status.version ?? chrome.runtime.getManifest().version;
-        versions.textContent = status.host
+        // The footer keeps one line: the extension's version, both builds in its tooltip.
+        versions.textContent = `v${own}`;
+        versions.title = status.host
             ? t("versions", own, `${status.host.version} ${status.host.commit.slice(0, 7)}`)
             : t("versionsNoHost", own);
     }
@@ -113,12 +115,14 @@ function renderTab(status) {
         badge.className = "badge";
         badge.textContent = t("tabAgent", status.group);
         state.append(badge);
-        note.textContent = t("tabAgentNote");
+        // The record button and its tooltip say what the owner can do here.
+        note.textContent = "";
     }
     else {
         state.textContent = status.hasTab === false ? t("tabNone") : t("tabOwner");
         note.textContent = status.hasTab === false ? "" : t("tabOwnerNote");
     }
+    note.hidden = note.textContent === "";
     if (status.site) {
         const site = document.createElement("span");
         site.className = "site";
@@ -154,24 +158,20 @@ function renderPrivate(status) {
         item.append(remove);
         return item;
     }));
-    if (sites.length === 0) {
-        const empty = document.createElement("li");
-        empty.className = "empty";
-        empty.textContent = t("privateEmpty");
-        empty.style.border = "0";
-        empty.style.background = "transparent";
-        empty.style.paddingLeft = "0";
-        list.append(empty);
-    }
+    list.hidden = sites.length === 0;
+    const note = element("private-note");
+    if (note)
+        note.hidden = sites.length > 0;
+    const title = element("private-title");
+    if (title)
+        title.title = t("privateNote");
     list.dataset.count = String(sites.length);
     const site = status.site;
     add.disabled = !site || sites.includes(site);
     add.dataset.site = site ?? "";
-    add.textContent = site
-        ? sites.includes(site)
-            ? t("privateIs", site)
-            : t("privateAdd", site)
-        : t("privateAddAny");
+    // The tab's site is named beside its group already; the button keeps to one line.
+    add.textContent = site && sites.includes(site) ? t("privateIs", site) : t("privateAddAny");
+    add.title = t("privateNote");
 }
 async function changePrivate(action, site) {
     show((await chrome.runtime.sendMessage({ type: "private", action, site, tab: forTab })));
@@ -230,7 +230,10 @@ function renderRecording(answer) {
             ? t("recordingNow", answer.events ?? 0)
             : answer.id
                 ? t("recordedDone", answer.events ?? 0)
-                : t("recordHint");
+                : "";
+    record.title = t("recordHint");
+    // The hint lives in the button's tooltip; the line below only reports a recording or a refusal.
+    note.hidden = document.body.dataset.agentTab !== "true" || note.textContent === "";
 }
 async function ask(action) {
     lastRecording = (await chrome.runtime.sendMessage({
@@ -260,19 +263,30 @@ const KINDS = {
     "person-action": "kindPersonAction",
     toast: "kindToast",
 };
+// A step's age in the narrowest unit, such as "now", "4s" or "2 мин": the list reads newest first.
 function ago(at) {
     const time = typeof at === "string" ? Date.parse(at) : Number.NaN;
     if (Number.isNaN(time))
         return "";
-    const seconds = Math.round((time - Date.now()) / 1000);
-    const format = new Intl.RelativeTimeFormat(language, { numeric: "auto", style: "narrow" });
-    if (Math.abs(seconds) < 60)
-        return format.format(seconds, "second");
-    if (Math.abs(seconds) < 3600)
-        return format.format(Math.round(seconds / 60), "minute");
-    if (Math.abs(seconds) < 86_400)
-        return format.format(Math.round(seconds / 3600), "hour");
-    return format.format(Math.round(seconds / 86_400), "day");
+    const seconds = Math.max(0, Math.round((Date.now() - time) / 1000));
+    if (seconds < 5)
+        return new Intl.RelativeTimeFormat(language, { numeric: "auto" }).format(0, "second");
+    const [value, unit] = seconds < 60
+        ? [seconds, "second"]
+        : seconds < 3600
+            ? [Math.round(seconds / 60), "minute"]
+            : seconds < 86_400
+                ? [Math.round(seconds / 3600), "hour"]
+                : [Math.round(seconds / 86_400), "day"];
+    return new Intl.NumberFormat(language, { style: "unit", unit, unitDisplay: "narrow" }).format(value);
+}
+// Playwright's own selector engines, as the recorder writes them, read as what the owner sees:
+// internal:role=textbox[name="Email"i] becomes textbox "Email".
+function readable(locator) {
+    return locator
+        .replace(/internal:role=([a-z]+)\[name="((?:[^"\\]|\\.)*)"[is]?\]/g, '$1 "$2"')
+        .replace(/internal:(?:text|label|attr=\[placeholder|testid=\[data-testid)=?"((?:[^"\\]|\\.)*)"[is]?\]?/g, '"$1"')
+        .replace(/internal:role=([a-z]+)/g, "$1");
 }
 function step(line) {
     const item = document.createElement("li");
@@ -299,7 +313,7 @@ function step(line) {
         record.api,
         record.action,
         record.method,
-        record.locator,
+        typeof record.locator === "string" ? readable(record.locator) : undefined,
         record.url,
         record.text,
         record.name,
@@ -323,7 +337,11 @@ function renderSteps(answer) {
         ? t(answer.error === "no_agent_tab" ? "activityNoTab" : "activityHost")
         : lines.length === 0
             ? t("activityNone")
-            : t("activityHint");
+            : "";
+    note.hidden = note.textContent === "";
+    const title = element("activity-title");
+    if (title)
+        title.title = t("activityHint");
     document.body.dataset.recent = String(lines.length);
 }
 async function refreshSteps() {
