@@ -169,6 +169,9 @@ console.log(getLatestLogs({ page: state.page, sinceLastCall: true }));
   - A `locator` (a dialog, a form, `main`) or a `frame` limits it to that part and saves most of
     the output. Its locators are relative to that part: `part.locator(...)`, `frame.locator(...)`.
     `interactiveOnly: true` keeps only controls and the labels and landmarks around them.
+  - `outline: true` gives the page's map instead: each landmark with a locator, its headings, and
+    how many links, buttons and fields each part holds. On a big page read the map first, then
+    the part you need with `snapshot({ page, locator: page.locator("role=main") })`.
   - Refs such as `[ref=e5]` appear in screenshot labels and in the snapshot of a frame of another
     process. `ref({ page, ref: "e5" })` reaches that element through its frame, and
     `refToLocator({ ref: "e5", page })` gives its selector, until the next labeled screenshot or

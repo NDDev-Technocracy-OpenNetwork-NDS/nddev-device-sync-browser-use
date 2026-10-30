@@ -3,7 +3,7 @@
 import { expect, test } from "bun:test";
 import type { Frame, Locator, Page } from "playwright-core";
 import { getAriaSnapshot } from "../agent/aria.js";
-import { refToLocator, snapshot } from "../agent/snapshot.js";
+import { outline, refToLocator, snapshot } from "../agent/snapshot.js";
 
 type Fixture = {
   page: Page;
@@ -209,4 +209,38 @@ test("refs resolve through the last view that showed them, never an earlier one"
   expect(refToLocator({ page, ref: "e1" })).toBe(
     'iframe[name="child"] >> internal:control=enter-frame >> aria-ref=e1',
   );
+});
+
+test("an outline maps landmarks with locators, headings and what each part holds", () => {
+  const view = [
+    "- banner:",
+    '  - link "Home" [id="home"]',
+    '  - searchbox "Search" [id="q"]',
+    '- navigation "Site":',
+    '  - role=link[name="Docs"i]',
+    '  - role=link[name="Blog"i]',
+    "- main:",
+    '  - heading "Install"',
+    '  - role=link[name="Download"i]',
+    '  - button "Copy" [id="copy"]',
+    '  - heading "Usage"',
+    '  - role=link[name="API"i]',
+    '- navigation "Footer":',
+    '  - role=link[name="Terms"i]',
+    '- navigation "Site":',
+    '  - role=link[name="Again"i]',
+  ].join("\n");
+  expect(outline(view)).toBe(
+    [
+      "Page: 7 links, 1 field, 1 button",
+      "- banner [role=banner]: 1 link, 1 field",
+      '- navigation "Site" [role=navigation[name="Site"i]]: 2 links',
+      "- main [role=main]: 2 links, 1 button",
+      '  - heading "Install": 1 link, 1 button',
+      '  - heading "Usage": 1 link',
+      '- navigation "Footer" [role=navigation[name="Footer"i]]: 1 link',
+      '- navigation "Site" [role=navigation[name="Site"i] >> nth=1]: 1 link',
+    ].join("\n"),
+  );
+  expect(outline('- heading "Alone"\n- role=link[name="One"i]')).toContain("No landmarks");
 });
