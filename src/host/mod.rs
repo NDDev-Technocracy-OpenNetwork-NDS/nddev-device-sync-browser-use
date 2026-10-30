@@ -1131,8 +1131,14 @@ impl Host {
             deliver(&mut state, &project, event);
         }
         let session = child.unwrap_or_else(|| tab_session(tab));
+        let restored = restored_lifecycle(method, params);
         let event = json!({ "method": method, "params": params, "sessionId": session });
         deliver(&mut state, &project, event);
+        for params in restored {
+            let event =
+                json!({ "method": "Page.lifecycleEvent", "params": params, "sessionId": session });
+            deliver(&mut state, &project, event);
+        }
     }
 
     fn on_attached(&self, message: &Value) {
@@ -2169,6 +2175,20 @@ fn view_session(state: &mut State, project: &str) -> view::Session {
 
 /// Sends an event to the project's client; a client that cannot keep up is
 /// disconnected rather than silently missing events.
+/// The load events of a document the browser restored from its back-forward cache. It loaded
+/// before and fires none again, yet Playwright, which turns that cache off in the browsers it
+/// launches, waits for them after `goBack` or `goForward`.
+fn restored_lifecycle(method: &str, params: &Value) -> Vec<Value> {
+    if method != "Page.frameNavigated" || params["type"] != "BackForwardCacheRestore" {
+        return Vec::new();
+    }
+    let frame = &params["frame"];
+    ["DOMContentLoaded", "load"]
+        .into_iter()
+        .map(|name| json!({ "frameId": frame["id"], "loaderId": frame["loaderId"], "name": name, "timestamp": 0.0 }))
+        .collect()
+}
+
 fn deliver(state: &mut State, project: &str, event: Value) {
     let Some(session) = state.sessions.get_mut(project) else {
         return;
@@ -2346,6 +2366,25 @@ mod tests {
         assert_eq!(count, Some(index));
         assert!(index > 2);
         assert_eq!(joined.as_bytes(), body.as_slice());
+    }
+
+    #[test]
+    fn a_document_restored_from_the_back_forward_cache_gets_its_load_events() {
+        let restored = json!({ "type": "BackForwardCacheRestore", "frame": { "id": "F", "loaderId": "L", "url": "http://a.test/" } });
+        let events = restored_lifecycle("Page.frameNavigated", &restored);
+        let names: Vec<_> = events
+            .iter()
+            .map(|event| event["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["DOMContentLoaded", "load"]);
+        assert!(
+            events
+                .iter()
+                .all(|event| event["frameId"] == "F" && event["loaderId"] == "L")
+        );
+        let loaded = json!({ "type": "Navigation", "frame": { "id": "F", "loaderId": "L" } });
+        assert!(restored_lifecycle("Page.frameNavigated", &loaded).is_empty());
+        assert!(restored_lifecycle("Page.navigatedWithinDocument", &restored).is_empty());
     }
 
     #[test]

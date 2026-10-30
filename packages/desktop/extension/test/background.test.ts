@@ -81,6 +81,7 @@ class Browser {
   readonly installed = new Event();
   // The window of each tab group, and every tab the worker created with the window it named.
   readonly groupWindows = new Map<number, number>();
+  nextGroup = 99;
   readonly created: { url: string; windowId: number | undefined }[] = [];
   readonly events = {
     tabsCreated: new Event(),
@@ -184,8 +185,11 @@ class Browser {
           return tab;
         },
         group: async ({ tabIds, groupId }: { tabIds: number[]; groupId?: number }) => {
-          for (const id of tabIds) this.move(id, groupId ?? 99);
-          return groupId ?? 99;
+          // Each new group gets its own id, as in Chrome; the first one is 99.
+          const target = groupId ?? this.nextGroup++;
+          await Bun.sleep(1);
+          for (const id of tabIds) this.move(id, target);
+          return target;
         },
         update: async (id: number, change?: { active?: boolean }) => {
           if (change?.active) this.focus.push(`tab ${id}`);
@@ -546,6 +550,22 @@ test("the host and the popup learn the owner's stored settings, even when the br
     observation: "off",
     privateSites: ["bank.example"],
   });
+});
+
+test("agent tabs opened at once for an area without a group share one new group", async () => {
+  const { browser, send } = await worker({}, []);
+  await send({ type: "claim", group: "p" })();
+  const answers = await Promise.all(
+    [1, 2, 3, 4].map(() => send({ type: "open", group: "p", url: "about:blank" })()),
+  );
+  expect(answers.map((answer) => answer.error)).toEqual([
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+  ]);
+  const groups = new Set(browser.created.map((_, index) => browser.tab(100 + index).groupId));
+  expect(groups.size).toBe(1);
 });
 
 test("a new agent tab opens in its area's window, not in the window the owner works in", async () => {
