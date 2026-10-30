@@ -235,6 +235,14 @@ beforeAll(async () => {
         return Response.redirect(`http://localhost:${fixture?.port}/files/plain`, 302);
       }
       if (path === "/files/plain") return attachment("moved body", "moved.txt");
+      // Pages of a history, each linking to the next: browsers keep them in the back-forward cache.
+      if (path.startsWith("/history/")) {
+        const n = Number(path.slice("/history/".length));
+        return new Response(
+          `<!doctype html><title>History ${n}</title><h1>Page ${n}</h1><a href="/history/${n + 1}">next</a>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      }
       // A large textual response: a burst of them outgrows one host command.
       if (path === "/api/large") {
         return Response.json({ items: "x".repeat(200_000) });
@@ -365,6 +373,8 @@ beforeAll(async () => {
     executablePath: chrome,
     headless: true,
     env,
+    // The owner's browser keeps the back-forward cache; Playwright turns it off by default.
+    ignoreDefaultArgs: ["--disable-back-forward-cache"],
     // Tabs keep their window's own size, as in the owner's browser: the observer emulates none.
     viewport: null,
     args: [
@@ -938,6 +948,48 @@ test("commands larger than Chrome passes from a host reach the page, and a comma
     await cli("session", "close", "large", "--close-tabs");
   }
 }, 120_000);
+
+test("history navigation completes when the browser restores a page from its back-forward cache", async () => {
+  await opened("history");
+  try {
+    const result = await run(
+      "history",
+      `const page = await context.newPage();
+       try {
+         await page.goto("${origin}/history/1");
+         await page.evaluate(() => addEventListener("pageshow", (e) => { window.__restored = e.persisted; }));
+         await page.click("text=next");
+         await page.waitForURL(/history\\/2$/);
+         await page.goBack({ timeout: 8000 });
+         const back = await page.locator("h1").textContent();
+         const restored = await page.evaluate(() => window.__restored === true);
+         await page.goForward({ timeout: 8000 });
+         const forward = await page.locator("h1").textContent();
+         return [back, restored, forward].join(" ");
+       } finally { await page.close(); }`,
+    );
+    expect(result.body.value).toBe("Page 1 true Page 2");
+  } finally {
+    await cli("session", "close", "history", "--close-tabs");
+  }
+});
+
+test("pages an agent opens at once in a new session share its one agent group", async () => {
+  await opened("parallel");
+  try {
+    const result = await run(
+      "parallel",
+      `const pages = await Promise.all(Array.from({ length: 6 }, () => context.newPage()));
+       try {
+         await Promise.all(pages.map((page, i) => page.goto("${origin}/history/" + i)));
+         return (await Promise.all(pages.map((page) => page.locator("h1").textContent()))).join(",");
+       } finally { await Promise.all(pages.map((page) => page.close())); }`,
+    );
+    expect(result.body.value).toBe("Page 0,Page 1,Page 2,Page 3,Page 4,Page 5");
+  } finally {
+    await cli("session", "close", "parallel", "--close-tabs");
+  }
+});
 
 // Recordings: screencast frames to video through ffmpeg with a ghost cursor, and a demo cut that
 // speeds up the time between executions. Skipped without ffmpeg.

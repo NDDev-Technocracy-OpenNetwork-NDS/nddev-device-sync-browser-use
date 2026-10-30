@@ -81,6 +81,7 @@ class Browser {
   readonly installed = new Event();
   // The window of each tab group, and every tab the worker created with the window it named.
   readonly groupWindows = new Map<number, number>();
+  nextGroup = 99;
   readonly created: { url: string; windowId: number | undefined }[] = [];
   readonly events = {
     tabsCreated: new Event(),
@@ -184,8 +185,11 @@ class Browser {
           return tab;
         },
         group: async ({ tabIds, groupId }: { tabIds: number[]; groupId?: number }) => {
-          for (const id of tabIds) this.move(id, groupId ?? 99);
-          return groupId ?? 99;
+          // Each new group gets its own id, as in Chrome; the first one is 99.
+          const target = groupId ?? this.nextGroup++;
+          await Bun.sleep(1);
+          for (const id of tabIds) this.move(id, target);
+          return target;
         },
         update: async (id: number, change?: { active?: boolean }) => {
           if (change?.active) this.focus.push(`tab ${id}`);
@@ -546,6 +550,63 @@ test("the host and the popup learn the owner's stored settings, even when the br
     observation: "off",
     privateSites: ["bank.example"],
   });
+});
+
+test("agent tabs opened at once for an area without a group share one new group", async () => {
+  const { browser, send } = await worker({}, []);
+  await send({ type: "claim", group: "p" })();
+  const answers = await Promise.all(
+    [1, 2, 3, 4].map(() => send({ type: "open", group: "p", url: "about:blank" })()),
+  );
+  expect(answers.map((answer) => answer.error)).toEqual([
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+  ]);
+  const groups = new Set(browser.created.map((_, index) => browser.tab(100 + index).groupId));
+  expect(groups.size).toBe(1);
+});
+
+test("events of one burst reach a host that takes batches as one message, in order", async () => {
+  const { browser, send } = await worker({ p: P }, [[1, P]]);
+  await send({ type: "claim", group: "p" })();
+  // Before the host announces batches, every event goes on its own.
+  browser.events.cdp.fire({ tabId: 1 }, "Network.webSocketFrameReceived", {
+    requestId: "w",
+    response: { payloadData: "a" },
+  });
+  expect(browser.posted.at(-1)).toMatchObject({
+    type: "event",
+    method: "Network.webSocketFrameReceived",
+  });
+  browser.port.onMessage.fire({ type: "features", batches: true });
+  const before = browser.posted.length;
+  for (let i = 0; i < 300; i++) {
+    browser.events.cdp.fire({ tabId: 1 }, "Network.webSocketFrameReceived", {
+      requestId: "w",
+      response: { payloadData: String(i) },
+    });
+  }
+  // Full batches go at once; the rest waits for the end of the task.
+  const full = browser.posted.slice(before);
+  expect(full.map((message) => (message.events as unknown[]).length)).toEqual([128, 128]);
+  // Any other message sends the waiting events first.
+  const answer = send({ type: "tabs", tabs: [1] });
+  await answer();
+  const after = browser.posted.slice(before + 2);
+  expect(after[0]).toMatchObject({ type: "events" });
+  expect(after[0]?.events).toHaveLength(44);
+  expect(after[1]).toMatchObject({ type: "result" });
+  const payloads = browser.posted
+    .slice(before)
+    .flatMap((message) =>
+      message.type === "events"
+        ? (message.events as { params: { response: { payloadData: string } } }[])
+        : [],
+    )
+    .map((event) => event.params.response.payloadData);
+  expect(payloads).toEqual(Array.from({ length: 300 }, (_, i) => String(i)));
 });
 
 test("a new agent tab opens in its area's window, not in the window the owner works in", async () => {

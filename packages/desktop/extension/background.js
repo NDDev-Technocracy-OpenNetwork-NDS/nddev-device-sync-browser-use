@@ -170,7 +170,48 @@ async function badge() {
     await chrome.action.setBadgeBackgroundColor({ color }).catch(() => undefined);
     await chrome.action.setBadgeText({ text });
 }
+// CDP events go to a host that takes them in batches as one message per burst: every message the
+// host gets costs a native-messaging round of its own, and a page's flood of events (WebSocket
+// frames, network traffic) would otherwise queue ahead of command answers. A batch closes at the
+// end of the current task, or once it holds `BATCH_EVENTS` events or about `BATCH_BYTES`; every
+// other message sends the batch first, so the host sees everything in its order.
+const BATCH_EVENTS = 128;
+const BATCH_BYTES = 4 * 1_048_576;
+let batches = false;
+let batch = [];
+let batchBytes = 0;
+let batchTimer;
+function flush() {
+    clearTimeout(batchTimer);
+    batchTimer = undefined;
+    if (batch.length === 0)
+        return;
+    const events = batch;
+    batch = [];
+    batchBytes = 0;
+    port?.postMessage(events.length === 1 ? events[0] : { type: "events", events });
+}
+// A rough size: the parts of an event that can be large, and an allowance for the rest.
+function weight(params) {
+    const text = (value) => (typeof value === "string" ? value.length : 0);
+    const response = params.response;
+    const request = params.request;
+    return 512 + text(params.data) + text(response?.payloadData) + text(request?.postData);
+}
+function forward(event) {
+    if (!batches) {
+        send(event);
+        return;
+    }
+    batch.push(event);
+    batchBytes += weight((event.params ?? {}));
+    if (batch.length >= BATCH_EVENTS || batchBytes >= BATCH_BYTES)
+        flush();
+    else
+        batchTimer ??= setTimeout(flush, 0);
+}
 function send(message) {
+    flush();
     port?.postMessage(message);
 }
 // One event about this worker's own Chrome work for the host's telemetry: a fixed name, an
@@ -230,6 +271,9 @@ function connect() {
             for (const done of abouts.splice(0))
                 done();
         }
+        else if (message.type === "features") {
+            batches = message.batches === true;
+        }
         else if (message.type === "incompatible") {
             // The host speaks another contract: nothing an agent asks can work until one is updated.
             hostContract = message.contract;
@@ -241,6 +285,9 @@ function connect() {
     next.onDisconnect.addListener(() => {
         // The host owned every session; without it no agent may keep control.
         port = undefined;
+        batches = false;
+        batch = [];
+        batchBytes = 0;
         hostContract = undefined;
         hostBuild = undefined;
         void detachAll().then(badge);
@@ -720,17 +767,38 @@ async function owned(group) {
     }
     return chrome.tabs.query({ groupId: id });
 }
+// The group each agent area is forming now. Tabs that open at once for an area without a group
+// wait for the one that forms it and join that group, rather than forming one each.
+const forming = new Map();
 async function join(tab, group) {
-    const current = groups.get(group);
-    const valid = current !== undefined && (await chrome.tabGroups.get(current).catch(() => undefined));
-    if (valid) {
-        await chrome.tabs.group({ tabIds: [tab], groupId: current });
-        return;
+    for (;;) {
+        const current = groups.get(group);
+        const valid = current !== undefined && (await chrome.tabGroups.get(current).catch(() => undefined));
+        if (valid) {
+            await chrome.tabs.group({ tabIds: [tab], groupId: current });
+            return;
+        }
+        const pending = forming.get(group);
+        if (pending) {
+            await pending.catch(() => undefined);
+            continue;
+        }
+        const formed = (async () => {
+            const created = await chrome.tabs.group({ tabIds: [tab] });
+            await chrome.tabGroups.update(created, { title: group, color: "cyan", collapsed: false });
+            groups.set(group, created);
+            await saveGroups();
+        })();
+        forming.set(group, formed);
+        try {
+            await formed;
+            return;
+        }
+        finally {
+            if (forming.get(group) === formed)
+                forming.delete(group);
+        }
     }
-    const created = await chrome.tabs.group({ tabIds: [tab] });
-    await chrome.tabGroups.update(created, { title: group, color: "cyan", collapsed: false });
-    groups.set(group, created);
-    await saveGroups();
 }
 async function own(tab, work) {
     grouping.add(tab);
@@ -1231,7 +1299,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
             return;
     }
     restore.track(tab, !source.sessionId, method, fields);
-    send({ type: "event", tab, session: source.sessionId, method, params });
+    forward({ type: "event", tab, session: source.sessionId, method, params });
 });
 chrome.debugger.onDetach.addListener((source, reason) => {
     const tab = source.tabId;
