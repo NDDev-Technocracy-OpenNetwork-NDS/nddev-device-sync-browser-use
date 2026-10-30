@@ -44,6 +44,12 @@ known not to work:
 
 ## Install
 
+- **The extension from the Chrome Web Store needs the NDS host on the same device.** Without the
+  host, the popup says so and links here. To install the host, check out this repository and install
+  Rust (the toolchain pinned in `rust-toolchain.toml`), Bun and `just`. Then run
+  `just install <browser>`, for example `just install chrome`. The host registers itself for that
+  browser and admits the store extension. The popup then shows "Connected", and agents start with
+  `nds-browser-use session new <project>`.
 - `just install` puts the host's `bin/` and the unpacked `extension/` under one prefix, and
   registers the host for one browser.
 - Loading the unpacked extension is the owner's action. After that, an install reloads it through

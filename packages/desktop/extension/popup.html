@@ -68,6 +68,8 @@
         background: var(--bad-soft); color: var(--bad); font-size: 12px;
       }
       .notice[hidden] { display: none; }
+      .notice.setup { background: var(--accent-soft); color: var(--text); }
+      .notice a { color: var(--accent); font-weight: 600; }
       section {
         margin: 0 12px 8px; padding: 10px 12px; background: var(--card);
         border: 1px solid var(--line); border-radius: var(--radius);
@@ -172,6 +174,10 @@
       </span>
     </header>
     <p id="mismatch" class="notice" hidden></p>
+    <p id="setup" class="notice setup" hidden>
+      <span data-i18n="setupNeeded">The NDS host is not running on this device. Agents need it to work in your browser.</span>
+      <a href="https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-browser-use/blob/main/docs/desktop.md#install" target="_blank" rel="noreferrer" data-i18n="setupLink">Set up the NDS host</a>
+    </p>
 
     <section aria-labelledby="control-title">
       <div class="row">
@@ -219,6 +225,7 @@
     <footer>
       <span id="versions"></span>
       <a href="https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-browser-use/blob/main/docs/agent-guide.md" target="_blank" rel="noreferrer" data-i18n="guide">Agent guide</a>
+      <a href="https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-browser-use/blob/main/PRIVACY.md" target="_blank" rel="noreferrer" data-i18n="privacyPolicy">Privacy</a>
       <span class="languages" role="group" aria-label="Language">
         <button type="button" data-language="en" aria-pressed="false">EN</button>
         <button type="button" data-language="ru" aria-pressed="false">RU</button>

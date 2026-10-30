@@ -110,6 +110,9 @@ function renderStatus(status: Status): void {
     notice.hidden = !mismatch;
     notice.textContent = mismatch ? t("mismatch", status.hostContract ?? "") : "";
   }
+  // Without the host nothing works: a store install tells the owner where to get it.
+  const setup = element("setup");
+  if (setup) setup.hidden = link !== "down";
   const toggle = element<HTMLButtonElement>("toggle");
   if (toggle) {
     toggle.setAttribute("aria-checked", String(status.enabled));

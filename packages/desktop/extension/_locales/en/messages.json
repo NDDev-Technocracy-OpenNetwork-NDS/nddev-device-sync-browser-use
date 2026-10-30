@@ -26,6 +26,12 @@
   "mismatch": {
     "message": "The NDS host speaks contract $1 and this extension does not. Update the extension, or run `nds-browser-use install` for a newer host."
   },
+  "setupNeeded": {
+    "message": "The NDS host is not running on this device. Agents need it to work in your browser."
+  },
+  "setupLink": {
+    "message": "Set up the NDS host"
+  },
   "controlTitle": {
     "message": "Agent control"
   },
@@ -190,6 +196,9 @@
   },
   "guide": {
     "message": "Agent guide"
+  },
+  "privacyPolicy": {
+    "message": "Privacy"
   },
   "versions": {
     "message": "Extension $1 · host $2"

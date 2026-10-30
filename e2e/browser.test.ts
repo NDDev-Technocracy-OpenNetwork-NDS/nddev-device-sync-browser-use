@@ -2388,3 +2388,36 @@ test("host telemetry is schema-valid and carries no page data", () => {
   }
   for (const event of events) expect(event["service.name"]).toBe("nddev-device-sync-browser-use");
 });
+
+// A store install on a device without the host: the popup says the host is missing and links to
+// its setup, and the footer links to the privacy policy. On Windows the registry registration of
+// this run reaches every Chrome for Testing profile, so a fresh profile still finds the host.
+test.skipIf(windows)("without the host the popup links to its setup", async () => {
+  const fresh = await chromium.launchPersistentContext(mkdtempSync(join(root, "no-host-")), {
+    executablePath: chrome,
+    headless: true,
+    env,
+    args: [`--disable-extensions-except=${installed}`, `--load-extension=${installed}`],
+  });
+  try {
+    const popup = await fresh.newPage();
+    await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+    await popup.waitForFunction(() => document.getElementById("setup")?.hidden === false);
+    expect(await popup.evaluate(() => document.body.dataset.link)).toBe("down");
+    expect(await popup.locator("#setup a").getAttribute("href")).toEndWith(
+      "/docs/desktop.md#install",
+    );
+    expect(
+      await popup.locator('footer a[data-i18n="privacyPolicy"]').getAttribute("href"),
+    ).toEndWith("/PRIVACY.md");
+  } finally {
+    await fresh.close();
+  }
+  // With the host the notice stays hidden.
+  const connected = await observer.newPage();
+  await connected.goto(`chrome-extension://${extensionId}/popup.html`);
+  // Rendered once the worker answers: "ok" or, with agent control off, "off".
+  await connected.waitForFunction(() => ["ok", "off"].includes(document.body.dataset.link ?? ""));
+  expect(await connected.locator("#setup").isHidden()).toBe(true);
+  await connected.close();
+});
