@@ -21,6 +21,15 @@ export function attach(page: Page): void {
   });
   page.on("requestfinished", (request) => open.delete(request));
   page.on("requestfailed", (request) => open.delete(request));
+  // Playwright installs its injected script in each new document at the first locator call:
+  // about 150 to 600 ms through the extension, paid by the agent's next click. Querying the
+  // document once it is parsed installs it while the agent still reads the page.
+  page.on("domcontentloaded", () => {
+    page
+      .locator(":root")
+      .count()
+      .catch(() => undefined);
+  });
 }
 
 export type LoadOptions = {
