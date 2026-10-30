@@ -1,7 +1,6 @@
-// Page content as text an agent reads cheaply: an element's cleaned HTML, and the main article
-// as markdown-like text, both with the search and diff views of snapshots.
-import { Readability } from "@mozilla/readability";
-import { parseHTML } from "linkedom";
+// Page content as text an agent reads cheaply: an element's cleaned HTML, and the main content
+// as Markdown, both with the search and diff views of snapshots.
+import { htmlToMarkdown } from "@mdream/js";
 import type { Locator, Page } from "playwright-core";
 import { type ViewOptions, Views } from "./text";
 
@@ -148,39 +147,184 @@ export async function getCleanHTML(options: HtmlOptions): Promise<string> {
   return html.show(page, `html ${target}`, `URL: ${page.url()}`, view, options);
 }
 
+export type MarkdownOptions = ViewOptions & {
+  page: Page;
+  /** Reads only this part instead of the page's main content. */
+  locator?: Locator | undefined;
+  /** Keeps links as `[text](url)`; by default only their text, which costs fewer tokens. */
+  links?: boolean | undefined;
+};
+
 /**
- * The page's main content, found by Mozilla Readability (Firefox Reader View) without
- * navigation, ads and sidebars, as text with its title, byline and excerpt.
+ * The page's main content as Markdown: headings, paragraphs, lists, tables, quotes and code
+ * blocks, without navigation, headers, footers, sidebars, buttons, media and hidden parts. The
+ * page itself walks its live tree, open shadow roots included, into a minimal HTML of these
+ * elements, and mdream turns that into Markdown.
  */
-export async function getPageMarkdown(options: ViewOptions & { page: Page }): Promise<string> {
+export async function getPageMarkdown(options: MarkdownOptions): Promise<string> {
   const { page } = options;
-  const { document } = parseHTML(await page.content());
-  const article = new Readability(document as unknown as Document).parse();
   const header = `URL: ${page.url()}`;
-  const body = article?.content ? text(article.content) : "";
-  // Listings and apps have no article: Readability keeps a heading or nothing of them. Their
-  // visible text stands in when the article is all but empty or a tenth of it; a real article in
-  // heavy navigation keeps its own, cleaner text.
-  const visible = await page
-    // biome-ignore lint/performance/useDomNodeTextContent: the rendered text, without hidden parts and with its line breaks, is the point.
-    .evaluate(() => document.body?.innerText ?? "")
-    .then(lines)
-    .catch(() => "");
-  if (visible.length > body.length && (body.length < 200 || body.length * 10 < visible.length)) {
-    const title = await page.title().catch(() => "");
-    const view = [`# ${title}`, "(no main article: the page's visible text)", visible].join("\n\n");
-    return articles.show(page, "article", header, view, options);
-  }
-  if (!article?.content) return `${header}\n\nNo readable content found`;
+  // Runs in the page: the root is the element to read, or the document element for the page's
+  // main part.
+  const outline = (root: Element, links: boolean): Outline => {
+    const length = (element: Element | null) =>
+      (element?.textContent ?? "").replace(/\s+/g, " ").length;
+    const body = document.body;
+    // The page's main part when it holds a fair share of the text; else the whole body.
+    const main =
+      root !== document.documentElement
+        ? root
+        : ([...document.querySelectorAll("main, [role=main], article, #content, #main")].find(
+            (element) => length(element) >= length(body) * 0.3,
+          ) ?? body);
+    const kept = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "blockquote"]);
+    for (const tag of ["table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "dl"]) {
+      kept.add(tag);
+    }
+    for (const tag of ["dt", "dd", "figcaption", "hr", "br", "strong", "b", "em", "i", "code"]) {
+      kept.add(tag);
+    }
+    for (const tag of ["del", "s", "kbd", "mark", "q"]) kept.add(tag);
+    const inline = new Set(["span", "a", "abbr", "label", "small", "time", "cite", "dfn", "u"]);
+    inline.add("sub");
+    inline.add("sup");
+    const dropped = new Set(["script", "style", "noscript", "template", "svg", "canvas", "iframe"]);
+    for (const tag of ["nav", "aside", "button", "dialog", "select", "input"]) {
+      dropped.add(tag);
+    }
+    for (const tag of ["textarea", "img", "picture", "video", "audio", "object", "embed", "map"]) {
+      dropped.add(tag);
+    }
+    const roles = new Set(["navigation", "banner", "contentinfo", "complementary", "search"]);
+    for (const role of ["dialog", "alertdialog", "menu", "menubar", "toolbar", "tablist"]) {
+      roles.add(role);
+    }
+    const escaped = (text: string) =>
+      text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const blocks = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "hr"]);
+    for (const tag of ["blockquote", "table", "thead", "tbody", "tfoot", "tr", "th", "td"]) {
+      blocks.add(tag);
+    }
+    for (const tag of ["caption", "dl", "dt", "dd", "figcaption", "pre"]) blocks.add(tag);
+    // A part of the output: its HTML, and whether it is a block (else text within a line).
+    type Part = { html: string; block: boolean };
+    // Inline runs between blocks become paragraphs; wrappers add no nesting of their own.
+    const join = (parts: Part[]): Part => {
+      if (!parts.some((part) => part.block)) {
+        return { html: parts.map((part) => part.html).join(""), block: false };
+      }
+      let html = "";
+      let run = "";
+      for (const part of parts) {
+        if (!part.block) run += part.html;
+        else {
+          if (run.trim()) html += `<p>${run}</p>`;
+          run = "";
+          html += part.html;
+        }
+      }
+      if (run.trim()) html += `<p>${run}</p>`;
+      return { html, block: true };
+    };
+    const walk = (node: Node): Part => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        return { html: escaped(node.textContent ?? ""), block: false };
+      }
+      if (!(node instanceof Element)) return { html: "", block: false };
+      const tag = node.localName;
+      if (dropped.has(tag) || (node !== main && roles.has(node.getAttribute("role") ?? ""))) {
+        return { html: "", block: false };
+      }
+      // `display: contents` has no box of its own, yet its children render.
+      const visible = node.checkVisibility() || getComputedStyle(node).display === "contents";
+      if (!visible || node.getAttribute("aria-hidden") === "true") {
+        return { html: "", block: false };
+      }
+      // A header or footer outside any article or section is the page's banner or footer; one
+      // inside belongs to that part, such as an article's title and byline.
+      if (
+        (tag === "header" || tag === "footer") &&
+        node.parentElement?.closest("article, aside, main, nav, section") === null
+      ) {
+        return { html: "", block: false };
+      }
+      // A footnote mark such as Wikipedia's "[5]" only points elsewhere on the page.
+      if (
+        (tag === "sup" || tag === "sub") &&
+        node.querySelector('a[href^="#"]') !== null &&
+        (node.textContent ?? "").trim().length <= 12
+      ) {
+        return { html: "", block: false };
+      }
+      if (tag === "pre") {
+        const language = /language-(\S+)/.exec(
+          `${node.className} ${node.querySelector("code")?.className ?? ""}`,
+        )?.[1];
+        const code = escaped(node.textContent ?? "");
+        return {
+          html: `<pre><code${language ? ` class="language-${language}"` : ""}>${code}</code></pre>`,
+          block: true,
+        };
+      }
+      // An open shadow root renders instead of its host's children, which its slots place.
+      const children =
+        node.shadowRoot !== null
+          ? [...node.shadowRoot.childNodes]
+          : tag === "slot"
+            ? (node as HTMLSlotElement).assignedNodes({ flatten: true })
+            : [...node.childNodes];
+      const inner = join(children.map(walk));
+      if (tag === "a") {
+        const href = (node as HTMLAnchorElement).href;
+        return links && href && !href.startsWith("javascript:") && inner.html.trim() && !inner.block
+          ? {
+              html: `<a href="${escaped(href).replace(/"/g, "&quot;")}">${inner.html}</a>`,
+              block: false,
+            }
+          : inner;
+      }
+      if (blocks.has(tag)) {
+        return inner.html.trim() || tag === "hr" || tag === "td" || tag === "th"
+          ? { html: `<${tag}>${inner.html}</${tag}>`, block: true }
+          : { html: "", block: false };
+      }
+      if (kept.has(tag)) {
+        return inner.html.trim() && !inner.block
+          ? { html: `<${tag}>${inner.html}</${tag}>`, block: false }
+          : inner;
+      }
+      if (inline.has(tag) || inner.block) return inner;
+      // Any other element with text of its own is a block: a paragraph apart from its neighbours.
+      return inner.html.trim() ? { html: `<p>${inner.html}</p>`, block: true } : inner;
+    };
+    const meta = (name: string) =>
+      document
+        .querySelector(`meta[name="${name}"], meta[property="${name}"]`)
+        ?.getAttribute("content")
+        ?.trim() ?? "";
+    return {
+      title: document.title.trim(),
+      description: meta("description") || meta("og:description"),
+      author: meta("author"),
+      published: meta("article:published_time"),
+      html: walk(main).html,
+    };
+  };
+  const links = options.links ?? false;
+  const part = await (options.locator ?? page.locator(":root")).first().evaluate(outline, links);
+  const body = htmlToMarkdown(part.html, { origin: page.url() })
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!body) return `${header}\n\nNo readable content found`;
   const byline = [
-    article.byline ? `Author: ${article.byline}` : "",
-    article.siteName ? `Site: ${article.siteName}` : "",
-    article.publishedTime ? `Published: ${article.publishedTime}` : "",
+    part.author ? `Author: ${part.author}` : "",
+    part.published ? `Published: ${part.published}` : "",
   ].filter(Boolean);
   const view = [
-    `# ${article.title ?? ""}`,
+    part.title ? `# ${part.title}` : "",
     byline.join(" | "),
-    article.excerpt ? `> ${article.excerpt}` : "",
+    part.description && !body.includes(part.description) ? `> ${part.description}` : "",
     body,
   ]
     .filter(Boolean)
@@ -188,53 +332,10 @@ export async function getPageMarkdown(options: ViewOptions & { page: Page }): Pr
   return articles.show(page, "article", header, view, options);
 }
 
-// A page's innerText without blank runs and with one space between table cells.
-function lines(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => line.replace(/[\t ]+/g, " ").trim())
-    .filter((line, index, all) => line !== "" || (all[index - 1] ?? "") !== "")
-    .join("\n")
-    .trim();
-}
-
-// Readability's article HTML as plain text that keeps headings, lists, quotes, code and tables.
-function text(content: string): string {
-  const { document } = parseHTML(`<!doctype html><html><body>${content}</body></html>`);
-  const blocks: string[] = [];
-  const inline = (node: Node): string => (node.textContent ?? "").replace(/\s+/g, " ").trim();
-  const walk = (node: Node) => {
-    if (node.nodeType !== 1) return;
-    const tag = (node as Element).tagName.toLowerCase();
-    const heading = /^h([1-6])$/.exec(tag);
-    if (heading) blocks.push(`${"#".repeat(Number(heading[1]))} ${inline(node)}`);
-    else if (tag === "p") blocks.push(inline(node));
-    else if (tag === "li") blocks.push(`- ${inline(node)}`);
-    else if (tag === "blockquote") blocks.push(`> ${inline(node)}`);
-    else if (tag === "pre") blocks.push(`\`\`\`\n${node.textContent ?? ""}\n\`\`\``);
-    else if (tag === "table") {
-      // One block per table, a line per row: blank lines between rows only cost tokens.
-      const rows: string[] = [];
-      const collect = (part: Element) => {
-        for (const child of part.children) {
-          const name = child.tagName.toLowerCase();
-          if (name === "tr") {
-            const cells = [...child.children].map(inline).filter(Boolean);
-            if (cells.length > 0) rows.push(`| ${cells.join(" | ")} |`);
-          } else if (["thead", "tbody", "tfoot"].includes(name)) collect(child);
-        }
-      };
-      collect(node as Element);
-      if (rows.length > 0) blocks.push(rows.join("\n"));
-    } else if (["dt", "dd", "figcaption", "caption", "summary"].includes(tag)) {
-      blocks.push(inline(node));
-    } else if (
-      // Text written straight into a wrapper, outside any paragraph.
-      [...node.childNodes].some((child) => child.nodeType === 3 && child.textContent?.trim())
-    ) {
-      blocks.push(inline(node));
-    } else for (const child of node.childNodes) walk(child);
-  };
-  for (const child of document.body.childNodes) walk(child);
-  return blocks.filter(Boolean).join("\n\n");
-}
+type Outline = {
+  title: string;
+  description: string;
+  author: string;
+  published: string;
+  html: string;
+};
