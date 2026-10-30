@@ -725,7 +725,8 @@ async function helpers(): Promise<void> {
      const none = getLatestLogs({ page, sinceLastCall: true });
      const box = await inspect({ locator: page.locator("#box") });
      const input = await inspect({ locator: page.locator("#name") });
-     await page.click("#fail"); await page.click("#pop"); await page.waitForTimeout(500);
+     // The new tab is reported once its popup event arrives, later than 500 ms on a loaded runner.
+     await page.click("#fail"); await Promise.all([page.waitForEvent("popup"), page.click("#pop")]); await page.waitForTimeout(500);
      return JSON.stringify({ loaded: loaded.success, first, again, found, changed, logs, none, box, input, save, ref })`,
     "--timeout",
     "20000",
