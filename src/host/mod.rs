@@ -26,11 +26,11 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU8, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
-    sync::{Semaphore, mpsc, oneshot, watch},
+    sync::{Notify, Semaphore, mpsc, oneshot, watch},
 };
 
 /// Chrome accepts at most 1 MiB per message from a host.
@@ -98,6 +98,45 @@ pub(crate) struct Host {
     pending: Mutex<HashMap<u64, Waiter>>,
     next_request: AtomicU64,
     state: Mutex<State>,
+    /// The host binary as Chrome started it, when this host may hand over to a newer install.
+    binary: Option<Binary>,
+    /// Ends this host so the extension starts the installed binary when it reconnects.
+    restart: Notify,
+}
+
+/// A host binary's identity on disk: an install replaces the file under the same path. A copy can
+/// keep its source's size and modification time (macOS clones files), so on Unix the file's own
+/// device and inode decide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Binary {
+    path: PathBuf,
+    len: u64,
+    modified: Option<SystemTime>,
+    file: Option<(u64, u64)>,
+}
+
+impl Binary {
+    fn at(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::MetadataExt;
+            Some((metadata.dev(), metadata.ino()))
+        };
+        #[cfg(not(unix))]
+        let file = None;
+        Some(Self {
+            path: path.to_owned(),
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            file,
+        })
+    }
+
+    /// Whether another file now stands at this binary's path.
+    fn replaced(&self) -> bool {
+        Self::at(&self.path).is_some_and(|now| now != *self)
+    }
 }
 
 /// The one extension contract this host speaks: every cdp and close request names its group,
@@ -267,7 +306,17 @@ pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
         return Err(HostError::Origin);
     }
     let installed = installed_manifest(origin);
-    serve(config, installed, tokio::io::stdin(), tokio::io::stdout()).await
+    let binary = std::env::current_exe()
+        .ok()
+        .and_then(|path| Binary::at(&path));
+    serve_host(
+        config,
+        installed,
+        binary,
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    )
+    .await
 }
 
 /// The host over any browser link that speaks the extension's framed protocol: the desktop
@@ -275,6 +324,22 @@ pub async fn run(origin: &str, config: Config) -> Result<(), HostError> {
 pub async fn serve<R, W>(
     config: Config,
     installed: Option<PathBuf>,
+    input: R,
+    output: W,
+) -> Result<(), HostError>
+where
+    R: AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    serve_host(config, installed, None, input, output).await
+}
+
+/// [`serve`], for a host Chrome started from `binary`: when an install replaces that file and no
+/// session is open, `update` ends this host and the extension starts the new one.
+async fn serve_host<R, W>(
+    config: Config,
+    installed: Option<PathBuf>,
+    binary: Option<Binary>,
     mut input: R,
     mut output: W,
 ) -> Result<(), HostError>
@@ -314,6 +379,8 @@ where
         pending: Mutex::default(),
         next_request: AtomicU64::new(1),
         state: Mutex::default(),
+        binary,
+        restart: Notify::new(),
     });
     tracing::info!(event.name = "browser.host.started", outcome = "ready");
     // The activity journal keeps one week within its size bound (docs/observability.md).
@@ -329,13 +396,16 @@ where
     let relay_task = tokio::spawn(relay::serve(host.clone(), cdp));
     let sweep_task = tokio::spawn(host.clone().sweep());
     let ended = loop {
-        match read_message(&mut input).await {
-            Ok(Some(body)) => match serde_json::from_slice(&body) {
-                Ok(message) => host.on_extension(message),
+        tokio::select! {
+            message = read_message(&mut input) => match message {
+                Ok(Some(body)) => match serde_json::from_slice(&body) {
+                    Ok(message) => host.on_extension(message),
+                    Err(_) => break "invalid_frame",
+                },
+                Ok(None) => break "extension_closed",
                 Err(_) => break "invalid_frame",
             },
-            Ok(None) => break "extension_closed",
-            Err(_) => break "invalid_frame",
+            () = host.restart.notified() => break "restarting",
         }
     };
     control_task.abort();
@@ -1280,6 +1350,7 @@ impl Host {
                 },
             }
         };
+        let restarting = matches!(reply, Reply::Updated { restart: true, .. });
         let payload = serde_json::to_vec(&reply)
             .ok()
             .filter(|payload| payload.len() <= PAYLOAD_LIMIT)
@@ -1313,6 +1384,11 @@ impl Host {
         // the agent client cannot read buffered reply bytes after its peer has closed.
         let mut rest = [0u8; 1];
         let _ = tokio::time::timeout(CONTROL_IO, reader.read(&mut rest)).await;
+        // The client has the answer that the host restarts; only now does it end.
+        if restarting {
+            tracing::info!(event.name = "browser.host.restart", outcome = "pending");
+            self.restart.notify_one();
+        }
     }
 
     async fn handle(&self, request: Request) -> Reply {
@@ -1345,9 +1421,13 @@ impl Host {
                         refusal: Refusal::ExtensionUnavailable,
                     };
                 }
-                Ok(Reply::Updated {
-                    reload: self.update(),
-                })
+                let reload = self.update();
+                // A reloading extension starts the installed host anyway. Otherwise a replaced
+                // binary takes over once no session needs this host: it ends after this reply.
+                let restart = !reload
+                    && self.binary.as_ref().is_some_and(Binary::replaced)
+                    && self.state().sessions.is_empty();
+                Ok(Reply::Updated { reload, restart })
             }
             Request::Open { project } => self.open(&project).await.map(Reply::Session),
             Request::CreateOwned { project } => {
@@ -2218,6 +2298,35 @@ mod tests {
         assert_eq!(reload_target("0.0.2", Some("0.0.2".into())), None);
         assert_eq!(reload_target("", Some("0.0.2".into())), None);
         assert_eq!(reload_target("0.0.1", None), None);
+    }
+
+    #[test]
+    fn only_another_file_at_the_binary_path_is_a_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("nds-browser-use");
+        std::fs::write(&path, b"host 1").unwrap();
+        let started = Binary::at(&path).unwrap();
+        assert!(!started.replaced());
+        // An install renames a new file over the path; the running one keeps its own inode.
+        let staged = root.path().join("staged");
+        std::fs::write(&staged, b"host 2, a longer build").unwrap();
+        std::fs::rename(&staged, &path).unwrap();
+        assert!(started.replaced());
+        // A copy with the same size and time is still another file.
+        let same = Binary::at(&path).unwrap();
+        let copy = root.path().join("copy");
+        std::fs::copy(&path, &copy).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&copy)
+            .unwrap()
+            .set_modified(same.modified.unwrap())
+            .unwrap();
+        std::fs::rename(&copy, &path).unwrap();
+        assert_eq!(cfg!(unix), same.replaced());
+        // A missing file is no newer install to hand over to.
+        std::fs::remove_file(&path).unwrap();
+        assert!(!started.replaced());
     }
 
     #[test]

@@ -54,6 +54,10 @@ known not to work:
   registers the host for one browser.
 - Loading the unpacked extension is the owner's action. After that, an install reloads it through
   the host.
+- An install that changes only the host replaces its binary. `nds-browser-use update` then ends the
+  running host once no session is open (`"restart": true`), and the extension starts the new
+  binary when it reconnects about a second later. With sessions open it answers `"restart": false`;
+  run it again after they close.
 - The Chrome Web Store build is the same extension without the pinned `key`.
 
 ## Versions

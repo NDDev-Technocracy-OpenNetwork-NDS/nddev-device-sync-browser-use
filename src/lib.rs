@@ -119,12 +119,12 @@ pub trait BrowserUse {
         close_tabs: bool,
         cancellation: CancellationToken,
     ) -> impl Future<Output = Result<(), Error>> + Send;
-    /// Reloads an unpacked extension whose installed files are newer; returns
-    /// whether a reload was requested.
+    /// Reloads an unpacked extension whose installed files are newer, or else ends a host whose
+    /// binary an install replaced while no session is open; returns whether each was requested.
     fn update(
         &self,
         cancellation: CancellationToken,
-    ) -> impl Future<Output = Result<bool, Error>> + Send;
+    ) -> impl Future<Output = Result<(bool, bool), Error>> + Send;
     /// Runs Playwright code in the project's executor. `expect` refuses the run
     /// when that tab's document was replaced or the tab left the session.
     fn execute(

@@ -248,7 +248,8 @@ The [privacy policy](PRIVACY.md), in English and Russian, covers the extension a
 Run `just check`, then `just browser-check` with `NDS_TEST_CHROME` set to the
 Chrome for Testing build pinned in `provider.lock.json`. `just install
 <browser>` installs locally and then runs `nds-browser-use update`, which
-reloads a connected unpacked extension from the new files; `just package`
+reloads a connected unpacked extension from the new files, or restarts a host whose binary
+alone changed once no session is open; `just package`
 builds the Chrome Web Store zip.
 The host admits the pinned unpacked build and the published store item
 `lpnfnhkdjamhnoknoohhmjfhhjkeofio`.

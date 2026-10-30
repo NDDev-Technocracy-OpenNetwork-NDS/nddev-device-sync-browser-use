@@ -76,19 +76,24 @@ async fn main() -> ExitCode {
             tracing::error!(event.name = "browser.host.failed", outcome = "error", error.type = host_error(&host::HostError::Origin));
             return ExitCode::from(2);
         }
-        return match install::load() {
+        let code = match install::load() {
             Ok(config) => match host::run(&arguments[0], config).await {
-                Ok(()) => ExitCode::SUCCESS,
+                Ok(()) => 0,
                 Err(error) => {
                     tracing::error!(event.name = "browser.host.failed", outcome = "error", error.type = host_error(&error));
-                    ExitCode::from(2)
+                    2
                 }
             },
             Err(error) => {
                 tracing::error!(event.name = "browser.host.failed", outcome = "error", error.type = error.code());
-                ExitCode::from(2)
+                2
             }
         };
+        // A host that ends to restart has not seen stdin close: its reader still waits in a
+        // blocking thread, which the runtime would wait for forever. The process ends here, after
+        // its telemetry is flushed.
+        drop(_telemetry);
+        std::process::exit(code);
     }
     let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
     // A device runs the command with its own CLI; the guide, the device list and installing stay
@@ -627,10 +632,9 @@ async fn client(words: &[&str]) -> ExitCode {
             .status(cancellation)
             .await
             .map(|status| print(&status)),
-        ["update"] => client
-            .update(cancellation)
-            .await
-            .map(|reload| print(&serde_json::json!({ "reload": reload }))),
+        ["update"] => client.update(cancellation).await.map(|(reload, restart)| {
+            print(&serde_json::json!({ "reload": reload, "restart": restart }))
+        }),
         ["session", "new", project] => client
             .open(project, cancellation)
             .await
