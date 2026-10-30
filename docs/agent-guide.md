@@ -185,8 +185,11 @@ console.log(getLatestLogs({ page: state.page, sinceLastCall: true }));
   state. Use it instead of `page.evaluate` for layout questions.
 - **`getCleanHTML({ locator, search? })`** returns HTML without scripts and styles: one line per
   block element, with links, code and emphasis kept inside their sentence.
-- **`getPageMarkdown({ page, search? })`** returns the main article as text, tables as rows. A page
-  without an article, such as a listing or an app, gives its visible text instead.
+- **`getPageMarkdown({ page, locator?, links?, search? })`** returns the page's main content as
+  Markdown: headings, paragraphs, lists, tables, quotes and code blocks with their language. It
+  leaves out navigation, the page's header and footer, sidebars, buttons, media, hidden parts and
+  footnote marks, and reads open shadow roots. Links keep only their text unless `links: true`.
+  `locator` reads just that part.
 - **`screenshotWithAccessibilityLabels({ page, locator?, interactiveOnly? })`** writes a
   screenshot with a ref label on every interactive element and lists those elements, one line each:
   `- button "Save" [ref=e8]`. Use it for grids, maps and other visual layouts. `locator` labels only that part of the page; `interactiveOnly: false` also

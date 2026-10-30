@@ -8,6 +8,9 @@ import type { BrowserContext, ConsoleMessage, Page, Request } from "playwright-c
 import { hostCommand, observation, onObservation } from "./host";
 
 const BATCH = 32;
+// The host takes a command of at most 1 MiB, the native messaging bound; a larger one ends the
+// executor's connection. A batch of records with their envelope stays below it.
+const BATCH_BYTES = 900 * 1024;
 const SEND_MS = 250;
 // Bodies the host may keep: textual and at most this large.
 const BODY_BYTES = 256 * 1024;
@@ -43,6 +46,7 @@ type Raw = { [field: string]: unknown };
 let started = false;
 let exec: number | undefined;
 let queue: Raw[] = [];
+let queued = 0;
 let timer: ReturnType<typeof setTimeout> | undefined;
 const pages = new WeakMap<Page, number>();
 let nextPage = 0;
@@ -55,7 +59,22 @@ function collecting(): boolean {
 /** Queues one raw record for the host, when the profile collects. */
 export function emit(record: Raw): void {
   if (!collecting()) return;
-  queue.push({ at: new Date().toISOString(), ...(exec === undefined ? {} : { exec }), ...record });
+  let full: Raw = {
+    at: new Date().toISOString(),
+    ...(exec === undefined ? {} : { exec }),
+    ...record,
+  };
+  let size = Buffer.byteLength(JSON.stringify(full));
+  // A body that JSON escaping grows past a batch on its own is left out, as a large one is.
+  if (size > BATCH_BYTES && "body" in full) {
+    const { body: _, ...rest } = full;
+    full = { ...rest, bodyOmitted: "too-large" };
+    size = Buffer.byteLength(JSON.stringify(full));
+  }
+  if (size > BATCH_BYTES) return;
+  if (queued + size > BATCH_BYTES) void send(false);
+  queue.push(full);
+  queued += size;
   if (queue.length >= BATCH) void send(false);
   else timer ??= setTimeout(() => void send(false), SEND_MS);
 }
@@ -65,6 +84,7 @@ async function send(flush: boolean): Promise<void> {
   timer = undefined;
   const records = queue;
   queue = [];
+  queued = 0;
   if (records.length > 0 || flush) await hostCommand("NDS.activity", { records, flush });
 }
 
