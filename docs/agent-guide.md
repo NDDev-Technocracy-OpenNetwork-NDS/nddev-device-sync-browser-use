@@ -420,4 +420,6 @@ Use these only when locators cannot express the action.
   places the owner did not ask for.
 - **Limits.** Outside the agent's reach: `chrome://` pages, the Chrome Web Store, other
   extensions' pages, browser and OS dialogs, browser-wide cookies, new browser contexts and
-  permission prompts.
+  permission prompts. One browser command carries at most 32 MiB, such as the HTML of
+  `setContent`, an `evaluate` argument or a `route.fulfill` body; a larger one is refused, and the
+  session goes on.
