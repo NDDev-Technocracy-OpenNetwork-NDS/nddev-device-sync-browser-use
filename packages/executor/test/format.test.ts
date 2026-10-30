@@ -363,3 +363,10 @@ test("Playwright waits always end inside the execution's remaining budget", () =
     expect(waitBudget(budget) <= budget).toBe(true);
   }
 });
+
+test("a closed page's error says how to go on", () => {
+  const error = new Error("page.title: Target page, context or browser has been closed");
+  expect(describeError(error)).toBe(
+    "page.title: Target page, context or browser has been closed (the page is closed: assign an open one, such as state.page = await context.newPage())",
+  );
+});

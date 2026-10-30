@@ -83,7 +83,7 @@ export async function getCleanHTML(options: HtmlOptions): Promise<string> {
     };
     const flat = (node: Node): string => {
       if (node.nodeType === Node.TEXT_NODE) {
-        return cut((node.textContent ?? "").replace(/\s+/g, " "), 300);
+        return cut((node.textContent ?? "").replace(/\s+/g, " "), 1000);
       }
       if (!(node instanceof Element)) return "";
       const tag = node.tagName.toLowerCase();
@@ -158,14 +158,15 @@ export async function getPageMarkdown(options: ViewOptions & { page: Page }): Pr
   const article = new Readability(document as unknown as Document).parse();
   const header = `URL: ${page.url()}`;
   const body = article?.content ? text(article.content) : "";
-  // Listings, tables and apps have no article: Readability keeps a heading or nothing of them.
-  // Their visible text stands in when it holds four times as much.
+  // Listings and apps have no article: Readability keeps a heading or nothing of them. Their
+  // visible text stands in when the article is all but empty or a tenth of it; a real article in
+  // heavy navigation keeps its own, cleaner text.
   const visible = await page
     // biome-ignore lint/performance/useDomNodeTextContent: the rendered text, without hidden parts and with its line breaks, is the point.
     .evaluate(() => document.body?.innerText ?? "")
     .then(lines)
     .catch(() => "");
-  if (visible && body.length * 4 < visible.length) {
+  if (visible.length > body.length && (body.length < 200 || body.length * 10 < visible.length)) {
     const title = await page.title().catch(() => "");
     const view = [`# ${title}`, "(no main article: the page's visible text)", visible].join("\n\n");
     return articles.show(page, "article", header, view, options);
@@ -211,9 +212,20 @@ function text(content: string): string {
     else if (tag === "li") blocks.push(`- ${inline(node)}`);
     else if (tag === "blockquote") blocks.push(`> ${inline(node)}`);
     else if (tag === "pre") blocks.push(`\`\`\`\n${node.textContent ?? ""}\n\`\`\``);
-    else if (tag === "tr") {
-      const cells = [...(node as Element).children].map(inline).filter(Boolean);
-      if (cells.length > 0) blocks.push(`| ${cells.join(" | ")} |`);
+    else if (tag === "table") {
+      // One block per table, a line per row: blank lines between rows only cost tokens.
+      const rows: string[] = [];
+      const collect = (part: Element) => {
+        for (const child of part.children) {
+          const name = child.tagName.toLowerCase();
+          if (name === "tr") {
+            const cells = [...child.children].map(inline).filter(Boolean);
+            if (cells.length > 0) rows.push(`| ${cells.join(" | ")} |`);
+          } else if (["thead", "tbody", "tfoot"].includes(name)) collect(child);
+        }
+      };
+      collect(node as Element);
+      if (rows.length > 0) blocks.push(rows.join("\n"));
     } else if (["dt", "dd", "figcaption", "caption", "summary"].includes(tag)) {
       blocks.push(inline(node));
     } else if (

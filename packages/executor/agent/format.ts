@@ -399,9 +399,17 @@ export function describeError(error: unknown): string {
     .filter((line) => line.startsWith("- "))
     .map((line) => line.slice(2));
   if (parts.name !== "TimeoutError" || log.length === 0) {
+    // A closed page says what to do next; the close itself printed no warning when the agent
+    // closed it.
+    const shown = /Target page, context or browser has been closed/.test(head)
+      ? message.replace(
+          head,
+          `${head} (the page is closed: assign an open one, such as state.page = await context.newPage())`,
+        )
+      : message;
     return parts.name === "Error" || parts.name === "TimeoutError"
-      ? message
-      : `${parts.name}: ${message}`;
+      ? shown
+      : `${parts.name}: ${shown}`;
   }
   const reason = [...log].reverse().find((line) => REASONS.some((pattern) => pattern.test(line)));
   const waited = log.some((line) => /locator resolved to/.test(line));
