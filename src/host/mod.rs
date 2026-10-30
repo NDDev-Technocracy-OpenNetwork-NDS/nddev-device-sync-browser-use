@@ -104,21 +104,32 @@ pub(crate) struct Host {
     restart: Notify,
 }
 
-/// A host binary's identity on disk: an install replaces the file under the same path.
+/// A host binary's identity on disk: an install replaces the file under the same path. A copy can
+/// keep its source's size and modification time (macOS clones files), so on Unix the file's own
+/// device and inode decide.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Binary {
     path: PathBuf,
     len: u64,
     modified: Option<SystemTime>,
+    file: Option<(u64, u64)>,
 }
 
 impl Binary {
     fn at(path: &Path) -> Option<Self> {
         let metadata = std::fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::MetadataExt;
+            Some((metadata.dev(), metadata.ino()))
+        };
+        #[cfg(not(unix))]
+        let file = None;
         Some(Self {
             path: path.to_owned(),
             len: metadata.len(),
             modified: metadata.modified().ok(),
+            file,
         })
     }
 
@@ -2301,6 +2312,18 @@ mod tests {
         std::fs::write(&staged, b"host 2, a longer build").unwrap();
         std::fs::rename(&staged, &path).unwrap();
         assert!(started.replaced());
+        // A copy with the same size and time is still another file.
+        let same = Binary::at(&path).unwrap();
+        let copy = root.path().join("copy");
+        std::fs::copy(&path, &copy).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&copy)
+            .unwrap()
+            .set_modified(same.modified.unwrap())
+            .unwrap();
+        std::fs::rename(&copy, &path).unwrap();
+        assert_eq!(cfg!(unix), same.replaced());
         // A missing file is no newer install to hand over to.
         std::fs::remove_file(&path).unwrap();
         assert!(!started.replaced());
