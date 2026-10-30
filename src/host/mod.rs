@@ -35,6 +35,10 @@ use tokio::{
 
 /// Chrome accepts at most 1 MiB per message from a host.
 const TO_EXTENSION_LIMIT: usize = 1_048_576;
+/// The bytes of a larger message one part carries. JSON escaping at most doubles them (serde's
+/// body escapes control characters already; only `"` and `\` grow), which keeps every part with
+/// its envelope within [`TO_EXTENSION_LIMIT`].
+const PART_BYTES: usize = 500 * 1024;
 /// Chrome sends at most 64 MiB; large CDP results (screenshots) stay well below this.
 const FROM_EXTENSION_LIMIT: usize = 32 * 1_048_576;
 const EXTENSION_REPLY: Duration = Duration::from_secs(30);
@@ -156,6 +160,8 @@ struct State {
     tabs: HashMap<i64, Tab>,
     /// The connected extension names agent downloads' files (see [`downloads`]).
     downloads: bool,
+    /// The connected extension joins a message the host sends in parts (see [`parts`]).
+    parts: bool,
     /// The owner's observation profile (see [`observation`]).
     observation: observation::Observation,
     /// The owner's private sites, of which the journal keeps no content (`observation::sites`).
@@ -463,6 +469,31 @@ fn frame(body: &[u8]) -> Option<Vec<u8>> {
     Some(framed)
 }
 
+/// A message larger than Chrome takes from a host, as consecutive framed parts of at most
+/// [`PART_BYTES`] of its UTF-8 body each. They go out in one write, so nothing comes between them,
+/// and the extension joins them before it reads the message.
+fn parts(body: &[u8]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(body).ok()?;
+    let mut slices = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(PART_BYTES);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (slice, next) = rest.split_at(end);
+        slices.push(slice);
+        rest = next;
+    }
+    let count = slices.len();
+    let mut framed = Vec::with_capacity(body.len() * 2);
+    for (index, data) in slices.into_iter().enumerate() {
+        let part = json!({ "type": "part", "index": index, "count": count, "data": data });
+        framed.extend(frame(&serde_json::to_vec(&part).ok()?)?);
+    }
+    Some(framed)
+}
+
 /// `just install` places `bin/` and `extension/` under one prefix; only the
 /// unpacked build reloads from disk, the store build updates through the store.
 fn installed_manifest(origin: &str) -> Option<PathBuf> {
@@ -612,10 +643,19 @@ impl Host {
         }
         let id = self.next_request.fetch_add(1, Ordering::Relaxed);
         message["id"] = id.into();
+        // A command larger than Chrome takes from a host goes in parts to an extension that joins
+        // them, and is refused to one that does not; the client's connection stays.
+        let joins = self.state().parts;
         let framed = serde_json::to_vec(&message)
             .map_err(|_| Failure::Refused(Refusal::InvalidRequest))
-            .and_then(|body| frame(&body).ok_or(Failure::Refused(Refusal::PayloadLimit)));
-        let framed = match framed {
+            .and_then(|body| match frame(&body) {
+                Some(framed) => Ok((framed, false)),
+                None if joins => parts(&body)
+                    .map(|framed| (framed, true))
+                    .ok_or(Failure::Refused(Refusal::PayloadLimit)),
+                None => Err(Failure::Refused(Refusal::PayloadLimit)),
+            });
+        let (framed, split) = match framed {
             Ok(framed) => framed,
             Err(error) => {
                 forward.work.settle(); // Known not submitted.
@@ -626,6 +666,7 @@ impl Host {
         let admitted = state.connected
             && state.enabled
             && state.contract == Some(CONTRACT)
+            && (!split || state.parts)
             && state.sessions.get(&forward.project).is_some_and(|session| {
                 !session.closing
                     && !session.life.stop.is_cancelled()
@@ -770,6 +811,7 @@ impl Host {
                 state.enabled = message["enabled"].as_bool() == Some(true);
                 state.contract = message["contract"].as_u64();
                 state.downloads = message["downloads"].as_bool() == Some(true);
+                state.parts = message["parts"].as_bool() == Some(true);
                 state.private_sites = observation::sites(&message["private"]);
                 let profile = observation::Observation::parse(&message["observation"]);
                 state.user_agent = bounded(message["userAgent"].as_str().unwrap_or_default(), 512);
@@ -2276,6 +2318,34 @@ mod tests {
         let mut oversized = ((FROM_EXTENSION_LIMIT + 1) as u32).to_ne_bytes().to_vec();
         oversized.extend_from_slice(b"{}");
         assert!(read_message(&mut oversized.as_slice()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn large_messages_go_in_parts_that_join_to_the_whole() {
+        // Quotes and backslashes double when escaped, and multibyte characters never split.
+        let filler = "\"\\ж€😀x".repeat(400_000);
+        let body =
+            serde_json::to_vec(&json!({ "type": "cdp", "params": { "html": filler } })).unwrap();
+        assert!(frame(&body).is_none());
+        let framed = parts(&body).unwrap();
+        let mut reader = framed.as_slice();
+        let mut joined = String::new();
+        let mut count = None;
+        let mut index = 0;
+        while let Some(message) = read_message(&mut reader).await.unwrap() {
+            assert!(message.len() <= TO_EXTENSION_LIMIT);
+            let part: Value = serde_json::from_slice(&message).unwrap();
+            assert_eq!(
+                (part["type"].as_str(), part["index"].as_u64()),
+                (Some("part"), Some(index))
+            );
+            count = part["count"].as_u64();
+            joined.push_str(part["data"].as_str().unwrap());
+            index += 1;
+        }
+        assert_eq!(count, Some(index));
+        assert!(index > 2);
+        assert_eq!(joined.as_bytes(), body.as_slice());
     }
 
     #[test]

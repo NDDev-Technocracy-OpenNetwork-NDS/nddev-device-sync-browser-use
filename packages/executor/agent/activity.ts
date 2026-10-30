@@ -8,8 +8,8 @@ import type { BrowserContext, ConsoleMessage, Page, Request } from "playwright-c
 import { hostCommand, observation, onObservation } from "./host";
 
 const BATCH = 32;
-// The host takes a command of at most 1 MiB, the native messaging bound; a larger one ends the
-// executor's connection. A batch of records with their envelope stays below it.
+// A batch of records with their envelope stays below 1 MiB, far within the host's command bound,
+// so a few large bodies never make one command heavy.
 const BATCH_BYTES = 900 * 1024;
 const SEND_MS = 250;
 // Bodies the host may keep: textual and at most this large.

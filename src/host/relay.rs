@@ -26,8 +26,12 @@ use tokio_tungstenite::tungstenite::{
 const CONNECTIONS: usize = 16;
 const QUEUE: usize = 4096;
 const IN_FLIGHT: usize = 256;
-/// Client commands go to Chrome through a 1 MiB native messaging limit.
-const COMMAND_LIMIT: usize = 1_048_576;
+/// One client command. Chrome takes at most 1 MiB per message from a host, so a larger command
+/// reaches the extension in parts; one beyond this bound is refused with a protocol error.
+const COMMAND_LIMIT: usize = 32 * 1_048_576;
+/// The largest frame the connection reads, so a command just beyond [`COMMAND_LIMIT`] is still
+/// read and refused rather than ending the client's connection.
+const FRAME_LIMIT: usize = 2 * COMMAND_LIMIT;
 /// Results such as full-page screenshots return through the 32 MiB extension limit.
 const MESSAGE_LIMIT: usize = 32 * 1_048_576;
 const BROWSER_TARGET: &str = "nds-browser";
@@ -220,8 +224,8 @@ async fn connection(host: Arc<Host>, stream: socket::Stream) {
         Ok(response)
     };
     let config = WebSocketConfig::default()
-        .max_message_size(Some(COMMAND_LIMIT))
-        .max_frame_size(Some(COMMAND_LIMIT));
+        .max_message_size(Some(FRAME_LIMIT))
+        .max_frame_size(Some(FRAME_LIMIT));
     let Ok(socket) =
         tokio_tungstenite::accept_hdr_async_with_config(stream, accept, Some(config)).await
     else {
@@ -255,6 +259,18 @@ async fn connection(host: Arc<Host>, stream: socket::Stream) {
         let Ok(command) = serde_json::from_str::<Value>(text.as_str()) else {
             break;
         };
+        if text.len() > COMMAND_LIMIT {
+            let session = command["sessionId"].as_str().map(str::to_owned);
+            let refused = reply(
+                command["id"].clone(),
+                session,
+                Err(Failure::Refused(crate::protocol::Refusal::PayloadLimit)),
+            );
+            if outbound.send(refused.to_string()).await.is_err() {
+                break;
+            }
+            continue;
+        }
         let Ok(permit) = in_flight.clone().acquire_owned().await else {
             break;
         };
