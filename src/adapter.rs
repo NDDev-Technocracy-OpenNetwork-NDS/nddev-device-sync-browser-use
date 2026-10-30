@@ -185,12 +185,12 @@ impl BrowserUse for BrowserUseClient {
         }
     }
 
-    async fn update(&self, cancellation: CancellationToken) -> Result<bool, Error> {
+    async fn update(&self, cancellation: CancellationToken) -> Result<(bool, bool), Error> {
         match self
             .exchange(Request::Update, CONTROL_DEADLINE, cancellation)
             .await?
         {
-            Reply::Updated { reload } => Ok(reload),
+            Reply::Updated { reload, restart } => Ok((reload, restart)),
             _ => Err(Error::InvalidResponse),
         }
     }

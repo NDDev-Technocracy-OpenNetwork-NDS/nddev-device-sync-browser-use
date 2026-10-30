@@ -26,6 +26,8 @@ fn fixture() -> (Arc<Host>, mpsc::Receiver<Vec<u8>>, tempfile::TempDir) {
             contract: Some(CONTRACT),
             ..State::default()
         }),
+        binary: None,
+        restart: tokio::sync::Notify::new(),
     });
     (host, queue, root)
 }
