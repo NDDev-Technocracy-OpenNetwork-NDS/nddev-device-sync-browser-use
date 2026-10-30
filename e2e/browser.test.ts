@@ -905,6 +905,40 @@ test("a strict mode violation lists every match so the agent can pick one", asyn
   }
 });
 
+test("commands larger than Chrome passes from a host reach the page, and a command beyond the bound is refused", async () => {
+  await opened("large");
+  try {
+    const result = await run(
+      "large",
+      `const page = await context.newPage();
+       try {
+         await page.setContent("<p>" + "x".repeat(3_000_000) + "</p>");
+         const content = await page.evaluate(() => document.body.textContent.length);
+         const argument = await page.evaluate((text) => text.length, "y".repeat(2_000_000));
+         await page.route("http://large.test/", (route) =>
+           route.fulfill({ body: "<p>" + "z".repeat(3_000_000) + "</p>", contentType: "text/html" }));
+         await page.goto("http://large.test/");
+         const fulfilled = await page.evaluate(() => document.body.textContent.length);
+         return [content, argument, fulfilled].join(" ");
+       } finally { await page.close(); }`,
+    );
+    expect(result.body.value).toBe("3000000 2000000 3000000");
+    // A command beyond the bound is refused (Playwright words a refused evaluation as a destroyed
+    // context); the executor's connection, its pages and the session stay.
+    const refused = await run(
+      "large",
+      `const page = await context.newPage();
+       try { await page.evaluate((text) => text.length, "w".repeat(40_000_000)); return "evaluated"; }
+       catch { return "refused " + (await page.evaluate(() => 6 * 7)); }
+       finally { await page.close(); }`,
+    );
+    expect(refused.body.value).toBe("refused 42");
+    expect((await run("large", "return 1 + 1")).body.value).toBe("2");
+  } finally {
+    await cli("session", "close", "large", "--close-tabs");
+  }
+}, 120_000);
+
 // Recordings: screencast frames to video through ffmpeg with a ghost cursor, and a demo cut that
 // speeds up the time between executions. Skipped without ffmpeg.
 test.skipIf(Bun.which("ffmpeg") === null)(

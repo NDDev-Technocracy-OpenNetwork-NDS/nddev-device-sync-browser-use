@@ -196,5 +196,8 @@
   },
   "versionsNoHost": {
     "message": "Extension $1"
+  },
+  "pinElement": {
+    "message": "Pin this element for the NDS agent"
   }
 }
