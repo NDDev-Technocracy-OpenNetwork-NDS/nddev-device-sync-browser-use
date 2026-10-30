@@ -235,6 +235,10 @@ beforeAll(async () => {
         return Response.redirect(`http://localhost:${fixture?.port}/files/plain`, 302);
       }
       if (path === "/files/plain") return attachment("moved body", "moved.txt");
+      // A large textual response: a burst of them outgrows one host command.
+      if (path === "/api/large") {
+        return Response.json({ items: "x".repeat(200_000) });
+      }
       if (path === "/api/journal") {
         return Response.json({ order: 7, items: ["shoe"], accessToken: "tok-should-not-stay" });
       }
@@ -1992,6 +1996,24 @@ test("a private site keeps its content out of the journal, and the popup shows t
   await popup.waitForFunction(() => document.getElementById("private")?.dataset.count === "0");
   await popup.close();
   await run("acceptance", "await state.private.close(); delete state.private");
+});
+
+// The journal's records of a burst of large responses outgrow one host command (1 MiB); the
+// executor sends them in several and keeps its connection, and the journal keeps them.
+test("a burst of large responses keeps the session's executor", async () => {
+  const result = await run(
+    "acceptance",
+    `const page = await context.newPage(); await page.goto("${origin}/");
+     await page.evaluate(() => Promise.all(Array.from({ length: 12 }, (_, n) => fetch("/api/large?n=" + n).then((r) => r.text()))));
+     await page.waitForTimeout(800); await page.close(); return "ok"`,
+    "--timeout",
+    "20000",
+  );
+  expect(result.body.value).toBe("ok");
+  expect((await run("acceptance", "1 + 1")).body.value).toBe("2");
+  await Bun.sleep(500);
+  const listed = await plain("-s", "acceptance", "activity", "--type", "network", "--last", "40");
+  expect(listed.stdout).toContain("/api/large?n=11");
 });
 
 // Another device's browser is driven through that device's own CLI: here a device whose transport
