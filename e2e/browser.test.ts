@@ -284,8 +284,9 @@ beforeAll(async () => {
         "/disclosure": `<title>Disclosure</title><main><div><div><details><summary>Where should I start?</summary><p>Here.</p></details><div><details><summary aria-label="Language: EN">EN</summary><p>English</p></details></div></div></div></main>`,
         // Equal buttons in two parts, and a frame of the same site, which shares the process.
         "/refs": `<title>Refs</title><section id="first"><button onclick="out.textContent = 'first'">Save</button></section><section id="second"><button onclick="out.textContent = 'second'">Save</button></section><span id="out"></span><iframe id="same" src="/inner"></iframe>`,
-        // An app's screen has no article: Readability finds none, and its visible text stands in.
-        "/app": `<title>Fixture app</title><nav><a href="/">Board</a></nav><div role="toolbar">${Array.from({ length: 30 }, (_, n) => `<button>Action ${n + 1}</button>`).join("")}</div><main><h2>To do</h2><ul><li><a href="/card/1">Card 1</a> due 1 Nov</li><li><a href="/card/2">Card 2</a> due 2 Nov</li></ul></main>`,
+        // A page for Markdown: its main part with code, a table, hidden parts, a box-less wrapper,
+        // a shadow root with a slot and a footnote mark; navigation and buttons around it.
+        "/markdown": `<title>Fixture docs</title><nav><a href="/">Board</a></nav><main><article><header><h1>Install</h1><p>By the docs team</p></header><p>Run <code>bun add nds</code> as the <a href="/docs">docs</a> say.<sup><a href="#note-1">[1]</a></sup></p><pre><code class="language-js">const a = 1;\nconsole.log(a);</code></pre><table><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody><tr><td>port</td><td>8080</td></tr></tbody></table><div style="display: contents"><p>CONTENTS-TEXT</p></div><p style="display: none">HIDDEN-TEXT</p><p aria-hidden="true">ARIA-HIDDEN</p><nds-card><span>SLOTTED-TEXT</span></nds-card><section id="part"><h2>Part</h2><p>Only this part.</p></section><button>Add card</button></article></main><footer>Page footer</footer><script>customElements.define("nds-card", class extends HTMLElement { constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = "<p>SHADOW-TEXT</p><slot></slot>"; } });</script>`,
         // A table keeps a row per line.
         "/listing": `<title>Fixture listing</title><table>${Array.from({ length: 30 }, (_, n) => `<tr><td>Row ${n + 1}</td><td><a href="/item/${n + 1}">Item ${n + 1}</a></td><td>${n + 1} points</td></tr>`).join("")}</table>`,
         "/article": `<title>Fixture article</title><style>p { color: black }</style><script>window.unused = 1</script><nav><a href="/">Home</a></nav><article><h1>Fixture heading</h1><p>First. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><p>Second. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. This paragraph is the main content of the fixture article and is long enough for Readability. </p><ul><li>One point</li><li>Two points</li></ul><button id="go">Go</button></article>`,
@@ -784,10 +785,12 @@ async function content(): Promise<void> {
      const listing = await context.newPage(); await listing.goto("${origin}/listing");
      const list = await getPageMarkdown({ page: listing });
      const table = await getCleanHTML({ locator: listing.locator("table") });
-     await listing.goto("${origin}/app");
-     const app = await getPageMarkdown({ page: listing });
+     await listing.goto("${origin}/markdown");
+     const docs = await getPageMarkdown({ page: listing, showDiffSinceLastCall: false });
+     const linked = await getPageMarkdown({ page: listing, links: true, showDiffSinceLastCall: false });
+     const part = await getPageMarkdown({ page: listing, locator: listing.locator("#part") });
      await listing.close();
-     return JSON.stringify({ html, text, shot, path, small, go, list, table, app })`,
+     return JSON.stringify({ html, text, shot, path, small, go, list, table, docs, linked, part })`,
     "--timeout",
     "20000",
   );
@@ -799,14 +802,38 @@ async function content(): Promise<void> {
   expect(seen.text).toContain("First. This paragraph");
   expect(seen.text).toContain("- One point");
   expect(seen.text).not.toContain("Home");
-  // A sentence keeps its inline elements on its line, a table gives a line per row, and an app's
-  // screen without an article gives its visible text.
+  // A sentence keeps its inline elements on its line; a table gives a line per row.
   expect(seen.html).toContain("<p>First. This paragraph");
   expect(seen.html).toContain("<li>One point");
   expect(seen.list).toContain("| Row 16 | Item 16 | 16 points |\n| Row 17 | Item 17 | 17 points |");
-  expect(seen.app).toContain("(no main article: the page's visible text)");
-  expect(seen.app).toContain("Card 2 due 2 Nov");
-  expect(seen.app).toContain("Action 17");
+  // Markdown keeps the article's header, code with its language, tables, a box-less wrapper's
+  // text and a shadow root's text with its slotted content. It leaves out navigation, the page
+  // footer, buttons, hidden parts, footnote marks and, unless asked, link targets.
+  const docs = String(seen.docs);
+  expect(docs).toContain("# Install");
+  expect(docs).toContain("By the docs team");
+  expect(docs).toContain("Run `bun add nds` as the docs say.");
+  expect(docs).toContain("```js\nconst a = 1;\nconsole.log(a);\n```");
+  expect(docs).toContain("| Name | Value |");
+  expect(docs).toContain("| port | 8080 |");
+  for (const shown of ["CONTENTS-TEXT", "SHADOW-TEXT", "SLOTTED-TEXT", "Only this part."]) {
+    expect(docs).toContain(shown);
+  }
+  for (const left of [
+    "Board",
+    "Page footer",
+    "Add card",
+    "HIDDEN-TEXT",
+    "ARIA-HIDDEN",
+    "[1]",
+    "](",
+  ]) {
+    expect(docs).not.toContain(left);
+  }
+  expect(String(seen.linked)).toContain(`[docs](${origin}/docs)`);
+  expect(String(seen.part)).toContain("## Part");
+  expect(String(seen.part)).toContain("Only this part.");
+  expect(String(seen.part)).not.toContain("Install");
   expect(seen.table).toContain('<td><a href="/item/17">Item 17</a>');
   expect(seen.shot).toMatch(/^Screenshot: \S+\.jpg \([1-9]\d* labels\)/);
   expect(seen.shot).toContain('button "Go" [ref=');

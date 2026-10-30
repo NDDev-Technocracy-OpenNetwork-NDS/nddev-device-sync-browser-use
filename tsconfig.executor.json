@@ -8,12 +8,7 @@
     "types": [
       "node"
     ],
-    "noEmit": true,
-    "paths": {
-      "linkedom": [
-        "./packages/executor/agent/linkedom.d.ts"
-      ]
-    }
+    "noEmit": true
   },
   "include": [
     "packages/executor/executor.ts",
