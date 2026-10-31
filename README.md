@@ -20,7 +20,7 @@ CLI are the same.
 
 Agent CLI: `nds-browser-use skill` prints the [agent guide](docs/agent-guide.md),
 which an agent reads once per task; `just install-skill` installs a coding-agent skill
-(`skills/nds-browser-use`) that sends agents to it. `nds-browser-use session new <project>`, then
+(`packages/skill/nds-browser-use`) that sends agents to it. `nds-browser-use session new <project>`, then
 `nds-browser-use -s <project> -e '<playwright code>'`; `status`,
 `session list` and `session close` complete the surface. An agent closes its
 session when its task is done; that closes the session's tabs too, unless
@@ -243,7 +243,7 @@ content, URLs, screenshots and agent code stay on that device: results go to
 the local agent that asked for them, and artifacts are deleted with the
 session. Nothing is sent to NDDev or third parties; local telemetry carries
 event names, outcomes and durations, never page data.
-The [privacy policy](PRIVACY.md), in English and Russian, covers the extension and the host.
+The [privacy policy](docs/privacy.md), in English and Russian, covers the extension and the host.
 
 Run `just check`, then `just browser-check` with `NDS_TEST_CHROME` set to the
 Chrome for Testing build pinned in `provider.lock.json`. `just install

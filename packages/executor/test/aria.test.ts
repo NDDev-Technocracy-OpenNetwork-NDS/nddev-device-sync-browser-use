@@ -1,6 +1,6 @@
 // The snapshot tree rules: scope pruning, interactive filtering, locators and redundant text.
 //
-// Adapted from MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md).
+// Adapted from MIT-licensed code by Tommy D. Rossi (NOTICE.md).
 import { describe, expect, it } from "bun:test";
 import {
   buildRawSnapshotTree,

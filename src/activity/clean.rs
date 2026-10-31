@@ -2,7 +2,7 @@
 //! written, in every field that can carry one.
 //!
 //! The secret-name list, the URL and body redaction and the telemetry host list are adapted from
-//! MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md).
+//! MIT-licensed code by Tommy D. Rossi (NOTICE.md).
 
 use regex::Regex;
 use serde_json::{Map, Value};
