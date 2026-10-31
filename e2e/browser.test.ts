@@ -2562,7 +2562,7 @@ test.skipIf(windows)("without the host the popup links to its setup", async () =
     );
     expect(
       await popup.locator('footer a[data-i18n="privacyPolicy"]').getAttribute("href"),
-    ).toEndWith("/PRIVACY.md");
+    ).toEndWith("/docs/privacy.md");
   } finally {
     await fresh.close();
   }

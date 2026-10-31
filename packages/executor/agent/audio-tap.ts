@@ -14,7 +14,7 @@
 // name leaves them alone. Audio of out-of-process frames, and a graph wired before the tap
 // started, are not captured.
 //
-// Adapted from MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md).
+// Adapted from MIT-licensed code by Tommy D. Rossi (NOTICE.md).
 
 export function startAudioTap(bindingName: string): void {
   type Tap = { subscribers: Set<string>; teardown: () => void };

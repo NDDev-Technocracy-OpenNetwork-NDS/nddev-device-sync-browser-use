@@ -60,7 +60,7 @@ with the agent.
 
 Questions and requests go to
 [GitHub issues](https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-browser-use/issues).
-Report security problems as described in [SECURITY.md](SECURITY.md). Changes to this policy appear
+Report security problems as described in [SECURITY.md](../SECURITY.md). Changes to this policy appear
 in this file's history.
 
 ---
@@ -129,5 +129,5 @@ in this file's history.
 
 Вопросы и запросы направляйте в
 [GitHub issues](https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-browser-use/issues).
-О проблемах безопасности сообщайте, как описано в [SECURITY.md](SECURITY.md). Изменения этой политики
+О проблемах безопасности сообщайте, как описано в [SECURITY.md](../SECURITY.md). Изменения этой политики
 видны в истории этого файла.
