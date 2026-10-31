@@ -6,7 +6,7 @@
 
 use super::{EXTENSION_REPLY, Failure, Host, MAX_TABS, tab_session};
 use crate::{CancellationToken, socket};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
     sync::{
@@ -25,6 +25,9 @@ use tokio_tungstenite::tungstenite::{
 
 const CONNECTIONS: usize = 16;
 const QUEUE: usize = 4096;
+// Flush already queued messages together, without waiting for a batch to fill.
+const WRITE_BATCH: usize = 128;
+const WRITE_BYTES: usize = 256 * 1024;
 const IN_FLIGHT: usize = 256;
 /// One client command. Chrome takes at most 1 MiB per message from a host, so a larger command
 /// reaches the extension in parts; one beyond this bound is refused with a protocol error.
@@ -232,21 +235,14 @@ async fn connection(host: Arc<Host>, stream: socket::Stream) {
         return;
     };
     let Some(token) = token else { return };
-    let (outbound, mut queue) = mpsc::channel::<String>(QUEUE);
+    let (outbound, queue) = mpsc::channel::<String>(QUEUE);
     let closed = CancellationToken::new();
     let id = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
     let Some(project) = host.bind(&token, Client::new(id, outbound.clone(), closed.clone())) else {
         return;
     };
-    let (mut sink, mut source) = socket.split();
-    let writer = tokio::spawn(async move {
-        while let Some(message) = queue.recv().await {
-            if message.len() > MESSAGE_LIMIT || sink.send(Message::text(message)).await.is_err() {
-                break;
-            }
-        }
-        let _ = sink.close().await;
-    });
+    let (sink, mut source) = socket.split();
+    let writer = tokio::spawn(write_messages(sink, queue));
     let in_flight = Arc::new(Semaphore::new(IN_FLIGHT));
     loop {
         let message = tokio::select! {
@@ -293,6 +289,32 @@ async fn connection(host: Arc<Host>, stream: socket::Stream) {
     host.unbind(&project, id);
     drop(outbound);
     writer.abort();
+}
+
+// Preserve the CDP order while avoiding a socket flush for every event of a burst. A partial
+// batch flushes immediately; the count and byte bounds keep a continuously busy queue finite.
+async fn write_messages(mut sink: impl Sink<Message> + Unpin, mut queue: mpsc::Receiver<String>) {
+    'messages: while let Some(mut message) = queue.recv().await {
+        let mut count = 0;
+        let mut bytes = 0;
+        loop {
+            let size = message.len();
+            if size > MESSAGE_LIMIT || sink.feed(Message::text(message)).await.is_err() {
+                break 'messages;
+            }
+            count += 1;
+            bytes += size;
+            if count >= WRITE_BATCH || bytes >= WRITE_BYTES {
+                break;
+            }
+            let Ok(next) = queue.try_recv() else { break };
+            message = next;
+        }
+        if sink.flush().await.is_err() {
+            break;
+        }
+    }
+    let _ = sink.close().await;
 }
 
 fn rejection(status: StatusCode) -> ErrorResponse {
@@ -661,6 +683,57 @@ mod tests {
     use super::*;
     use crate::host::{Session, State};
     use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn queued_events_and_replies_flush_in_order_without_waiting_for_a_full_batch() {
+        use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (host, peer) = tokio::io::duplex(1024);
+            let host = WebSocketStream::from_raw_socket(host, Role::Server, None).await;
+            let mut peer = WebSocketStream::from_raw_socket(peer, Role::Client, None).await;
+            let (sender, queue) = mpsc::channel(QUEUE);
+            let (sink, _) = host.split();
+            let writer = tokio::spawn(write_messages(sink, queue));
+
+            // Keep the sender open: this event must arrive while no next message is queued.
+            let first = json!({ "method": "Network.webSocketCreated", "params": { "requestId": "one" } })
+                .to_string();
+            sender.send(first.clone()).await.unwrap();
+            assert_eq!(peer.next().await.unwrap().unwrap(), Message::text(first));
+
+            // Cross both the count and byte bounds, with replies interleaved with events.
+            let messages: Vec<String> = (0..WRITE_BATCH * 2 + 40)
+                .map(|id| {
+                    let data = if id < WRITE_BATCH * 2 {
+                        String::new()
+                    } else {
+                        "é".repeat(8192)
+                    };
+                    if id % 7 == 0 {
+                        json!({ "id": id, "result": { "data": data } }).to_string()
+                    } else {
+                        json!({ "method": "Network.webSocketFrameReceived", "params": { "id": id, "data": data } })
+                            .to_string()
+                    }
+                })
+                .collect();
+            for message in &messages {
+                sender.send(message.clone()).await.unwrap();
+            }
+            drop(sender);
+            for message in messages {
+                assert_eq!(peer.next().await.unwrap().unwrap(), Message::text(message));
+            }
+            assert!(matches!(
+                peer.next().await.unwrap().unwrap(),
+                Message::Close(_)
+            ));
+            writer.await.unwrap();
+        })
+        .await
+        .expect("relay output did not drain");
+    }
 
     #[test]
     fn closing_a_tab_ends_only_its_raw_sessions_on_their_parent() {

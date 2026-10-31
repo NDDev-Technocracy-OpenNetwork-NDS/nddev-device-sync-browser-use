@@ -17,7 +17,8 @@ import {
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { type BrowserContext, chromium } from "playwright-core";
+import type { BrowserContext } from "playwright-core";
+import { launchFixture } from "./launch.js";
 
 const windows = process.platform === "win32";
 const repository = resolve(import.meta.dir, "..");
@@ -180,7 +181,7 @@ beforeAll(async () => {
       : ["--host-dir", join(root, "NativeMessagingHosts")]),
   );
   expect(registration.code).toBe(0);
-  observer = await chromium.launchPersistentContext(profile, {
+  observer = await launchFixture(profile, {
     executablePath: chrome,
     headless: true,
     env,
