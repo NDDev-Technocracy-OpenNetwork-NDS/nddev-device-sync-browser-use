@@ -1,5 +1,5 @@
 # std-0001 repository manifest — schema: `nddev schema manifest`.
-apiVersion: nddev.ai/v1alpha3
+apiVersion: nddev.ai/v1alpha4
 kind: Repository
 metadata:
   id: nddev-device-sync-browser-use
@@ -8,8 +8,9 @@ metadata:
 spec:
   standard:
     id: std-0001
-    version: 3.0.0
   role: component
+  adaptations:
+  - docs/decisions/0001-nds-module-root-artifacts.md
   profiles:
   - rust
   - typescript
@@ -23,25 +24,12 @@ spec:
     via: Cargo.toml
   - contract: nddev-device-sync-observability/telemetry
     via: Cargo.toml
-  variations:
-  - paths: [.gds]
-    purpose: config
-    reason: GDS-owned repository anchor and policy projections, excluded from std-0001 tooling per its boundary rule.
-    decision: {state: approved, by: rldyourmnd, date: "2026-10-22", origin: document, reference: standarts/decisions/0013-estate-hygiene-and-standards-adoption.md}
-  - paths: [module.yaml]
-    purpose: manifest
-    reason: NDS module descriptor owned by the product standards corpus.
-    decision: {state: approved, by: rldyourmnd, date: "2026-10-22", origin: document, reference: standarts/decisions/0013-estate-hygiene-and-standards-adoption.md}
-  - paths: [standarts.lock, provider.lock.json]
-    purpose: lock
-    reason: NDS contract locks pinning the standards source and the Chrome for Testing acceptance provider.
-    decision: {state: approved, by: rldyourmnd, date: "2026-10-22", origin: document, reference: standarts/decisions/0013-estate-hygiene-and-standards-adoption.md}
-  - paths: [contracts]
-    purpose: manifest
-    reason: NDS compiled-in runtime manifest directory owned by the module.
-    decision: {state: approved, by: rldyourmnd, date: "2026-10-22", origin: document, reference: standarts/decisions/0013-estate-hygiene-and-standards-adoption.md}
   modules:
   - .
   adapters:
   - claude
   - cursor
+  extensions:
+    nddev.standards-system:
+      standards:
+      - std-0001
