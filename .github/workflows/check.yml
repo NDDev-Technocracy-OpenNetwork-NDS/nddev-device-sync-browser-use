@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   quality:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -28,10 +28,18 @@ jobs:
           just-version: '1.59.0'
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+      - name: Restore the Cargo dependency cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: native-contract
+          add-job-id-key: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned quality tools
-        run: |
-          cargo install --locked --version 0.22.2 cargo-audit
-          cargo install --locked --version 0.20.2 cargo-deny
+        uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/tools@365415f32190ae22ff22462e791a4829ad6e91fc # nddev-cicd-v0.6.16
+        with:
+          # cargo-audit 0.22.2, cargo-deny 0.20.2 and cargo-nextest 0.9.149 from checksummed
+          # releases instead of compiling them with cargo install in every job.
+          capability: rust
       - name: Run the STD-0004 native Rust contract
         id: native
         uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/ci@70226500214618c56bf0d8896bf58ff1402cb74d # std-0004-v0.3.3
@@ -56,6 +64,12 @@ jobs:
           just-version: '1.59.0'
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+      - name: Restore the Cargo dependency cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: native-contract
+          add-job-id-key: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run the module checks
         run: just check
       - name: Fetch the pinned Chrome for Testing
@@ -83,6 +97,12 @@ jobs:
           bun-version-file: package.json
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+      - name: Restore the Cargo dependency cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: native-contract
+          add-job-id-key: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Lint and test the client and the host
         run: |
           cargo clippy --locked --all-targets -- -D warnings
