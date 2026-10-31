@@ -431,7 +431,10 @@ mod tests {
             ),
             json!({ "Accept": "application/json", "X-Request-Id": "7" })
         );
-        assert_eq!(text(&format!("token {} ok", jwt()), 100), "token [redacted] ok");
+        assert_eq!(
+            text(&format!("token {} ok", jwt()), 100),
+            "token [redacted] ok"
+        );
         assert_eq!(text(&"x".repeat(5000), 2000).chars().count(), 2001);
         assert!(secret_field("#password") && secret_field("internal:label=\"One-time code\"i"));
         assert!(!secret_field("#email"));
