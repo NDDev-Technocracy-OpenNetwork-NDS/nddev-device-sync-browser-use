@@ -6,7 +6,7 @@
 // again and replays the setup Playwright sent on the tab's root session, so the page agents hold
 // stays usable. Pure rules only; the worker owns every chrome.* call.
 //
-// Adapted from MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md).
+// Adapted from MIT-licensed code by Tommy D. Rossi (NOTICE.md).
 // The setup a tab may record, so restoring it stays finite: a command that would grow it past
 // either bound is refused before it reaches Chrome, never recorded short.
 export const MAX_SETUP_COMMANDS = 256;

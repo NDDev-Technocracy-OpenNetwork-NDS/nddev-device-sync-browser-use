@@ -14,7 +14,7 @@
 // another size, also from another page after `setPage`, are scaled into it and padded with
 // square pixels. The file appears at `outputPath` only when it is complete.
 //
-// Adapted from MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md).
+// Adapted from MIT-licensed code by Tommy D. Rossi (NOTICE.md).
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, rm, stat } from "node:fs/promises";

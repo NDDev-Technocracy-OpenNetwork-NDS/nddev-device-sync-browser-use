@@ -21,6 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { type Browser, type BrowserContext, chromium, type Page } from "playwright-core";
+import { launchFixture } from "./launch.js";
 
 const windows = process.platform === "win32";
 const repository = resolve(import.meta.dir, "..");
@@ -369,7 +370,7 @@ beforeAll(async () => {
       savefile: { default_directory: downloadsFolder },
     }),
   );
-  observer = await chromium.launchPersistentContext(profile, {
+  observer = await launchFixture(profile, {
     executablePath: chrome,
     headless: true,
     env,
@@ -2537,7 +2538,7 @@ test("closing a session cleans only its own area", async () => {
 // its setup, and the footer links to the privacy policy. On Windows the registry registration of
 // this run reaches every Chrome for Testing profile, so a fresh profile still finds the host.
 test.skipIf(windows)("without the host the popup links to its setup", async () => {
-  const fresh = await chromium.launchPersistentContext(mkdtempSync(join(root, "no-host-")), {
+  const fresh = await launchFixture(mkdtempSync(join(root, "no-host-")), {
     executablePath: chrome,
     headless: true,
     env,
@@ -2562,7 +2563,7 @@ test.skipIf(windows)("without the host the popup links to its setup", async () =
     );
     expect(
       await popup.locator('footer a[data-i18n="privacyPolicy"]').getAttribute("href"),
-    ).toEndWith("/PRIVACY.md");
+    ).toEndWith("/docs/privacy.md");
   } finally {
     await fresh.close();
   }

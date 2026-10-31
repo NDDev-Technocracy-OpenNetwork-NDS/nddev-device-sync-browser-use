@@ -6,7 +6,7 @@
 // again and replays the setup Playwright sent on the tab's root session, so the page agents hold
 // stays usable. Pure rules only; the worker owns every chrome.* call.
 //
-// Adapted from MIT-licensed code by Tommy D. Rossi (THIRD_PARTY_NOTICES.md).
+// Adapted from MIT-licensed code by Tommy D. Rossi (NOTICE.md).
 
 // A setup command as sent to Chrome; an init script also keeps Chrome's current identifier.
 export type SetupCommand = {
