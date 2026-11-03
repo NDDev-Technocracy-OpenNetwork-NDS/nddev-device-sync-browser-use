@@ -39,10 +39,10 @@ install browser="chrome" prefix=(env_var("HOME") / ".local/share/nds-browser-use
     "{{prefix}}/bin/nds-browser-use" install --bun "${bun:-$(command -v bun)}" --executor "{{prefix}}/executor/executor.ts" --browser {{browser}}; \
     "{{prefix}}/bin/nds-browser-use" update || echo "extension not connected; it loads the new files when Chrome starts it"
 
-# Installs the agent skill that points coding agents at this CLI and its guide.
-install-skill skills=(env_var("HOME") / ".claude/skills"):
-    mkdir -p "{{skills}}/nds-browser-use"
-    install -m 0644 packages/skill/nds-browser-use/SKILL.md "{{skills}}/nds-browser-use/SKILL.md"
+# Installs the agent skill that points coding agents at this CLI and its guide,
+# for pi, Codex and Claude Code. Pass skill directories to install elsewhere.
+install-skill +dirs=(env_var("HOME") / ".agents/skills" + " " + env_var_or_default("CODEX_HOME", env_var("HOME") / ".codex") / "skills" + " " + env_var("HOME") / ".claude/skills"):
+    for dir in {{dirs}}; do install -D -m 0644 packages/skill/nds-browser-use/SKILL.md "$dir/nds-browser-use/SKILL.md"; done
 
 # The store assigns its own extension ID, so the pinned `key` is omitted.
 # Package the extension for the Chrome Web Store into dist/.
