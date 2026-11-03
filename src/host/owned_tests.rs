@@ -375,6 +375,81 @@ async fn disabled_then_enabled_before_sweep_still_finishes_the_canceled_generati
 }
 
 #[tokio::test]
+async fn legacy_reopen_after_captured_drain_finishes_does_not_report_a_missing_session() {
+    let (host, mut queue, _root) = fixture();
+    let old = host.reserve("legacy", false).unwrap();
+    let handle = OwnedSession {
+        project: "legacy".into(),
+        generation: old.generation.clone(),
+    };
+    let _client = opened_client(&host, &handle, 1);
+    host.on_control(false);
+    host.on_control(true);
+    let drained = {
+        let host = host.clone();
+        tokio::spawn(async move { host.drain_closing().await })
+    };
+    let release = message(&mut queue).await;
+    assert_eq!(release["type"], "release");
+    let reopening = host.open("legacy");
+    tokio::pin!(reopening);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(reopening.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    answer(&host, &release);
+    drained.await.unwrap();
+    let claim = tokio::select! {
+        _result = reopening.as_mut() => panic!("a completed captured drain refused a fresh open"),
+        claim = message(&mut queue) => claim,
+    };
+    assert_eq!(claim["type"], "claim");
+    answer(&host, &claim);
+    assert!(reopening.await.is_ok());
+    assert!(!Arc::ptr_eq(
+        &old,
+        &host.session_life("legacy", None).unwrap()
+    ));
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_reopen_after_captured_drain_never_adopts_another_replacement() {
+    let (host, mut queue, _root) = fixture();
+    let old = host.reserve("legacy", false).unwrap();
+    let handle = OwnedSession {
+        project: "legacy".into(),
+        generation: old.generation.clone(),
+    };
+    let _client = opened_client(&host, &handle, 1);
+    host.on_control(false);
+    host.on_control(true);
+    let drained = {
+        let host = host.clone();
+        tokio::spawn(async move { host.drain_closing().await })
+    };
+    let release = message(&mut queue).await;
+    let reopening = host.open("legacy");
+    tokio::pin!(reopening);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(reopening.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    answer(&host, &release);
+    drained.await.unwrap();
+    let replacement = host.create_owned("legacy").unwrap();
+    assert!(matches!(reopening.await, Err(Refusal::SessionNotFound)));
+    assert_eq!(
+        host.session_life("legacy", None).unwrap().generation,
+        replacement.generation
+    );
+    assert!(queue.try_recv().is_err());
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn legacy_open_drains_only_the_captured_closing_generation() {
     let (host, mut queue, _root) = fixture();
     let old = host.reserve("legacy", false).unwrap();
