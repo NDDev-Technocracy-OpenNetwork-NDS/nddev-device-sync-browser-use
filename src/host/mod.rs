@@ -1643,7 +1643,14 @@ impl Host {
         };
         if let Some(life) = closing {
             // Drain only the captured legacy generation. A replacement is never adopted.
-            self.close_generation(project, &life, false, true).await?;
+            // The owned sweep may finish that same drain while we wait for its close lock.
+            // An empty slot is then ready for this fresh open; a replacement still refuses.
+            if let Err(refusal) = self.close_generation(project, &life, false, true).await
+                && (refusal != Refusal::SessionNotFound
+                    || self.state().sessions.contains_key(project))
+            {
+                return Err(refusal);
+            }
         }
         let life = self.reserve(project, false)?;
         self.open_generation(project, &life).await
