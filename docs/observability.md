@@ -1,12 +1,8 @@
 # Observability
 
-Owner direction (2026-10-29): agents see everything that happens in agent tabs through NDS
-observability, the collected data is complete but free of duplicates and noise, and one button in
-the extension turns collection off completely. This document applies the
-[observability standard](https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync/blob/main/standarts/15-observability-and-telemetry-standard.md)
-and the standard, debug and off profiles of
-[ADR 0018](https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync/blob/main/standarts/decisions/0018-control-and-diagnostic-profiles.md)
-to browser-use.
+Browser sessions expose their lifecycle and activity through the host's observation
+interface. Collection has three profiles and removes secrets before retaining data.
+The extension switch can stop collection without closing the browser session.
 
 ## Profiles
 
