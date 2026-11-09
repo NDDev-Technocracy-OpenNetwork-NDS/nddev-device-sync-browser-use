@@ -1,6 +1,6 @@
 name: chrome-channels
 
-# Failure feedback under STD-0004 R-0007, declared narrowly:
+# Channel failure feedback, declared narrowly:
 # - purpose: learn of a Chrome change that breaks the extension, the relay or the executor before
 #   the owner's browser updates to it; main-ci keeps its pinned, hash-checked Chrome for Testing;
 # - owner: the browser-use module owner;
@@ -41,7 +41,10 @@ jobs:
         with:
           just-version: '1.59.0'
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/hosted-sdk@52d8302d2272967a21fd8e3ae594205588648777 # v0.6.28
+        with:
+          rust-version: '1.99.1'
+          rust-components: rustfmt,clippy
       - name: Fetch the newest Chrome for Testing of the channel
         shell: bash
         env:

@@ -1,16 +1,17 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
+# List the project commands.
+default:
+    @just --list
+
 # Structural, Rust and TypeScript checks; no browser is started.
 check: ts-check
+    just --fmt --check
+    cargo deny --locked check licenses sources
     cargo fmt -- --check
-    cargo clippy --locked --all-targets -- -D warnings
-    cargo test --locked
 
 ts-check:
-    bun install --frozen-lockfile --ignore-scripts
     bun run check
-    bun run check:generated
-    bun run test
 
 # Requires NDS_TEST_CHROME (Chrome for Testing); on AppArmor-restricted hosts
 # also CHROME_DEVEL_SANDBOX.
@@ -28,21 +29,21 @@ install browser="chrome" prefix=(env_var("HOME") / ".local/share/nds-browser-use
     # The installed build reports its source commit; a modified tree reports none.
     commit="$(git rev-parse HEAD)"; git diff --quiet HEAD -- || commit=unknown; \
     NDS_SOURCE_COMMIT="$commit" cargo build --locked --release
-    bun="{{bun}}"; \
+    bun="{{ bun }}"; \
     target="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"; \
-    stage="{{prefix}}.stage"; rm -rf "$stage"; mkdir -p "$stage/bin" "$stage/extension" "$stage/executor"; \
+    stage="{{ prefix }}.stage"; rm -rf "$stage"; mkdir -p "$stage/bin" "$stage/extension" "$stage/executor"; \
     install -m 0755 "$target/release/nds-browser-use" "$stage/bin/"; \
     cp -r packages/desktop/extension/manifest.json packages/desktop/extension/background.js packages/desktop/extension/restore.js packages/desktop/extension/popup.html packages/desktop/extension/popup.js packages/desktop/extension/icons packages/desktop/extension/_locales NOTICE.md "$stage/extension/"; \
     cp -r packages/executor/. "$stage/executor/"; rm -rf "$stage/executor/test"; cp package.json bun.lock NOTICE.md "$stage/"; \
     (cd "$stage" && bun install --frozen-lockfile --production --ignore-scripts --linker hoisted); \
-    rm -rf "{{prefix}}.previous"; if [ -e "{{prefix}}" ]; then mv "{{prefix}}" "{{prefix}}.previous"; fi; mv "$stage" "{{prefix}}"; rm -rf "{{prefix}}.previous"; \
-    "{{prefix}}/bin/nds-browser-use" install --bun "${bun:-$(command -v bun)}" --executor "{{prefix}}/executor/executor.ts" --browser {{browser}}; \
-    "{{prefix}}/bin/nds-browser-use" update || echo "extension not connected; it loads the new files when Chrome starts it"
+    rm -rf "{{ prefix }}.previous"; if [ -e "{{ prefix }}" ]; then mv "{{ prefix }}" "{{ prefix }}.previous"; fi; mv "$stage" "{{ prefix }}"; rm -rf "{{ prefix }}.previous"; \
+    "{{ prefix }}/bin/nds-browser-use" install --bun "${bun:-$(command -v bun)}" --executor "{{ prefix }}/executor/executor.ts" --browser {{ browser }}; \
+    "{{ prefix }}/bin/nds-browser-use" update || echo "extension not connected; it loads the new files when Chrome starts it"
 
 # Installs the agent skill that points coding agents at this CLI and its guide,
 # for pi, Codex and Claude Code. Pass skill directories to install elsewhere.
 install-skill +dirs=(env_var("HOME") / ".agents/skills" + " " + env_var_or_default("CODEX_HOME", env_var("HOME") / ".codex") / "skills" + " " + env_var("HOME") / ".claude/skills"):
-    for dir in {{dirs}}; do install -D -m 0644 packages/skill/nds-browser-use/SKILL.md "$dir/nds-browser-use/SKILL.md"; done
+    for dir in {{ dirs }}; do install -D -m 0644 packages/skill/nds-browser-use/SKILL.md "$dir/nds-browser-use/SKILL.md"; done
 
 # The store assigns its own extension ID, so the pinned `key` is omitted.
 # Package the extension for the Chrome Web Store into dist/.
@@ -50,3 +51,29 @@ package:
     bun install --frozen-lockfile --ignore-scripts
     bun run check:generated
     python3 -c 'import json, pathlib, zipfile; root = pathlib.Path("packages/desktop/extension"); version = json.loads((root / "manifest.json").read_text())["version"]; out = pathlib.Path("dist") / f"nds-browser-use-extension-{version}.zip"; out.parent.mkdir(exist_ok=True); manifest = json.loads((root / "manifest.json").read_text()); manifest.pop("key"); files = sorted(["background.js", "restore.js", "popup.html", "popup.js", *(str(p.relative_to(root)) for p in (root / "icons").glob("*.png")), *(str(p.relative_to(root)) for p in (root / "_locales").glob("*/messages.json"))]); archive = zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED); entry = lambda name, data: archive.writestr(zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0)), data); entry("manifest.json", json.dumps(manifest, indent=2) + "\n"); [entry(name, (root / name).read_bytes()) for name in files]; entry("NOTICE.md", pathlib.Path("NOTICE.md").read_bytes()); archive.close(); print(out)'
+
+# Fetch locked source dependencies without compiling.
+setup:
+    cargo fetch --locked
+    bun install --frozen-lockfile --ignore-scripts
+
+# Lint and test the native and browser layers.
+test:
+    cargo clippy --locked --all-targets -- -D warnings
+    cargo test --locked
+    bun run check:generated
+    bun run test
+
+# Compile the locked release workspace.
+build:
+    cargo build --locked --workspace --release
+
+# Check current RustSec advisories.
+audit:
+    cargo audit --deny warnings
+
+# Run source checks, native tests and the advisory audit.
+verify: check test audit build
+
+# Run the portable CI contract; native fixtures have explicit acceptance recipes.
+ci-verify: check test build audit
