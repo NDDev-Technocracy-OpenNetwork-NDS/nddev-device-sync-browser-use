@@ -12,6 +12,7 @@ code, page content and screenshots never enter telemetry, Debug output, fixtures
 The one place page data is kept is the activity journal (docs/observability.md): only in
 the owner's full observation profile, on the device, with secrets removed before a
 record is written; off collects nothing. Every queue, payload and execution has a bound
-and a typed terminal outcome. Run `just check`, then `just browser-check` against an
-isolated Chrome for Testing profile before review. Signed work -> dev -> main; no
+and a typed terminal outcome. Prepare with `just setup` and run the build-free `just check`. Run `just test` and
+`just browser-check` on an executor against an isolated Chrome for Testing profile
+before review. Signed work -> dev -> main; no
 implicit release, deployment or installation into a user's browser.
