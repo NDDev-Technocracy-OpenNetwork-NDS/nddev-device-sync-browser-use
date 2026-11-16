@@ -1,14 +1,7 @@
 name: chrome-channels
 
-# Failure feedback under STD-0004 R-0007, declared narrowly:
-# - purpose: learn of a Chrome change that breaks the extension, the relay or the executor before
-#   the owner's browser updates to it; main-ci keeps its pinned, hash-checked Chrome for Testing;
-# - owner: the browser-use module owner;
-# - selected inputs: main at the time of the run, and the newest Chrome for Testing of each of
-#   the Stable, Beta and Dev channels, unpinned by intent;
-# - budget: three Linux jobs once a day on free GitHub-hosted runners (a public repository), at
-#   most 25 minutes each; only the real-browser acceptance runs, not the rest of main-ci.
-
+# Read-only compatibility feedback for main and future browser channels; no pin is adopted.
+# The report binds monitored code/browser bytes separately from the workflow source context.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -25,24 +18,53 @@ jobs:
   browser:
     runs-on: ubuntu-26.04
     timeout-minutes: 25
+    env:
+      SDK_MANAGED: "false"
     strategy:
       fail-fast: false
       matrix:
         channel: [Stable, Beta, Dev]
     steps:
+      - name: Start the monitored job
+        run: date +%s > "$RUNNER_TEMP/nddev-ci-started"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: main
           persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - name: Identify the monitored source and its selected runtimes
+        id: pins
+        env:
+          CHANNEL: ${{ matrix.channel }}
+        run: |
+          python3 - <<'PYPINS'
+          import json,os,re,subprocess,tomllib
+          from pathlib import Path
+          rust=tomllib.loads(Path('rust-toolchain.toml').read_text())['toolchain']['channel']
+          manager=json.loads(Path('package.json').read_text())['packageManager']
+          if not manager.startswith('bun@'): raise SystemExit('Expected the declared Bun runtime')
+          bun=manager.removeprefix('bun@')
+          if not all(re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+',value) for value in [rust,bun]): raise SystemExit('Expected exact stable runtime identities')
+          source=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          with Path(os.environ['GITHUB_OUTPUT']).open('a') as output: output.write(f'rust={rust}\nbun={bun}\n')
+          Path('ci-reports').mkdir(exist_ok=True)
+          Path('ci-reports/channel.json').write_text(json.dumps({'monitored_source':source,'channel':os.environ['CHANNEL'],'rust':rust,'bun':bun},indent=2)+'\n')
+          PYPINS
+      - uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/telemetry@6cf64d17c08dfc75392c55784b872fe9a6056553 # v0.6.57
+      - uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/artifact-registry@6cf64d17c08dfc75392c55784b872fe9a6056553 # v0.6.57
+      - name: Prepare the monitored source's runtimes and task runner
+        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/hosted-sdk@6cf64d17c08dfc75392c55784b872fe9a6056553 # v0.6.57
         with:
-          bun-version-file: package.json
-      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
-        with:
-          just-version: '1.59.0'
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+          managed: "false"
+          rust-version: ${{ steps.pins.outputs.rust }}
+          rust-components: rustfmt,clippy
+          bun-version: ${{ steps.pins.outputs.bun }}
+          tools: just@1.59.0
+      - uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/hosted-cache@6cf64d17c08dfc75392c55784b872fe9a6056553 # v0.6.57
+      - name: Prepare the monitored browser-check dependencies
+        id: dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Fetch the newest Chrome for Testing of the channel
+        id: chrome
         shell: bash
         env:
           CHANNEL: ${{ matrix.channel }}
@@ -62,7 +84,27 @@ jobs:
           sudo chmod 4755 "$sandbox"
           echo "CHROME_DEVEL_SANDBOX=$sandbox" >> "$GITHUB_ENV"
           echo "NDS_TEST_CHROME=$RUNNER_TEMP/cft/chrome-linux64/chrome" >> "$GITHUB_ENV"
+          CHANNEL_VERSION="$version" python3 - <<'PYRECEIPT'
+          import hashlib,json,os
+          from pathlib import Path
+          file=Path('ci-reports/channel.json')
+          record=json.loads(file.read_text())
+          record['browser_version']=os.environ['CHANNEL_VERSION']
+          with (Path(os.environ['RUNNER_TEMP'])/'chrome.zip').open('rb') as archive: record['archive_sha256']=hashlib.file_digest(archive,'sha256').hexdigest()
+          file.write_text(json.dumps(record,indent=2)+'\n')
+          PYRECEIPT
+
       - name: Real-browser acceptance in an isolated profile
+        id: browser
         env:
           NDS_E2E_DIAGNOSTICS: "1"
         run: just browser-check
+      - name: Complete the monitored job
+        if: always()
+        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/complete@6cf64d17c08dfc75392c55784b872fe9a6056553 # v0.6.57
+        with:
+          status: ${{ job.status }}
+          project-outcome: ${{ (steps.pins.outcome == 'failure' || steps.dependencies.outcome == 'failure' || steps.chrome.outcome == 'failure' || steps.browser.outcome == 'failure') && 'failure' || 'success' }}
+          task: chrome-channel-${{ matrix.channel }}
+          name: chrome-channel-${{ matrix.channel }}
+          reports: ci-reports/channel.json

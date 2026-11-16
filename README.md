@@ -245,7 +245,9 @@ session. Nothing is sent to NDDev or third parties; local telemetry carries
 event names, outcomes and durations, never page data.
 The [privacy policy](docs/privacy.md), in English and Russian, covers the extension and the host.
 
-Run `just check`, then `just browser-check` with `NDS_TEST_CHROME` set to the
+Prepare locked dependencies with `just setup`. `just check` only checks source;
+`just test` retains generated-output, unit and native host checks on an executor.
+Then run `just browser-check` on that executor with `NDS_TEST_CHROME` set to the
 Chrome for Testing build pinned in `provider.lock.json`. `just install
 <browser>` installs locally and then runs `nds-browser-use update`, which
 reloads a connected unpacked extension from the new files, or restarts a host whose binary

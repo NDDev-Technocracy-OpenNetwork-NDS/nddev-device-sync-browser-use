@@ -1,22 +1,23 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# Structural, Rust and TypeScript checks; no browser is started.
-check: ts-check
-    cargo fmt -- --check
-    cargo clippy --locked --all-targets -- -D warnings
-    cargo test --locked
-
-ts-check:
+# Prepares locked dependencies without building the host or running scripts.
+setup:
     bun install --frozen-lockfile --ignore-scripts
+    cargo fetch --locked
+
+# Read-only Rust formatting, TypeScript types and lint; no tests or browser.
+check: ts-check
+    just --fmt --check
+    cargo fmt -- --check
+
+# Checks authored TypeScript without emitting generated files or running tests.
+ts-check:
     bun run check
-    bun run check:generated
-    bun run test
 
 # Requires NDS_TEST_CHROME (Chrome for Testing); on AppArmor-restricted hosts
 # also CHROME_DEVEL_SANDBOX.
 # Real-browser acceptance in an isolated profile.
 browser-check:
-    bun install --frozen-lockfile --ignore-scripts
     cargo build --locked
     NDS_TEST_HOST="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/nds-browser-use" bun run e2e
 
@@ -54,12 +55,13 @@ package:
 # The checks the former CI library ran from .github/nddev-ci.toml; CI calls them through
 # `just test` on a pull request and `just verify` on dev.
 test:
+    bun run check:generated
+    bun run test
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo test --locked --workspace
 
 ci-extras:
     cargo audit --deny warnings
-    just ts-check
 
 ci-policy:
     cargo deny --locked check licenses sources
@@ -67,9 +69,4 @@ ci-policy:
 ci-build:
     cargo build --locked --workspace --release
 
-verify:
-    just check
-    just test
-    just ci-policy
-    just ci-extras
-    just ci-build
+verify: check test ci-policy ci-extras ci-build
