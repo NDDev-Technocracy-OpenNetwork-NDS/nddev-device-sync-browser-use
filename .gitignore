@@ -2,3 +2,5 @@
 /node_modules/
 .nddev-reports/
 /dist/
+
+/ci-reports/
