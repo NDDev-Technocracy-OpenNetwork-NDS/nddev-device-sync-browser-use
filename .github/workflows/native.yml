@@ -21,7 +21,7 @@ jobs:
     steps:
       - name: Prepare the native job
         id: prepare
-        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/prepare@6cf64d17c08dfc75392c55784b872fe9a6056553 # v0.6.57
+        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/prepare@86d0117166c205c6b52c91e0f95c8deaf5a29137 # v0.6.59
         with:
           rust-version: 1.100.0
           rust-components: clippy,rustfmt
@@ -51,7 +51,7 @@ jobs:
         run: just browser-check
       - name: Complete the native job
         if: always()
-        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/complete@6cf64d17c08dfc75392c55784b872fe9a6056553 # v0.6.57
+        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/complete@86d0117166c205c6b52c91e0f95c8deaf5a29137 # v0.6.59
         with:
           status: ${{ job.status }}
           project-outcome: ${{ (steps.setup.outcome == 'failure' || steps.source.outcome == 'failure' || steps.tests.outcome == 'failure' || steps.chrome.outcome == 'failure' || steps.browser.outcome == 'failure') && 'failure' || 'success' }}
@@ -67,7 +67,7 @@ jobs:
     steps:
       - name: Prepare the native job
         id: prepare
-        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/prepare@6cf64d17c08dfc75392c55784b872fe9a6056553 # v0.6.57
+        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/prepare@86d0117166c205c6b52c91e0f95c8deaf5a29137 # v0.6.59
         with:
           rust-version: 1.100.0
           rust-components: clippy,rustfmt
@@ -116,7 +116,7 @@ jobs:
           NDS_TEST_HOST="$(cygpath -w "$PWD/target/debug/nds-browser-use.exe")" bun run e2e
       - name: Complete the native job
         if: always()
-        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/complete@6cf64d17c08dfc75392c55784b872fe9a6056553 # v0.6.57
+        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/complete@86d0117166c205c6b52c91e0f95c8deaf5a29137 # v0.6.59
         with:
           status: ${{ job.status }}
           project-outcome: ${{ (steps.setup.outcome == 'failure' || steps.source.outcome == 'failure' || steps.tests.outcome == 'failure' || steps.chrome.outcome == 'failure' || steps.browser.outcome == 'failure' || steps.refusal.outcome == 'failure') && 'failure' || 'success' }}
