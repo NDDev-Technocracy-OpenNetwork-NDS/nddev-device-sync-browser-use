@@ -49,17 +49,17 @@ jobs:
           Path('ci-reports').mkdir(exist_ok=True)
           Path('ci-reports/channel.json').write_text(json.dumps({'monitored_source':source,'channel':os.environ['CHANNEL'],'rust':rust,'bun':bun},indent=2)+'\n')
           PYPINS
-      - uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/telemetry@6bd06a55307dccfd7057c1c3260067eb8adc93a1 # v0.6.79
-      - uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/artifact-registry@6bd06a55307dccfd7057c1c3260067eb8adc93a1 # v0.6.79
+      - uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/telemetry@d9fbe93b75c105a99632ebbd9d70901404303acd # v0.6.80
+      - uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/artifact-registry@d9fbe93b75c105a99632ebbd9d70901404303acd # v0.6.80
       - name: Prepare the monitored source's runtimes and task runner
-        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/hosted-sdk@6bd06a55307dccfd7057c1c3260067eb8adc93a1 # v0.6.79
+        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/hosted-sdk@d9fbe93b75c105a99632ebbd9d70901404303acd # v0.6.80
         with:
           managed: "false"
           rust-version: ${{ steps.pins.outputs.rust }}
           rust-components: rustfmt,clippy
           bun-version: ${{ steps.pins.outputs.bun }}
           tools: just@1.59.0
-      - uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/hosted-cache@6bd06a55307dccfd7057c1c3260067eb8adc93a1 # v0.6.79
+      - uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/hosted-cache@d9fbe93b75c105a99632ebbd9d70901404303acd # v0.6.80
       - name: Prepare the monitored browser-check dependencies
         id: dependencies
         run: bun install --frozen-lockfile --ignore-scripts
@@ -101,7 +101,7 @@ jobs:
         run: just browser-check
       - name: Complete the monitored job
         if: always()
-        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/complete@6bd06a55307dccfd7057c1c3260067eb8adc93a1 # v0.6.79
+        uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/complete@d9fbe93b75c105a99632ebbd9d70901404303acd # v0.6.80
         with:
           status: ${{ job.status }}
           project-outcome: ${{ (steps.pins.outcome == 'failure' || steps.dependencies.outcome == 'failure' || steps.chrome.outcome == 'failure' || steps.browser.outcome == 'failure') && 'failure' || 'success' }}
