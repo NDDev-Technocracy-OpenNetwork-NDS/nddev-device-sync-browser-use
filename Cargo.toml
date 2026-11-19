@@ -20,7 +20,7 @@ thiserror = "2"
 [target.'cfg(any(unix, windows))'.dependencies]
 tracing = "0.1"
 nddev-device-sync-adapter-io = { version = "=0.0.1-alpha.4", git = "https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-agent", rev = "383b6a06b8500626cc12307ac4e2ae92f7d43c80" }
-nddev-device-sync-telemetry = { version = "=0.0.1-alpha.11", git = "https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-observability", rev = "c942a9ec95b11824d86e9842d2c0e3be340f3728" }
+nddev-device-sync-telemetry = { version = "=0.0.1-alpha.11", git = "https://github.com/NDDev-Technocracy-OpenNetwork-NDS/nddev-device-sync-observability", rev = "4f8c36ec4d54f1560ad39fc28b1f95c6bf763727" }
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
